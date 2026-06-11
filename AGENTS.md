@@ -1,0 +1,524 @@
+# MAILROID
+
+Your Mail App on Steroids.
+
+## Mission
+
+Reduce inbox overload and meeting management overhead.
+
+This is NOT a Gmail clone.
+
+Every feature should answer:
+
+"Does this save the user time compared to Gmail or Google Calendar?"
+
+AI should improve workflows rather than exist for marketing purposes.
+
+---
+
+# Project Goals
+
+Users can:
+
+* Connect Gmail
+* Connect Google Calendar
+* Search emails semantically
+* Send emails through chat
+* Schedule meetings through chat
+* View prioritized inboxes
+* Generate daily briefings
+
+---
+
+# Hackathon Requirements
+
+Mandatory
+
+* Gmail Integration through Corsair
+* Google Calendar Integration through Corsair
+
+Bonus
+
+* MCP Agent Chat
+* Realtime Webhooks
+* Priority Classification
+* Vector Search
+* Keyboard Shortcuts
+* Command Palette
+
+---
+
+# Repository Structure
+
+mailroid/
+│
+├── AGENTS.md
+├── README.md
+├── package.json
+├── turbo.json
+├── pnpm-workspace.yaml
+├── tsconfig.base.json
+├── .gitignore
+├── .env.example
+│
+├── docs/
+│   ├── architecture.md
+│   ├── workflows.md
+│   ├── requirements.md
+│   ├── database.md
+│   └── api.md
+│
+├── apps/
+│   │
+│   ├── web/
+│   │   ├── AGENTS.md
+│   │   ├── public/
+│   │   │
+│   │   ├── src/
+│   │   │   ├── app/
+│   │   │   │   ├── (auth)/
+│   │   │   │   ├── inbox/
+│   │   │   │   ├── calendar/
+│   │   │   │   ├── assistant/
+│   │   │   │   ├── settings/
+│   │   │   │   └── layout.tsx
+│   │   │   │
+│   │   │   ├── components/
+│   │   │   │   ├── inbox/
+│   │   │   │   ├── calendar/
+│   │   │   │   ├── assistant/
+│   │   │   │   ├── command-palette/
+│   │   │   │   └── ui/
+│   │   │   │
+│   │   │   ├── hooks/
+│   │   │   ├── lib/
+│   │   │   ├── providers/
+│   │   │   ├── store/
+│   │   │   ├── styles/
+│   │   │   └── trpc/
+│   │   │
+│   │   └── package.json
+│   │
+│   └── api/
+│       ├── AGENTS.md
+│       ├── src/
+│       │
+│       ├── routers/
+│       │   ├── auth.ts
+│       │   ├── gmail.ts
+│       │   ├── calendar.ts
+│       │   ├── assistant.ts
+│       │   ├── search.ts
+│       │   └── index.ts
+│       │
+│       ├── services/
+│       │   ├── gmail/
+│       │   ├── calendar/
+│       │   ├── assistant/
+│       │   ├── search/
+│       │   └── briefing/
+│       │
+│       ├── middleware/
+│       ├── lib/
+│       ├── trpc/
+│       ├── server.ts
+│       └── index.ts
+│
+├── packages/
+│   │
+│   ├── db/
+│   │   ├── src/
+│   │   │   ├── schema/
+│   │   │   │   ├── users.ts
+│   │   │   │   ├── emails.ts
+│   │   │   │   ├── calendar-events.ts
+│   │   │   │   └── daily-briefs.ts
+│   │   │   │
+│   │   │   ├── repositories/
+│   │   │   │   ├── email.repository.ts
+│   │   │   │   ├── calendar.repository.ts
+│   │   │   │   └── user.repository.ts
+│   │   │   │
+│   │   │   ├── migrations/
+│   │   │   ├── client.ts
+│   │   │   └── index.ts
+│   │   │
+│   │   └── package.json
+│   │
+│   ├── shared/
+│   │   ├── src/
+│   │   │   ├── types/
+│   │   │   ├── schemas/
+│   │   │   ├── constants/
+│   │   │   └── index.ts
+│   │   │
+│   │   └── package.json
+│   │
+│   ├── corsair/
+│   │   ├── src/
+│   │   │   ├── gmail/
+│   │   │   │   ├── connect.ts
+│   │   │   │   ├── send-email.ts
+│   │   │   │   ├── get-email.ts
+│   │   │   │   └── search.ts
+│   │   │   │
+│   │   │   ├── calendar/
+│   │   │   │   ├── create-event.ts
+│   │   │   │   ├── get-events.ts
+│   │   │   │   └── invite.ts
+│   │   │   │
+│   │   │   ├── webhooks/
+│   │   │   │   ├── gmail.ts
+│   │   │   │   └── calendar.ts
+│   │   │   │
+│   │   │   └── index.ts
+│   │   │
+│   │   └── package.json
+│   │
+│   ├── ai/
+│   │   ├── src/
+│   │   │   ├── agents/
+│   │   │   │   └── executive-assistant.ts
+│   │   │   │
+│   │   │   ├── prompts/
+│   │   │   │   ├── system.ts
+│   │   │   │   ├── briefing.ts
+│   │   │   │   └── priority.ts
+│   │   │   │
+│   │   │   ├── tools/
+│   │   │   │   ├── search-emails.ts
+│   │   │   │   ├── send-email.ts
+│   │   │   │   ├── create-event.ts
+│   │   │   │   └── get-events.ts
+│   │   │   │
+│   │   │   ├── embeddings/
+│   │   │   │   ├── generate.ts
+│   │   │   │   └── search.ts
+│   │   │   │
+│   │   │   └── index.ts
+│   │   │
+│   │   └── package.json
+│   │
+│   └── inngest/
+│       ├── src/
+│       │   ├── functions/
+│       │   │   ├── gmail-initial-sync.ts
+│       │   │   ├── email-received.ts
+│       │   │   ├── email-embed.ts
+│       │   │   ├── email-priority.ts
+│       │   │   └── daily-brief-generate.ts
+│       │   │
+│       │   ├── client.ts
+│       │   └── index.ts
+│       │
+│       └── package.json
+│
+└── .github/
+    └── workflows/
+        ├── ci.yml
+        └── deploy.yml
+
+---
+
+# Technology Decisions
+
+Frontend
+
+* Next.js
+* React
+* Tailwind
+* shadcn/ui
+* Framer Motion
+
+Backend
+
+* Express
+* tRPC
+
+Database
+
+* PostgreSQL
+* Drizzle
+* pgvector
+
+Authentication
+
+* BetterAuth
+
+AI
+
+* OpenAI Responses API
+* Tool Calling
+
+Integrations
+
+* Corsair Gmail
+* Corsair Calendar
+* Corsair MCP
+* Corsair Webhooks
+
+Background Jobs
+
+* Inngest
+
+---
+
+# Non Negotiables
+
+Do NOT replace:
+
+* Express
+* tRPC
+* PostgreSQL
+* Drizzle
+* pgvector
+* BetterAuth
+* Corsair
+* Inngest
+
+Do NOT suggest:
+
+* Prisma
+* MongoDB
+* Firebase
+* Supabase
+* Server Actions
+* LangGraph
+* CrewAI
+* BullMQ
+* Redis
+* Pinecone
+
+unless explicitly requested.
+
+---
+
+# Architecture Rules
+
+web
+-> api
+-> shared
+
+api
+-> db
+-> corsair
+-> ai
+-> inngest
+-> shared
+
+db
+-> shared
+
+corsair
+-> shared
+
+ai
+-> shared
+
+inngest
+-> shared
+
+shared
+-> nothing
+
+Avoid circular dependencies.
+
+---
+
+# Product Philosophy
+
+Prioritize:
+
+1. Workflow improvements
+2. Speed
+3. Simplicity
+4. Reliability
+
+Do not prioritize:
+
+* flashy AI
+* unnecessary abstraction
+* multi-agent systems
+* overengineering
+
+---
+
+# Core Features
+
+## Gmail
+
+Using Corsair:
+
+* Connect account
+* Read emails
+* Search emails
+* Send emails
+
+## Calendar
+
+Using Corsair:
+
+* View events
+* Create events
+* Send invites
+
+## Webhooks
+
+Using Corsair:
+
+New Email
+→ Webhook
+→ Store Email
+
+## Vector Search
+
+Using pgvector:
+
+Store
+
+* subject
+* body
+* sender
+* embedding
+
+Provide local semantic search.
+
+## Priority Inbox
+
+Email
+→ LLM
+→ Urgent | Important | Later
+
+Store classification in database.
+
+## Executive Assistant Chat
+
+Supported actions:
+
+* Search emails
+* Send emails
+* Create events
+* Read events
+
+Always use tools when available.
+
+Never hallucinate emails or calendar events.
+
+## Daily Briefing
+
+Generate:
+
+* Today's meetings
+* Priority emails
+* Recent context
+* Suggested actions
+
+Feature name:
+
+Prepare Me For Today
+
+---
+
+# Database Tables
+
+users
+
+* id
+* email
+
+emails
+
+* id
+* userId
+* gmailId
+* sender
+* subject
+* body
+* priority
+* receivedAt
+* embedding
+
+calendar_events
+
+* id
+* userId
+* eventId
+* title
+* startTime
+* endTime
+
+daily_briefs
+
+* id
+* userId
+* date
+* content
+
+---
+
+# Inngest Functions
+
+gmail.initial-sync
+
+* Fetch emails
+* Store emails
+* Generate embeddings
+
+email.received
+
+* Triggered from webhook
+* Store email
+
+email.embed
+
+* Generate embedding
+* Store vector
+
+email.priority
+
+* Classify priority
+
+daily-brief.generate
+
+* Meetings
+* Priority emails
+* Recent context
+
+Generate briefing
+
+---
+
+# Coding Standards
+
+* TypeScript strict mode
+* Zod validation
+* Prefer composition
+* Thin routers
+* Business logic in services
+* Reusable components
+* Explicit naming
+
+Avoid:
+
+* any
+* giant files
+* duplicated logic
+* premature abstractions
+
+---
+
+# AI Instructions
+
+Before implementing a feature:
+
+1. Check if the feature helps the user save time.
+2. Check if an existing package already owns the responsibility.
+3. Reuse existing types and schemas.
+4. Prefer simple solutions.
+
+When uncertain:
+
+Ask for clarification, Don't make assumptions.
+
+The goal is to ship a polished demo within 6 days.
+
