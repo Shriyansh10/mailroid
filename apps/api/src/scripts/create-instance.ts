@@ -1,13 +1,11 @@
-import * as cexports from "@repo/corsair";
+import {corsairClient} from "@repo/corsair";
 
-console.log("Exports from @repo/corsair:", cexports);
+async function main() {
+  const instance = await corsairClient.instances.create({
+    name: "mailroid",
+  });
 
-// // async function main() {
-// //   const instance = await corsairClient.instances.create({
-// //     name: "mailroid",
-// //   });
+  console.log(instance);
+}
 
-// //   console.log(instance);
-// // }
-
-// // main();
+main();

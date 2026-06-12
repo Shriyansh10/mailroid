@@ -1,7 +1,12 @@
 {
   "name": "@repo/logger",
   "version": "1.0.0",
-  "scripts": {},
+  "type": "module",
+  "main": "./index.ts",
+  "types": "./index.ts",
+  "exports": {
+    ".": "./index.ts"
+  },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",

@@ -515,6 +515,11 @@ Before implementing a feature:
 2. Check if an existing package already owns the responsibility.
 3. Reuse existing types and schemas.
 4. Prefer simple solutions.
+NodeNext everywhere
+"type": "module" everywhere
+".js" extensions everywhere
+import/export everywhere
+node --import tsx for development
 
 When uncertain:
 

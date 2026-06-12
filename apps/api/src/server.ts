@@ -8,10 +8,10 @@ import { apiReference } from "@scalar/express-api-reference";
 
 import { serverRouter, createContext } from "@repo/trpc/server";
 
-import { env } from "./env";
+import { env } from "./env.js";
 
-import { authHandler } from "./auth/handler";
-import { auth } from "./auth";
+import { authHandler } from "./auth/handler.js";
+import { auth } from "./auth/index.js";
 
 
 export const app = express();

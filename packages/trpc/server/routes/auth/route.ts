@@ -1,7 +1,7 @@
-import type { Context } from "../../context";
-import { z, zodUndefinedModel } from "../../schema";
-import { protectedProcedure, publicProcedure, router } from "../../trpc";
-import { generatePath } from "../../utils/path-generator";
+import type { Context } from "../../context.js";
+import { z, zodUndefinedModel } from "../../schema.js";
+import { protectedProcedure, publicProcedure, router } from "../../trpc.js";
+import { generatePath } from "../../utils/path-generator.js";
 import { getTenant } from "@repo/corsair";
 
 import { authOutputSchema } from "@repo/shared";

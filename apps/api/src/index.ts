@@ -1,8 +1,8 @@
 import http from "node:http";
 import { logger } from "@repo/logger";
-import { app as expressApplication } from "./server";
+import { app as expressApplication } from "./server.js";
 
-import { env } from "./env";
+import { env } from "./env.js";
 
 async function init() {
   try {

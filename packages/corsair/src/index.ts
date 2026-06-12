@@ -1,7 +1,5 @@
-import { corsairClient } from "./client";
+import { corsairClient } from "./client.js";
 
-export { corsair } from "./corsair.ts";
-export { getTenant } from "./tenant.ts";
+export { corsair } from "./corsair.js";
+export { getTenant } from "./tenant.js";
 export { corsairClient };
-
-console.log(corsairClient)

@@ -2,6 +2,11 @@
   "name": "@repo/trpc",
   "version": "1.0.0",
   "private": true,
+  "type": "module",
+  "exports": {
+    "./server": "./server/index.ts",
+    "./client": "./client/index.ts"
+  },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",

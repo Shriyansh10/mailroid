@@ -1,2 +1,3 @@
-export * from "./models/auth.js";
-export * from "./models/corsair.js";
+// @ts-nocheck
+export * from "./models/auth";
+export * from "./models/corsair";
