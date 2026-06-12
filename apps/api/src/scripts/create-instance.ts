@@ -1,11 +1,15 @@
 import {corsairClient} from "@repo/corsair";
 
 async function main() {
-  const instance = await corsairClient.instances.create({
-    name: "mailroid",
-  });
+    try {
+        const instance = await corsairClient.instances.create({
+        name: "mailroid",
+    });
 
-  console.log(instance);
+        console.log("Created:", instance);
+    } catch (error) {
+        console.error(error);
+    }
 }
 
 main();

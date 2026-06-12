@@ -1,5 +1,5 @@
 import "dotenv/config";
-import {  pool } from "@repo/database";
+import { pool } from "@repo/database";
 import { createCorsair } from "corsair";
 import { gmail } from "@corsair-dev/gmail";
 import { googlecalendar } from "@corsair-dev/googlecalendar";
