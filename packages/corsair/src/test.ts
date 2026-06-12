@@ -1,10 +1,2 @@
-import 'dotenv/config';
-import { corsair } from "./index";
-
-const main = async () => {
-    const res = await corsair.withTenant('xyz')
-    console.log(res)
-}
-
-
-main();
+import { createClient } from "@corsair-dev/app";
+console.log("Creating instance...", createClient);

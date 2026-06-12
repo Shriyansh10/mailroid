@@ -1,3 +1,4 @@
-import { auth } from "./auth";
+import { auth, Session, User} from "./auth";
 
 export { auth };
+export type { Session, User };

@@ -16,10 +16,12 @@ export const protectedProcedure = publicProcedure.use(async ({ ctx, next }) => {
     });
   }
 
+  const { user , session} = ctx;
+
   return next({
     ctx: {
-      ...ctx,
-      user: ctx.session.user,
+      session,
+      user,
     },
   });
 });

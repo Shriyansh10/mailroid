@@ -10,6 +10,8 @@
   },
   "dependencies": {
     "@repo/services": "workspace:*",
+    "@repo/corsair": "workspace:*",
+    "@repo/shared": "workspace:*",
     "@trpc/client": "^11.8.1",
     "@trpc/server": "^11.8.1",
     "trpc-to-openapi": "^3.1.0",

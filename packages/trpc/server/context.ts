@@ -1,10 +1,11 @@
 import type { CreateExpressContextOptions } from "@trpc/server/adapters/express";
+import type { SessionType, UserType } from "@repo/shared";
 
 interface AuthInstance {
   api: {
     getSession: (opts: {
       headers: Headers;
-    }) => Promise<{ session: unknown; user: unknown } | null>;
+    }) => Promise<{ session: SessionType; user: UserType } | null>;
   };
 }
 
@@ -23,8 +24,14 @@ export const createContext =
     const session = await authInstance.api.getSession({
       headers,
     });
+    if(session && session.session) {
+        return { session: session.session , user: session.user }
+    }
 
-    return { session };
+    return {
+        session: null,
+        user: null,
+    }
   };;
 
 export type Context = Awaited<ReturnType<ReturnType<typeof createContext>>>;

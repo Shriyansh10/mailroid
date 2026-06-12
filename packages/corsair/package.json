@@ -8,6 +8,7 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@corsair-dev/app": "^0.1.5",
     "@corsair-dev/cli": "^0.1.19",
     "@corsair-dev/gmail": "^0.1.4",
     "@corsair-dev/googlecalendar": "^0.1.3",
