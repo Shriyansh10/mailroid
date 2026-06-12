@@ -3,7 +3,7 @@
   "compilerOptions": {
     "baseUrl": ".",
     "paths": {
-      "~/*": ["./*"]
+      "@web/*": ["./*"]
     },
     "plugins": [
       {
@@ -17,6 +17,6 @@
     "next-env.d.ts",
     "next.config.js",
     ".next/types/**/*.ts"
-  ],
+, "app/(auth)/signin"  ],
   "exclude": ["node_modules"]
 }

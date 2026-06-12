@@ -1,19 +1,28 @@
 import { z, zodUndefinedModel } from "../../schema";
-import { userService } from "../../services";
-import { getAuthenticationMethodOutputSchema } from "@repo/services/user/model";
-import { publicProcedure, router } from "../../trpc";
+import { protectedProcedure, publicProcedure, router } from "../../trpc";
 import { generatePath } from "../../utils/path-generator";
 
 const TAGS = ["Authentication"];
 const getPath = generatePath("/authentication");
 
 export const authRouter = router({
-  getSupportedAuthenticationProviders: publicProcedure
-    .meta({ openapi: { method: "GET", path: getPath("/supported-providers"), tags: TAGS } })
+  getEmails: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/get-emails"),
+        tags: TAGS,
+      },
+    })
     .input(zodUndefinedModel)
-    .output(z.readonly(z.array(getAuthenticationMethodOutputSchema)))
-    .query(async () => {
-      const supportedMethods = await userService.getAuthenticationMethods();
-      return supportedMethods;
+    .output(
+      z.object({
+        session: z.unknown(),
+        user: z.unknown(),
+      }),
+    )
+    .query(({ ctx }) => {
+      const { session, user } = ctx;
+      return { session, user };
     }),
 });

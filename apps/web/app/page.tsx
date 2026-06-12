@@ -1,7 +1,10 @@
-import { api } from "~/trpc/server";
+import { api } from "@web/trpc/server";
+
 
 export default async function Home() {
   const {message} = await api.chaicode.query({email: 'agarwalshriyansh007@gmail.com'})
+
+
 
 
   return (

@@ -522,3 +522,55 @@ Ask for clarification, Don't make assumptions.
 
 The goal is to ship a polished demo within 6 days.
 
+---
+
+## Completed
+
+### Day 1
+
+#### Database
+- PostgreSQL running in Docker
+- Drizzle configured
+- BetterAuth schema generated
+- BetterAuth migrations applied
+
+#### Authentication
+- BetterAuth integrated with Drizzle
+- Google OAuth configured
+- BetterAuth mounted on Express
+- Session endpoint working
+- Google sign-in working
+- User creation verified
+- Account creation verified
+- Session creation verified
+- Redirect authenticated users to frontend after login
+
+#### Monorepo
+- TurboRepo configured
+- Shared database package created
+- tRPC package configured
+
+
+## Next
+
+### Authentication
+- Add auth client provider
+- Add protected routes
+
+### Corsair
+- Connect Gmail account
+- Connect Google Calendar account
+- Store Corsair connection per user
+
+### Database
+- Design email sync tables
+- Design calendar sync tables
+- Add pgvector support
+
+### Inbox
+- First Gmail sync
+- Display inbox data
+
+### Calendar
+- First Calendar sync
+- Display upcoming events

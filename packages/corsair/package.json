@@ -1,0 +1,19 @@
+{
+  "name": "@repo/corsair",
+  "version": "1.0.0",
+  "private": true,
+  "devDependencies": {
+    "@repo/eslint-config": "workspace:*",
+    "@repo/typescript-config": "workspace:*",
+    "typescript": "^5.9.3"
+  },
+  "dependencies": {
+    "@corsair-dev/cli": "^0.1.19",
+    "@corsair-dev/gmail": "^0.1.4",
+    "@corsair-dev/googlecalendar": "^0.1.3",
+    "@repo/database": "workspace:*",
+    "corsair": "0.1.76",
+    "dotenv": "^17.2.3",
+    "zod": "^4.3.5"
+  }
+}

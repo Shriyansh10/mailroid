@@ -5,8 +5,15 @@
     {
       "idx": 0,
       "version": "7",
-      "when": 1767592965691,
-      "tag": "0000_dusty_morg",
+      "when": 1781251168154,
+      "tag": "0000_young_madelyne_pryor",
+      "breakpoints": true
+    },
+    {
+      "idx": 1,
+      "version": "7",
+      "when": 1781251207450,
+      "tag": "0001_third_champions",
       "breakpoints": true
     }
   ]

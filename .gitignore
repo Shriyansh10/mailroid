@@ -37,4 +37,5 @@ yarn-error.log*
 .DS_Store
 *.pem
 
-trpc-monorepo-main.*
+*.zip
+chatgpt*

@@ -1,0 +1,9 @@
+// apps/web/src/lib/auth-client.ts
+
+import { createAuthClient } from "better-auth/react";
+
+export const authClient = createAuthClient({
+  baseURL: "http://localhost:8000",
+});
+
+export const { useSession, signIn, signOut, getSession } = authClient;
