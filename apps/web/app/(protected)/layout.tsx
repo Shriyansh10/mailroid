@@ -12,7 +12,7 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
 
   useEffect(() => {
     if (!isPending && !data) {
-      router.replace("/signin");
+      router.replace("/sign-in");
     }
   }, [data, isPending, router]);
 
@@ -23,6 +23,10 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   if (!data) {
     return null;
   }
+
+  if(data) {
+    console.log("User session data:", data);
+    }
 
   return <>{children}</>;
 }

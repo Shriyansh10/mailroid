@@ -4,7 +4,6 @@ import { createCorsair } from "corsair";
 import { gmail } from "@corsair-dev/gmail";
 import { googlecalendar } from "@corsair-dev/googlecalendar";
 
-console.log(pool)
 export const corsair = createCorsair({
   plugins: [gmail(), googlecalendar()],
   database: pool,

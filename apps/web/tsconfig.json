@@ -17,6 +17,6 @@
     "next-env.d.ts",
     "next.config.js",
     ".next/types/**/*.ts"
-, "app/(auth)/signin"  ],
+, "app/(auth)/sign-in"  ],
   "exclude": ["node_modules"]
 }

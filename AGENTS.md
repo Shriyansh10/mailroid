@@ -522,17 +522,21 @@ Ask for clarification, Don't make assumptions.
 
 The goal is to ship a polished demo within 6 days.
 
+### Corsair Learnings
+
+- Corsair credentials are configured once at the instance level.
+- Mailroid users do not run Corsair CLI commands.
+- Every BetterAuth user maps to a Corsair tenant.
+- OAuth credentials are stored by Corsair.
+- Gmail and Calendar connections are isolated per tenant.
+- Connect Link is the preferred production authentication flow.
+- CLI auth commands are development helpers and should not be triggered from the application.
+
 ---
 
 ## Completed
 
 ### Day 1
-
-#### Database
-- PostgreSQL running in Docker
-- Drizzle configured
-- BetterAuth schema generated
-- BetterAuth migrations applied
 
 #### Authentication
 - BetterAuth integrated with Drizzle
@@ -544,33 +548,18 @@ The goal is to ship a polished demo within 6 days.
 - Account creation verified
 - Session creation verified
 - Redirect authenticated users to frontend after login
-
-#### Monorepo
-- TurboRepo configured
-- Shared database package created
-- tRPC package configured
-
-
-## Next
+- Protected routes implemented
+- tRPC auth context implemented
+- Protected procedures implemented
 
 ### Authentication
-- Add auth client provider
-- Add protected routes
+- Add session-aware layouts and route guards where required
 
 ### Corsair
-- Connect Gmail account
-- Connect Google Calendar account
-- Store Corsair connection per user
-
-### Database
-- Design email sync tables
-- Design calendar sync tables
-- Add pgvector support
-
-### Inbox
-- First Gmail sync
-- Display inbox data
-
-### Calendar
-- First Calendar sync
-- Display upcoming events
+- Create tenant for each Mailroid user
+- Implement ensureTenant() helper
+- Generate Connect Link from backend
+- Build Connect Accounts flow in Settings page
+- Connect Gmail account through Corsair Connect Link
+- Connect Google Calendar account through Corsair Connect Link
+- Store tenant metadata and connection metadata per user
