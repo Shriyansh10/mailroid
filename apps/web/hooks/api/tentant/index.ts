@@ -18,7 +18,7 @@ export const useCreateTenant = () => {
 
     // todo - add onSuccess callback to invalidate tenant queries and refetch tenant data
   } = trpc.auth.createTenant.useMutation();
-  
+
   return {
     createTenantAsync: createTenantAsync,
     createTenant,
@@ -59,6 +59,28 @@ export const useAuthorizePlugins = () => {
     isIdle,
     isSuccess,
     reset,
+    status,
+  };
+};
+
+export const useGetGmailOAuthUrl = () => {
+  const {
+    mutateAsync: getGmailOAuthUrlAsync,
+    mutate: getGmailOAuthUrl,
+    error,
+    isError,
+    isIdle,
+    isSuccess,
+    status,
+  } = trpc.auth.getGmailOAuthUrl.useMutation();
+
+  return {
+    getGmailOAuthUrlAsync,
+    getGmailOAuthUrl,
+    error,
+    isError,
+    isIdle,
+    isSuccess,
     status,
   };
 };

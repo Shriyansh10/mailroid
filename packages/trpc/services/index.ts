@@ -1,3 +1,3 @@
-import {ensureTenant, authorizePlugins  } from "@repo/services/tenant/index.js";
+import {ensureTenant, authorizePlugins, getGmailOAuthUrl, processGmailOAuthCallback } from "@repo/services/tenant/index.js";
 
-export { ensureTenant, authorizePlugins };
+export { ensureTenant, authorizePlugins, getGmailOAuthUrl, processGmailOAuthCallback };

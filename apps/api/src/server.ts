@@ -12,6 +12,7 @@ import { env } from "./env.js";
 
 import { authHandler } from "./auth/handler.js";
 import { auth } from "./auth/index.js";
+import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 
 
 export const app = express();
@@ -41,6 +42,7 @@ app.get("/health", (req, res) => {
   return res.json({ message: "Streamyst server is healthy", healthy: true });
 });
 
+app.use("/api/auth/gmail-callback", gmailOAuthRouter);
 app.use("/api/auth", authHandler);
 
 logger.debug(`openapi.json: ${env.BASE_URL}/openapi.json`);

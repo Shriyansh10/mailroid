@@ -4,3 +4,9 @@ import { z } from "zod";
 export const authorizePluginsOutputModel = z.object({
   url: z.string().describe("The URL to authorize plugins for the tenant"),
 });
+
+// Output schema for the Gmail OAuth URL generation
+export const getGmailOAuthUrlOutputModel = z.object({
+  url: z.string().url().describe("The Gmail OAuth authorization URL"),
+  state: z.string().describe("HMAC-signed state parameter for callback verification"),
+});

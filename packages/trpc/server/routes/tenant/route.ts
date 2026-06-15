@@ -2,12 +2,12 @@ import type { Context } from "../../context.js";
 import { z, zodUndefinedModel } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
-import { getTenant } from "@repo/corsair";
+import { getTenant, corsairClient } from "@repo/corsair";
 
 import { authOutputSchema } from "@repo/shared";
-import { authorizePlugins, ensureTenant } from "../../../services/index.js";
+import { authorizePlugins, ensureTenant, getGmailOAuthUrl } from "../../../services/index.js";
 
-import { authorizePluginsOutputModel} from "./models.js";
+import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel } from "./models.js";
 
 const TAGS = ["Tenants"];
 const getPath = generatePath("/tenants");
@@ -22,18 +22,15 @@ export const authRouter = router({
       },
     })
     .input(zodUndefinedModel)
-    .output(authOutputSchema)
+    .output(z.object({ 
+        token: z.string().nullable()
+    }))
     .query(async ({ ctx }) => {
         const tenant = getTenant(ctx.user.id);
-        console.log("Fetching emails for user:", tenant.gmail.keys);
-        try {
-            
-        console.log("Tenant Gmail API:", await tenant.gmail.api.messages.list());
-        const result = await tenant.gmail.api.messages.list();
-        return result;
-        } catch (error) {
-            console.error("Error fetching emails:", error);
-        }
+        console.log("STARTING GMAIL DEBUG");
+        const token = await tenant.gmail.keys.get_access_token();
+        console.log('GMAIL MESSAGES:', await tenant.gmail.api.messages.list());
+        return { token: token ?? null };
     }),
 
     createTenant: protectedProcedure
@@ -71,4 +68,17 @@ export const authRouter = router({
     };
     
   }),
+
+  getGmailOAuthUrl: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/gmail-oauth-url"),
+        tags: TAGS,
+      },
+    })
+    .output(getGmailOAuthUrlOutputModel)
+    .mutation(async ({ ctx }: { ctx: Context }) => {
+      return getGmailOAuthUrl(ctx.user!.id);
+    }),
 });

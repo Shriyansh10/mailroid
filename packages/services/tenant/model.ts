@@ -26,3 +26,14 @@ export const authorizePluginsOutput = z.object({
 });
 
 export type AuthorizePluginsOutputType = z.infer<typeof authorizePluginsOutput>;
+
+/**
+ * Output schema for generating a Gmail OAuth authorization URL.
+ * Uses the Corsair SDK (not Corsair App) — tokens land directly in local DB.
+ */
+export const getGmailOAuthUrlOutput = z.object({
+  url: z.string().describe("The Gmail OAuth authorization URL"),
+  state: z.string().describe("HMAC-signed state parameter (verify in callback)"),
+});
+
+export type GetGmailOAuthUrlOutput = z.infer<typeof getGmailOAuthUrlOutput>;
