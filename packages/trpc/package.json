@@ -5,7 +5,8 @@
   "type": "module",
   "exports": {
     "./server": "./server/index.ts",
-    "./client": "./client/index.ts"
+    "./client": "./client/index.ts",
+    "./services": "./services/index.ts"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

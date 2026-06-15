@@ -1,12 +1,27 @@
 
-import React from "react";
+import { redirect } from "next/navigation";
+import { cookies, headers } from "next/headers";
 
-export default function Home() {
+export default async function Home() {
+  const cookieStore = await cookies();
+  const heads = await headers();
 
-    return (
-        <div>
-            <h1>Welcome to the Home Page</h1>
-            <p>Please sign in to continue.</p>
-        </div>
-    );
+  const res = await fetch("http://localhost:8000/api/auth/get-session", {
+    headers: {
+      ...Object.fromEntries(heads.entries()),
+      Cookie: cookieStore
+        .getAll()
+        .map((c) => `${c.name}=${c.value}`)
+        .join("; "),
+    },
+    cache: "no-store",
+  });
+
+  const session = await res.json().catch(() => null);
+
+  if (session?.user) {
+    redirect("/onboarding");
+  }
+
+  redirect("/sign-in");
 }

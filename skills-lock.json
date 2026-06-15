@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "skills": {
+    "corsair": {
+      "source": "corsairdev/corsair",
+      "sourceType": "github",
+      "skillPath": "skills/corsair/SKILL.md",
+      "computedHash": "1035052660d4ed4ee1f10719f2d40af0a902d735a5da3744ae8d220f3d889f93"
+    }
+  }
+}
