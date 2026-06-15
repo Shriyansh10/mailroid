@@ -15,6 +15,13 @@
       "when": 1781251207450,
       "tag": "0001_third_champions",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1781522148978,
+      "tag": "0002_wakeful_black_knight",
+      "breakpoints": true
     }
   ]
 }

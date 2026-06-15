@@ -2,12 +2,12 @@ import type { Context } from "../../context.js";
 import { z, zodUndefinedModel } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
-import { getTenant, corsairClient } from "@repo/corsair";
+import { corsair, getTenant } from "@repo/corsair";
 
 import { authOutputSchema } from "@repo/shared";
-import { authorizePlugins, ensureTenant, getGmailOAuthUrl } from "../../../services/index.js";
+import { authorizePlugins, ensureTenant, getGmailOAuthUrl, getCalendarOAuthUrl, getConnectedPlugins, getConnectedAccounts } from "../../../services/index.js";
 
-import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel } from "./models.js";
+import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel, getCalendarOAuthUrlOutputModel, connectedPluginsOutputModel, connectedAccountsOutputModel } from "./models.js";
 
 const TAGS = ["Tenants"];
 const getPath = generatePath("/tenants");
@@ -26,11 +26,17 @@ export const authRouter = router({
         token: z.string().nullable()
     }))
     .query(async ({ ctx }) => {
-        const tenant = getTenant(ctx.user.id);
+        const tenant = corsair.withTenant(ctx.user.id);
         console.log("STARTING GMAIL DEBUG");
-        const token = await tenant.gmail.keys.get_access_token();
-        console.log('GMAIL MESSAGES:', await tenant.gmail.api.messages.list());
-        return { token: token ?? null };
+        const messages = await tenant.gmail.api.messages.list();
+        console.log('Messages', messages)
+        console.log("GMAIL MESSAGES:", messages.messages[0].threadId);
+        const message = await tenant.gmail.api.messages.get({
+  id: messages.messages[0].threadId!,
+  format: "full",
+});
+        console.log(message)
+        return { token: 'ok' };
     }),
 
     createTenant: protectedProcedure
@@ -80,5 +86,45 @@ export const authRouter = router({
     .output(getGmailOAuthUrlOutputModel)
     .mutation(async ({ ctx }: { ctx: Context }) => {
       return getGmailOAuthUrl(ctx.user!.id);
+    }),
+
+  getCalendarOAuthUrl: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/calendar-oauth-url"),
+        tags: TAGS,
+      },
+    })
+    .output(getCalendarOAuthUrlOutputModel)
+    .mutation(async ({ ctx }: { ctx: Context }) => {
+      return getCalendarOAuthUrl(ctx.user!.id);
+    }),
+
+  getConnectedPlugins: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/connected-plugins"),
+        tags: TAGS,
+      },
+    })
+    .output(connectedPluginsOutputModel)
+    .query(async ({ ctx }: { ctx: Context }) => {
+      return getConnectedPlugins(ctx.user!.id);
+    }),
+
+  getConnectedAccounts: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/connected-accounts"),
+        tags: TAGS,
+      },
+    })
+    .input(zodUndefinedModel)
+    .output(connectedAccountsOutputModel)
+    .query(async ({ ctx }: { ctx: Context }) => {
+      return getConnectedAccounts(ctx.user!.id, ctx.user!.email);
     }),
 });

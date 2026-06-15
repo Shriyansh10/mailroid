@@ -13,6 +13,7 @@ import { env } from "./env.js";
 import { authHandler } from "./auth/handler.js";
 import { auth } from "./auth/index.js";
 import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
+import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 
 
 export const app = express();
@@ -43,6 +44,7 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/auth/gmail-callback", gmailOAuthRouter);
+app.use("/api/auth/calendar-callback", calendarOAuthRouter);
 app.use("/api/auth", authHandler);
 
 logger.debug(`openapi.json: ${env.BASE_URL}/openapi.json`);
