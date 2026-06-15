@@ -2,7 +2,7 @@ import { publicProcedure, router } from "./trpc.js";
 import { z } from "zod";
 
 import { healthRouter } from "./routes/health/route.js";
-import { authRouter } from "./routes/auth/route.js";
+import { authRouter } from "./routes/tenant/route.js";
 
 export const serverRouter = router({
   health: healthRouter,

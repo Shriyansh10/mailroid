@@ -1,17 +1,12 @@
-import { api } from "@web/trpc/server";
 
+import React from "react";
 
-export default async function Home() {
-  const {message} = await api.chaicode.query({email: 'agarwalshriyansh007@gmail.com'})
+export default function Home() {
 
-
-
-
-  return (
-    <main className="min-h-screen min-w-screen flex justify-center items-center">
-      <div>
-        <h2>Server Message: {message}</h2>
-      </div>
-    </main>
-  );
+    return (
+        <div>
+            <h1>Welcome to the Home Page</h1>
+            <p>Please sign in to continue.</p>
+        </div>
+    );
 }
