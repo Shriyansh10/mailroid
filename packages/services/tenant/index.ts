@@ -1,10 +1,11 @@
 import { corsairInstanceIdEnv, googleClientKeysEnv } from '../env.js'
 import { corsairClient,corsair } from "@repo/corsair";
-import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, type GetGmailOAuthUrlOutput, type GetCalendarOAuthUrlOutput, type ConnectedPluginsOutput, type ConnectedAccountsOutput} from "./model.js";
+import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, type GetGmailOAuthUrlOutput, type GetCalendarOAuthUrlOutput, type ConnectedPluginsOutput, type ConnectedAccountsOutput, type GetAccountsExistOutput } from "./model.js";
 import { setupCorsair } from "corsair";
 import { generateOAuthUrl, processOAuthCallback } from "corsair/oauth";
-import { db, eq} from "@repo/database";
-import {corsairConnectionEmails} from "@repo/database/models/corsair-connections";  
+import { db, eq } from "@repo/database";
+import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
+import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
     const { userId:parseduserId } = await ensureTenantInput.parseAsync({ userId });
@@ -246,6 +247,25 @@ export async function getConnectedAccounts(
     calendarEmail: row?.calendarEmail ?? null,
     gmailConnected: plugins.gmail,
     calendarConnected: plugins.googlecalendar,
+  };
+}
+
+/**
+ * Checks corsair_accounts + corsair_integrations directly (no SDK, no token checks)
+ * to determine if Gmail and/or Calendar accounts exist for this tenant.
+ */
+export async function getAccountsExist(userId: string): Promise<GetAccountsExistOutput> {
+  const rows = await db
+    .select({ name: corsairIntegrations.name })
+    .from(corsairAccounts)
+    .innerJoin(corsairIntegrations, eq(corsairAccounts.integrationId, corsairIntegrations.id))
+    .where(eq(corsairAccounts.tenantId, userId));
+
+  const names = new Set(rows.map((r) => r.name));
+
+  return {
+    gmail: names.has("gmail"),
+    calendar: names.has("googlecalendar"),
   };
 }
 
