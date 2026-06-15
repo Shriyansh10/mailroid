@@ -1,8 +1,10 @@
 import { corsairInstanceIdEnv, googleClientKeysEnv } from '../env.js'
 import { corsairClient,corsair } from "@repo/corsair";
-import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, authorizePluginsOutput, type GetGmailOAuthUrlOutput} from "./model.js";
+import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, type GetGmailOAuthUrlOutput, type GetCalendarOAuthUrlOutput, type ConnectedPluginsOutput, type ConnectedAccountsOutput} from "./model.js";
 import { setupCorsair } from "corsair";
 import { generateOAuthUrl, processOAuthCallback } from "corsair/oauth";
+import { db, eq} from "@repo/database";
+import {corsairConnectionEmails} from "@repo/database/models/corsair-connections";  
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
     const { userId:parseduserId } = await ensureTenantInput.parseAsync({ userId });
@@ -93,30 +95,173 @@ export async function getGmailOAuthUrl(userId: string): Promise<GetGmailOAuthUrl
 }
 
 /**
- * Processes the Gmail OAuth callback — exchanges the authorization code
- * for access/refresh tokens and stores them encrypted in the local database.
+ * Generates a Calendar OAuth authorization URL using the Corsair SDK.
  *
- * This is the final step of the SDK OAuth flow. After this call:
- * - corsair_accounts.config will contain the encrypted tokens
- * - tenant.gmail.api.* calls will work with automatic token refresh
- *
- * @param code  - The authorization code from Google's redirect query string
- * @param state - The state parameter from Google's redirect query string
- * @returns { plugin, tenantId } — which plugin was authorized for which tenant
+ * @param userId - The user's ID (tenant ID).
+ * @returns { url, state } — redirect URL and HMAC-signed state parameter.
  */
-export async function processGmailOAuthCallback(
-  code: string,
-  state: string,
-): Promise<{ plugin: string; tenantId: string }> {
+export async function getCalendarOAuthUrl(userId: string): Promise<GetCalendarOAuthUrlOutput> {
   const callbackUrl =
-    process.env.GMAIL_OAUTH_CALLBACK_URL ??
-    "http://localhost:8000/api/auth/gmail-callback";
+    process.env.CALENDAR_OAUTH_CALLBACK_URL ??
+    "http://localhost:8000/api/auth/calendar-callback";
 
-  const result = await processOAuthCallback(corsair, {
-    code,
-    state,
+  const { url, state } = await generateOAuthUrl(corsair, "googlecalendar", {
+    tenantId: userId,
     redirectUri: callbackUrl,
   });
 
-  return result;
+  return { url, state };
+}
+
+/**
+ * Shared helper — exchanges the OAuth code for any plugin and stores tokens
+ * encrypted in the local database.
+ */
+export async function processOAuthCallbackForPlugin(
+  code: string,
+  state: string,
+  callbackUrl: string,
+): Promise<{ plugin: string; tenantId: string }> {
+  return processOAuthCallback(corsair, { code, state, redirectUri: callbackUrl });
+}
+
+/**
+ * Checks which plugins have valid OAuth tokens for the given tenant.
+ */
+export async function getConnectedPlugins(userId: string): Promise<ConnectedPluginsOutput> {
+  const tenant = corsair.withTenant(userId);
+
+  const [gmailToken, calendarToken] = await Promise.all([
+    tenant.gmail.keys.get_access_token().catch(() => null),
+    tenant.googlecalendar.keys.get_access_token().catch(() => null),
+  ]);
+
+  return {
+    gmail: gmailToken !== null,
+    googlecalendar: calendarToken !== null,
+  };
+}
+
+/**
+ * After Gmail OAuth succeeds, fetch the connected Google account email
+ * and persist it in the database.
+ */
+export async function storeGmailConnectedEmail(userId: string): Promise<string | null> {
+  console.log("[storeGmailConnectedEmail] START userId:", userId);
+  try {
+    const tenant = corsair.withTenant(userId);
+
+    // The Corsair-wrapped Gmail token doesn't work with userinfo.
+    // Use the Gmail API's native getProfile instead.
+    const profile = await tenant.gmail.api.users.getProfile({ userId: "me" });
+    console.log("[storeGmailConnectedEmail] profile:", JSON.stringify(profile));
+
+    const email = profile.emailAddress;
+    if (!email) {
+      console.log("[storeGmailConnectedEmail] ❌ no email in profile");
+      return null;
+    }
+
+    await db
+      .insert(corsairConnectionEmails)
+      .values({ userId, gmailEmail: email })
+      .onConflictDoUpdate({
+        target: corsairConnectionEmails.userId,
+        set: { gmailEmail: email, updatedAt: new Date() },
+      });
+
+    console.log("[storeGmailConnectedEmail] ✅ stored:", email);
+    return email;
+  } catch (err) {
+    console.error("[storeGmailConnectedEmail] ❌ FAILED:", err);
+    return null;
+  }
+}
+
+/**
+ * After Calendar OAuth succeeds, fetch the connected Google account email.
+ *
+ * Uses the Calendar API's calendarList to get the primary calendar ID,
+ * which is the user's email address.
+ */
+export async function storeCalendarConnectedEmail(userId: string): Promise<string | null> {
+  console.log("[storeCalendarConnectedEmail] START userId:", userId);
+  try {
+    const tenant = corsair.withTenant(userId);
+    const calendarList = await tenant.googlecalendar.api.calendarList.list();
+    console.log("[storeCalendarConnectedEmail] list:", JSON.stringify(calendarList));
+
+    const primaryCalendar = calendarList.items?.find(
+      (c: { primary?: boolean; id?: string }) => c.primary,
+    );
+    const email = primaryCalendar?.id ?? null;
+
+    if (!email) {
+      console.log("[storeCalendarConnectedEmail] ❌ no primary calendar found");
+      return null;
+    }
+
+    await db
+      .insert(corsairConnectionEmails)
+      .values({ userId, calendarEmail: email })
+      .onConflictDoUpdate({
+        target: corsairConnectionEmails.userId,
+        set: { calendarEmail: email, updatedAt: new Date() },
+      });
+
+    console.log("[storeCalendarConnectedEmail] ✅ stored:", email);
+    return email;
+  } catch (err) {
+    console.error("[storeCalendarConnectedEmail] ❌ FAILED:", err);
+    return null;
+  }
+}
+
+/**
+ * Returns the full connected-account snapshot used by the onboarding page.
+ *
+ * Includes:
+ *  - The BetterAuth login email
+ *  - The Gmail-connected email (if any)
+ *  - The Calendar-connected email (if any)
+ *  - Boolean flags for token presence
+ */
+export async function getConnectedAccounts(
+  userId: string,
+  betterAuthEmail: string,
+): Promise<ConnectedAccountsOutput> {
+  const plugins = await getConnectedPlugins(userId);
+
+  const [row] = await db
+    .select({
+      gmailEmail: corsairConnectionEmails.gmailEmail,
+      calendarEmail: corsairConnectionEmails.calendarEmail,
+    })
+    .from(corsairConnectionEmails)
+    .where(eq(corsairConnectionEmails.userId, userId));
+
+  return {
+    betterAuthEmail,
+    gmailEmail: row?.gmailEmail ?? null,
+    calendarEmail: row?.calendarEmail ?? null,
+    gmailConnected: plugins.gmail,
+    calendarConnected: plugins.googlecalendar,
+  };
+}
+
+/**
+ * Clears a specific connection email so the user can reconnect.
+ */
+export async function clearConnectionEmail(
+  userId: string,
+  plugin: "gmail" | "googlecalendar",
+): Promise<void> {
+  const field = plugin === "gmail"
+    ? { gmailEmail: null as string | null }
+    : { calendarEmail: null as string | null };
+
+  await db
+    .update(corsairConnectionEmails)
+    .set({ ...field, updatedAt: new Date() })
+    .where(eq(corsairConnectionEmails.userId, userId));
 }

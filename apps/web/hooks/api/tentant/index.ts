@@ -85,3 +85,25 @@ export const useGetGmailOAuthUrl = () => {
   };
 };
 
+export const useGetCalendarOAuthUrl = () => {
+  const {
+    mutateAsync: getCalendarOAuthUrlAsync,
+    mutate: getCalendarOAuthUrl,
+    error,
+    isError,
+    isIdle,
+    isSuccess,
+    status,
+  } = trpc.auth.getCalendarOAuthUrl.useMutation();
+
+  return {
+    getCalendarOAuthUrlAsync,
+    getCalendarOAuthUrl,
+    error,
+    isError,
+    isIdle,
+    isSuccess,
+    status,
+  };
+};
+
