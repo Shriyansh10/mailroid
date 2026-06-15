@@ -57,160 +57,106 @@ mailroid/
 ├── package.json
 ├── turbo.json
 ├── pnpm-workspace.yaml
-├── tsconfig.base.json
 ├── .gitignore
-├── .env.example
-│
-├── docs/
-│   ├── architecture.md
-│   ├── workflows.md
-│   ├── requirements.md
-│   ├── database.md
-│   └── api.md
 │
 ├── apps/
 │   │
 │   ├── web/
 │   │   ├── AGENTS.md
 │   │   ├── public/
-│   │   │
-│   │   ├── src/
-│   │   │   ├── app/
-│   │   │   │   ├── (auth)/
-│   │   │   │   ├── inbox/
+│   │   ├── app/
+│   │   │   ├── (auth)/
+│   │   │   ├── (protected)/
 │   │   │   │   ├── calendar/
-│   │   │   │   ├── assistant/
-│   │   │   │   ├── settings/
-│   │   │   │   └── layout.tsx
-│   │   │   │
-│   │   │   ├── components/
+│   │   │   │   ├── dashboard/
 │   │   │   │   ├── inbox/
-│   │   │   │   ├── calendar/
-│   │   │   │   ├── assistant/
-│   │   │   │   ├── command-palette/
-│   │   │   │   └── ui/
-│   │   │   │
-│   │   │   ├── hooks/
-│   │   │   ├── lib/
-│   │   │   ├── providers/
-│   │   │   ├── store/
-│   │   │   ├── styles/
-│   │   │   └── trpc/
-│   │   │
+│   │   │   │   └── onboarding/
+│   │   │   └── layout.tsx
+│   │   ├── components/
+│   │   │   ├── calendar/
+│   │   │   ├── inbox/
+│   │   │   └── ui/
+│   │   ├── hooks/
+│   │   ├── lib/
+│   │   ├── providers/
+│   │   ├── trpc/
 │   │   └── package.json
 │   │
 │   └── api/
-│       ├── AGENTS.md
 │       ├── src/
-│       │
-│       ├── routers/
-│       │   ├── auth.ts
-│       │   ├── gmail.ts
-│       │   ├── calendar.ts
-│       │   ├── assistant.ts
-│       │   ├── search.ts
+│       │   ├── scripts/
+│       │   ├── trpc/
+│       │   ├── server.ts
 │       │   └── index.ts
-│       │
-│       ├── services/
-│       │   ├── gmail/
-│       │   ├── calendar/
-│       │   ├── assistant/
-│       │   ├── search/
-│       │   └── briefing/
-│       │
-│       ├── middleware/
-│       ├── lib/
-│       ├── trpc/
-│       ├── server.ts
-│       └── index.ts
+│       └── package.json
 │
 ├── packages/
 │   │
-│   ├── db/
-│   │   ├── src/
-│   │   │   ├── schema/
-│   │   │   │   ├── users.ts
-│   │   │   │   ├── emails.ts
-│   │   │   │   ├── calendar-events.ts
-│   │   │   │   └── daily-briefs.ts
-│   │   │   │
-│   │   │   ├── repositories/
-│   │   │   │   ├── email.repository.ts
-│   │   │   │   ├── calendar.repository.ts
-│   │   │   │   └── user.repository.ts
-│   │   │   │
-│   │   │   ├── migrations/
-│   │   │   ├── client.ts
-│   │   │   └── index.ts
-│   │   │
+│   ├── database/
+│   │   ├── drizzle/
+│   │   ├── models/
+│   │   │   ├── auth.ts
+│   │   │   ├── corsair-connections.ts
+│   │   │   └── corsair.ts
+│   │   ├── index.ts
+│   │   ├── schema.ts
 │   │   └── package.json
 │   │
-│   ├── shared/
-│   │   ├── src/
-│   │   │   ├── types/
-│   │   │   ├── schemas/
-│   │   │   ├── constants/
-│   │   │   └── index.ts
-│   │   │
+│   ├── services/
+│   │   ├── calendar/
+│   │   ├── clients/
+│   │   ├── gmail/
+│   │   ├── tenant/
+│   │   └── package.json
+│   │
+│   ├── trpc/
+│   │   ├── client/
+│   │   ├── server/
+│   │   │   ├── routes/
+│   │   │   │   ├── calendar/
+│   │   │   │   ├── gmail/
+│   │   │   │   ├── health/
+│   │   │   │   └── tenant/
+│   │   │   ├── context.ts
+│   │   │   ├── schema.ts
+│   │   │   └── trpc.ts
+│   │   ├── services/
 │   │   └── package.json
 │   │
 │   ├── corsair/
 │   │   ├── src/
-│   │   │   ├── gmail/
-│   │   │   │   ├── connect.ts
-│   │   │   │   ├── send-email.ts
-│   │   │   │   ├── get-email.ts
-│   │   │   │   └── search.ts
-│   │   │   │
 │   │   │   ├── calendar/
-│   │   │   │   ├── create-event.ts
-│   │   │   │   ├── get-events.ts
-│   │   │   │   └── invite.ts
-│   │   │   │
+│   │   │   ├── gmail/
 │   │   │   ├── webhooks/
-│   │   │   │   ├── gmail.ts
-│   │   │   │   └── calendar.ts
-│   │   │   │
+│   │   │   ├── corsair.ts
+│   │   │   ├── tenant.ts
 │   │   │   └── index.ts
-│   │   │
 │   │   └── package.json
 │   │
 │   ├── ai/
 │   │   ├── src/
 │   │   │   ├── agents/
-│   │   │   │   └── executive-assistant.ts
-│   │   │   │
-│   │   │   ├── prompts/
-│   │   │   │   ├── system.ts
-│   │   │   │   ├── briefing.ts
-│   │   │   │   └── priority.ts
-│   │   │   │
-│   │   │   ├── tools/
-│   │   │   │   ├── search-emails.ts
-│   │   │   │   ├── send-email.ts
-│   │   │   │   ├── create-event.ts
-│   │   │   │   └── get-events.ts
-│   │   │   │
 │   │   │   ├── embeddings/
-│   │   │   │   ├── generate.ts
-│   │   │   │   └── search.ts
-│   │   │   │
+│   │   │   ├── prompts/
+│   │   │   ├── tools/
 │   │   │   └── index.ts
-│   │   │
 │   │   └── package.json
 │   │
-│   └── inngest/
+│   ├── inngest/
+│   │   ├── src/
+│   │   │   ├── functions/
+│   │   │   ├── client.ts
+│   │   │   └── index.ts
+│   │   └── package.json
+│   │
+│   ├── logger/
+│   │   ├── index.ts
+│   │   └── package.json
+│   │
+│   └── shared/
 │       ├── src/
-│       │   ├── functions/
-│       │   │   ├── gmail-initial-sync.ts
-│       │   │   ├── email-received.ts
-│       │   │   ├── email-embed.ts
-│       │   │   ├── email-priority.ts
-│       │   │   └── daily-brief-generate.ts
-│       │   │
-│       │   ├── client.ts
+│       │   ├── types/
 │       │   └── index.ts
-│       │
 │       └── package.json
 │
 └── .github/
@@ -568,3 +514,19 @@ The goal is to ship a polished demo within 6 days.
 - Connect Gmail account through Corsair Connect Link
 - Connect Google Calendar account through Corsair Connect Link
 - Store tenant metadata and connection metadata per user
+
+### Day 2
+
+#### Gmail Pipeline
+- Built Gmail service layer using `corsair.withTenant().gmail.api`
+- Implemented `getThreads`, `getThread`, `sendEmail`, `searchEmails`
+- Used metadata-only fetching to optimize load times
+- Created tRPC `gmailRouter` with Zod validation
+- Built frontend `useThreads` hooks and minimal Inbox UI table
+
+#### Calendar Pipeline
+- Built Calendar service layer normalizing Google's payload
+- Implemented `getEvents`, `getEvent`, `createEvent`, `updateEvent`, `deleteEvent`
+- Added FullCalendar with month, week, and day views
+- Implemented interactive UX: click-to-create, click-to-edit, drag-and-drop, and resize
+- Built `EventModal` for creating and editing events with optimistic UI updates

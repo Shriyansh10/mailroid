@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon } from "lucide-react";
 import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
@@ -138,6 +138,26 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
         >
           <PencilIcon className="size-4" />
           Compose
+        </Button>
+
+        {/* Dobbie AI Assistant button */}
+        <Button
+          variant="default"
+          onClick={() => router.push("/assistant")}
+          className="shrink-0 gap-2 bg-indigo-600 hover:bg-indigo-700 text-white"
+        >
+          <BotIcon className="size-4" />
+          Dobbie
+        </Button>
+
+        {/* Calendar button */}
+        <Button
+          variant="outline"
+          onClick={() => router.push("/calendar")}
+          className="shrink-0 gap-2"
+        >
+          <CalendarDaysIcon className="size-4" />
+          Calendar
         </Button>
 
         {/* Logout button */}

@@ -28,6 +28,10 @@ export const useThreads = (opts?: { maxResults?: number; pageToken?: string }) =
 };
 
 export const useThread = (id: string) => {
+  // Gmail thread IDs are hex strings (e.g. "18a1b2c3d4e5f6").
+  // Guard against invalid IDs from dynamic route segments like "[threadId]".
+  const isValidThreadId = /^[0-9a-fA-F]+$/.test(id);
+
   const {
     data,
     error,
@@ -35,7 +39,7 @@ export const useThread = (id: string) => {
     isLoading,
     isSuccess,
     status,
-  } = trpc.gmail.thread.useQuery({ id }, { enabled: !!id });
+  } = trpc.gmail.thread.useQuery({ id }, { enabled: !!id && isValidThreadId });
 
   return {
     data,
