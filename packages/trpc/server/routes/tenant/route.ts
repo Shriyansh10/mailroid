@@ -5,9 +5,9 @@ import { generatePath } from "../../utils/path-generator.js";
 import { corsair, getTenant } from "@repo/corsair";
 
 import { authOutputSchema } from "@repo/shared";
-import { authorizePlugins, ensureTenant, getGmailOAuthUrl, getCalendarOAuthUrl, getConnectedPlugins, getConnectedAccounts } from "../../../services/index.js";
+import { authorizePlugins, ensureTenant, getGmailOAuthUrl, getCalendarOAuthUrl, getConnectedPlugins, getConnectedAccounts, getAccountsExist } from "../../../services/index.js";
 
-import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel, getCalendarOAuthUrlOutputModel, connectedPluginsOutputModel, connectedAccountsOutputModel } from "./models.js";
+import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel, getCalendarOAuthUrlOutputModel, connectedPluginsOutputModel, connectedAccountsOutputModel, getAccountsExistOutputModel } from "./models.js";
 
 const TAGS = ["Tenants"];
 const getPath = generatePath("/tenants");
@@ -126,5 +126,19 @@ export const authRouter = router({
     .output(connectedAccountsOutputModel)
     .query(async ({ ctx }: { ctx: Context }) => {
       return getConnectedAccounts(ctx.user!.id, ctx.user!.email);
+    }),
+
+  getAccountsExist: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/accounts-exist"),
+        tags: TAGS,
+      },
+    })
+    .input(zodUndefinedModel)
+    .output(getAccountsExistOutputModel)
+    .query(async ({ ctx }: { ctx: Context }) => {
+      return getAccountsExist(ctx.user!.id);
     }),
 });

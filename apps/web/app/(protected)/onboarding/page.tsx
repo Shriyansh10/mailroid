@@ -1,6 +1,6 @@
 "use client";
 
-import { useGetGmailOAuthUrl, useGetCalendarOAuthUrl } from "@web/hooks/api/tentant";
+import { useGetGmailOAuthUrl, useGetCalendarOAuthUrl, useGetAccountsExist } from "@web/hooks/api/tentant";
 import { useSession } from "@web/lib/auth-client";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -35,6 +35,7 @@ export default function OnboardingPage() {
 
   const { getGmailOAuthUrlAsync } = useGetGmailOAuthUrl();
   const { getCalendarOAuthUrlAsync } = useGetCalendarOAuthUrl();
+  const { data: serverAccounts, isLoading: accountsLoading } = useGetAccountsExist();
 
   // localStorage is the source of truth for connected plugins
   const [connectedPlugins, setConnectedPlugins] = useState<PluginName[]>(loadPersisted);
@@ -44,6 +45,25 @@ export default function OnboardingPage() {
   const [calLoading, setCalLoading] = useState(false);
   const [proceeding, setProceeding] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  // Merge server-side account state (ground truth) into localStorage + UI state.
+  // Runs once when the accounts query resolves.
+  const serverMerged = useRef(false);
+  useEffect(() => {
+    if (serverMerged.current || accountsLoading || !serverAccounts) return;
+    serverMerged.current = true;
+
+    const local = loadPersisted();
+    const merged = new Set(local);
+    if (serverAccounts.gmail) merged.add("gmail");
+    if (serverAccounts.calendar) merged.add("googlecalendar");
+    const mergedArr = Array.from(merged) as PluginName[];
+
+    if (mergedArr.length !== local.length) {
+      persist(mergedArr);
+      setConnectedPlugins(mergedArr);
+    }
+  }, [serverAccounts, accountsLoading]);
 
   // On mount: handle OAuth callback params, then clean the URL.
   // Never auto-redirect — user must explicitly click "Proceed".
@@ -100,6 +120,7 @@ export default function OnboardingPage() {
   }, [router]);
 
   // ── derived state ───────────────────────────────────────────────
+  const checkingServer = accountsLoading;
   const gmailConnected = connectedPlugins.includes("gmail");
   const calConnected   = connectedPlugins.includes("googlecalendar");
   const bothConnected  = gmailConnected && calConnected;
@@ -130,14 +151,20 @@ export default function OnboardingPage() {
         {/* ── Gmail button ───────────────────────────────────────── */}
         <button
           onClick={handleConnectGmail}
-          disabled={gmailConnected || gmailLoading || calLoading}
+          disabled={gmailConnected || gmailLoading || calLoading || checkingServer}
           className={`inline-flex flex-col items-center gap-1 rounded-lg border px-6 py-3 text-sm font-medium transition-all w-full ${
             gmailConnected
               ? "border-green-500 bg-green-50 text-green-700 cursor-default dark:bg-green-950 dark:text-green-300"
-              : "hover:bg-muted disabled:opacity-50"
+              : checkingServer
+                ? "bg-muted text-muted-foreground cursor-wait opacity-60"
+                : "hover:bg-muted disabled:opacity-50"
           }`}
         >
-          {gmailLoading ? (
+          {checkingServer ? (
+            <span className="inline-flex items-center gap-1">
+              <span className="animate-spin">⏳</span> Checking…
+            </span>
+          ) : gmailLoading ? (
             <span className="animate-spin">⏳</span>
           ) : gmailConnected ? (
             <span>✅ Gmail Connected</span>
@@ -149,14 +176,20 @@ export default function OnboardingPage() {
         {/* ── Calendar button ────────────────────────────────────── */}
         <button
           onClick={handleConnectCalendar}
-          disabled={calConnected || gmailLoading || calLoading}
+          disabled={calConnected || gmailLoading || calLoading || checkingServer}
           className={`inline-flex flex-col items-center gap-1 rounded-lg border px-6 py-3 text-sm font-medium transition-all w-full ${
             calConnected
               ? "border-green-500 bg-green-50 text-green-700 cursor-default dark:bg-green-950 dark:text-green-300"
-              : "hover:bg-muted disabled:opacity-50"
+              : checkingServer
+                ? "bg-muted text-muted-foreground cursor-wait opacity-60"
+                : "hover:bg-muted disabled:opacity-50"
           }`}
         >
-          {calLoading ? (
+          {checkingServer ? (
+            <span className="inline-flex items-center gap-1">
+              <span className="animate-spin">⏳</span> Checking…
+            </span>
+          ) : calLoading ? (
             <span className="animate-spin">⏳</span>
           ) : calConnected ? (
             <span>✅ Calendar Connected</span>
@@ -168,7 +201,7 @@ export default function OnboardingPage() {
         {/* ── Proceed button ─────────────────────────────────────── */}
         <button
           onClick={handleProceed}
-          disabled={!bothConnected || proceeding}
+          disabled={!bothConnected || proceeding || checkingServer}
           className={`inline-flex items-center justify-center gap-2 rounded-lg px-6 py-3 text-sm font-semibold transition-all w-full ${
             bothConnected
               ? "bg-primary text-primary-foreground hover:opacity-90"

@@ -76,3 +76,14 @@ export const connectedPluginsOutput = z.object({
 });
 
 export type ConnectedPluginsOutput = z.infer<typeof connectedPluginsOutput>;
+
+/**
+ * Output schema — checks corsair_accounts table directly for connected integrations.
+ * Does NOT use the Corsair SDK or token checks. Pure DB query.
+ */
+export const getAccountsExistOutput = z.object({
+  gmail: z.boolean().describe("Whether a Gmail account row exists in corsair_accounts"),
+  calendar: z.boolean().describe("Whether a Calendar account row exists in corsair_accounts"),
+});
+
+export type GetAccountsExistOutput = z.infer<typeof getAccountsExistOutput>;

@@ -23,6 +23,12 @@ export const connectedPluginsOutputModel = z.object({
   googlecalendar: z.boolean().describe("Whether Calendar is connected"),
 });
 
+// Direct DB check — accounts exist in corsair_accounts
+export const getAccountsExistOutputModel = z.object({
+  gmail: z.boolean().describe("Whether a Gmail account row exists in corsair_accounts"),
+  calendar: z.boolean().describe("Whether a Calendar account row exists in corsair_accounts"),
+});
+
 // Full connected-account snapshot for onboarding
 export const connectedAccountsOutputModel = z.object({
   betterAuthEmail: z.string().describe("The email the user signed in with"),

@@ -107,3 +107,10 @@ export const useGetCalendarOAuthUrl = () => {
   };
 };
 
+export const useGetAccountsExist = () => {
+  const { data, isLoading, isError, error } =
+    trpc.auth.getAccountsExist.useQuery();
+
+  return { data, isLoading, isError, error };
+};
+
