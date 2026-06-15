@@ -10,8 +10,10 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
+    "@repo/corsair": "workspace:*",
     "@repo/database": "workspace:*",
     "@repo/logger": "workspace:*",
+    "corsair": "0.1.76",
     "google-auth-library": "^10.5.0",
     "zod": "^4.3.5"
   }

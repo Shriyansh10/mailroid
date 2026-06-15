@@ -419,12 +419,18 @@ importers:
 
   packages/services:
     dependencies:
+      '@repo/corsair':
+        specifier: workspace:*
+        version: link:../corsair
       '@repo/database':
         specifier: workspace:*
         version: link:../database
       '@repo/logger':
         specifier: workspace:*
         version: link:../logger
+      corsair:
+        specifier: 0.1.76
+        version: 0.1.76
       google-auth-library:
         specifier: ^10.5.0
         version: 10.5.0

@@ -1,12 +1,14 @@
-"use client";
+'use client'
 
 import { authClient } from "@web/lib/auth-client";
 
 export default function Page() {
+
+
   const handleGoogleLogin = async () => {
     await authClient.signIn.social({
       provider: "google",
-      callbackURL: "http://localhost:3000/dashboard",
+      callbackURL: "http://localhost:3000/authorise-plugins",
     });
   };
 

@@ -1,5 +1,6 @@
 import { betterAuth } from "better-auth";
 import { db } from "@repo/database";
+// @ts-ignore
 import { authModels } from "@repo/database/schema";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 

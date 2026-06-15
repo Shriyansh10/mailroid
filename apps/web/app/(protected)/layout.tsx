@@ -24,9 +24,5 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
     return null;
   }
 
-  if(data) {
-    console.log("User session data:", data);
-    }
-
   return <>{children}</>;
 }
