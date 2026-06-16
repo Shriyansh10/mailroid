@@ -5,12 +5,17 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./embeddings/generate": "./src/embeddings/generate.ts"
+    "./embeddings/generate": "./src/embeddings/generate.ts",
+    "./embeddings/search": "./src/embeddings/search.ts",
+    "./chat/service": "./src/chat/service.ts",
+    "./chat/types": "./src/chat/types.ts"
   },
+
   "dependencies": {
     "dotenv": "^17.2.3",
     "openai": "^6.42.0",
-    "typescript": "^6.0.3"
+    "typescript": "^6.0.3",
+    "zod": "^4.3.5"
   },
   "devDependencies": {
       "@repo/eslint-config": "workspace:*",

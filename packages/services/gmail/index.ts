@@ -1,6 +1,7 @@
 import { corsair } from "@repo/corsair";
 import { db, eq, sql, and, or, ilike } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
+import { logger } from "@repo/logger";
 import type {
   ThreadSummary,
   ThreadListResult,
@@ -14,7 +15,7 @@ import type {
   EmbedResult,
   PendingEmbeddingsCount,
 } from "./model.js";
-import OpenAI from "openai";
+import { createEmbedding, createEmbeddingsBatch, embedSearchQuery } from "@repo/ai";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -414,11 +415,91 @@ export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
 }
 
 /**
- * Search ALL locally indexed emails for the given user using ILIKE.
- * Scoped strictly to userId — never leaks across users.
- * Vector-search ready: swap ILIKE for embedding <=> queryEmbedding when available.
+ * Search ALL locally indexed emails for the given user.
+ *
+ * Primary path: pgvector cosine similarity search via `<=>` operator.
+ *   - Embeds the query using @repo/ai
+ *   - Orders by cosine distance ASC (lower = more similar)
+ *   - Returns top 20 results
+ *
+ * Fallback path: ILIKE text search.
+ *   - Only used if vector search fails (API down, no credits, etc.)
+ *   - Searches bodyText, subject, from, snippet
+ *
+ * Never crashes — always returns results or empty array.
  */
 export async function searchLocalEmails(
+  userId: string,
+  query: string,
+): Promise<LocalSearchResult> {
+  try {
+    const threads = await searchByEmbedding(userId, query, 20);
+    if (threads.length > 0) {
+        logger.info(
+        `[search] ✅ Vector search — ${threads.length} results for "${query}"`,
+        { userId, query, count: threads.length },
+      );
+      return { threads, total: threads.length };
+    }
+    // Vector search returned 0 results — try ILIKE as safety net
+    logger.info(
+      `[search] ⚠️ Vector search returned 0 results — falling back to ILIKE for "${query}"`,
+      { userId, query },
+    );
+    return searchByText(userId, query);
+  } catch (err) {
+    logger.warn(
+      `[search] ❌ Vector search failed — falling back to ILIKE for "${query}"`,
+      { userId, query, err },
+    );
+    return searchByText(userId, query);
+  }
+}
+
+/**
+ * pgvector cosine similarity search.
+ * Uses `<=>` operator (cosine distance, lower = more similar, ASC = best first).
+ * Only searches emails that have embeddings.
+ */
+async function searchByEmbedding(
+  userId: string,
+  query: string,
+  limit: number,
+): Promise<ThreadSummary[]> {
+  const queryVector = await embedSearchQuery(query);
+  const vectorLiteral = `[${queryVector.join(",")}]`;
+
+  const result = await db.execute<{
+    gmail_message_id: string;
+    thread_id: string;
+    subject: string | null;
+    from: string | null;
+    snippet: string | null;
+    received_at: Date | null;
+  }>(
+    sql`
+      SELECT ${emails.gmailMessageId}, ${emails.threadId}, ${emails.subject}, ${emails.from}, ${emails.snippet}, ${emails.receivedAt}
+      FROM ${emails}
+      WHERE ${eq(emails.userId, userId)} AND ${emails.embedding} IS NOT NULL
+      ORDER BY ${emails.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)} ASC
+      LIMIT ${limit}
+    `,
+  );
+
+  return result.rows.map((r) => ({
+    threadId: r.thread_id,
+    sender: r.from ?? "",
+    subject: r.subject ?? "(no subject)",
+    date: r.received_at ? new Date(r.received_at).toISOString() : "",
+    snippet: r.snippet ?? "",
+  }));
+}
+
+/**
+ * ILIKE text search fallback.
+ * Same implementation as the original searchLocalEmails.
+ */
+async function searchByText(
   userId: string,
   query: string,
 ): Promise<LocalSearchResult> {
@@ -460,17 +541,6 @@ export async function searchLocalEmails(
 
 // ── Embeddings ───────────────────────────────────────────────────────
 
-function getEmbeddingsClient(): OpenAI {
-  return new OpenAI({
-    apiKey: process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
-    baseURL: process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? undefined,
-  });
-}
-
-function getEmbeddingsModel(): string {
-  return process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small";
-}
-
 const EMBED_BATCH_SIZE = 20;
 
 /**
@@ -479,18 +549,15 @@ const EMBED_BATCH_SIZE = 20;
  * Logs result to console — no UI needed.
  */
 export async function validateEmbeddingsApi(): Promise<void> {
-  const client = getEmbeddingsClient();
-  const model = getEmbeddingsModel();
-
   try {
-    const response = await client.embeddings.create({ model, input: "test" });
+    const embedding = await createEmbedding("test");
 
-    if (!response.data?.[0]?.embedding) {
-      console.warn(`[embeddings] ⚠️ API responded but returned no vector (model: ${model})`);
+    if (!embedding || embedding.length === 0) {
+      console.warn(`[embeddings] ⚠️ API responded but returned no vector`);
       return;
     }
 
-    console.info(`[embeddings] ✅ API OK — model=${model} base=${client.baseURL ?? "default"} dims=${response.data[0].embedding.length}`);
+    console.info(`[embeddings] ✅ API OK — dims=${embedding.length}`);
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err);
     const status = (err as { status?: number }).status;
@@ -502,9 +569,9 @@ export async function validateEmbeddingsApi(): Promise<void> {
     } else if (status === 403) {
       console.error(`[embeddings] ❌ Access denied (403). Key lacks permissions.`);
     } else if (status === 404 || /not found|model/i.test(message)) {
-      console.error(`[embeddings] ❌ Model '${model}' not found at provider. Check EMBEDDINGS_MODEL.`);
+      console.error(`[embeddings] ❌ Model not found. Check EMBEDDINGS_MODEL.`);
     } else if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(message)) {
-      console.error(`[embeddings] ❌ Cannot reach ${client.baseURL ?? "API"}. Network error.`);
+      console.error(`[embeddings] ❌ Cannot reach API. Network error.`);
     } else {
       console.error(`[embeddings] ❌ API failure — ${message}`);
     }
@@ -513,7 +580,8 @@ export async function validateEmbeddingsApi(): Promise<void> {
 
 /**
  * Generate embeddings for all emails that don't have one yet.
- * Batches 20 at a time. Idempotent — safe to re-run.
+ * Batches 20 at a time using @repo/ai's createEmbeddingsBatch.
+ * Idempotent — safe to re-run.
  */
 export async function generateMissingEmbeddings(userId: string): Promise<EmbedResult> {
   console.log(`[embeddings] starting for userId=${userId}`);
@@ -538,12 +606,7 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
     );
 
     try {
-      const response = await getEmbeddingsClient().embeddings.create({
-        model: getEmbeddingsModel(),
-        input: texts,
-      });
-
-      const vectors = response.data.map((d: { embedding: number[] }) => d.embedding);
+      const vectors = await createEmbeddingsBatch(texts);
 
       for (let j = 0; j < batch.length; j++) {
         const vec = vectors[j];
@@ -565,7 +628,6 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
       embedded += batch.length;
     } catch (apiErr) {
       console.error(`[embeddings] API call failed for batch ${Math.floor(i / EMBED_BATCH_SIZE) + 1}:`, apiErr);
-      // Continue to next batch instead of aborting entirely
     }
   }
 

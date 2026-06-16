@@ -196,6 +196,9 @@ importers:
       '@radix-ui/react-tooltip':
         specifier: ^1.2.8
         version: 1.2.8(@types/react-dom@19.2.2(@types/react@19.2.2))(@types/react@19.2.2)(react-dom@19.2.0(react@19.2.0))(react@19.2.0)
+      '@repo/ai':
+        specifier: workspace:*
+        version: link:../../packages/ai
       '@repo/trpc':
         specifier: workspace:*
         version: link:../../packages/trpc
@@ -326,6 +329,9 @@ importers:
       typescript:
         specifier: ^6.0.3
         version: 6.0.3
+      zod:
+        specifier: ^4.3.5
+        version: 4.4.3
     devDependencies:
       '@repo/eslint-config':
         specifier: workspace:*

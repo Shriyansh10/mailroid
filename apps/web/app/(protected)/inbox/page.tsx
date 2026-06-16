@@ -31,14 +31,15 @@ export default function InboxPage() {
   const threadsResult = useThreads(
     query ? undefined : { maxResults: PAGE_SIZE, pageToken },
   );
-  const gmailSearchResult = useSearchEmails(query, {
-    maxResults: PAGE_SIZE,
-    pageToken,
-  });
+  const gmailSearchResult = useSearchEmails(
+    searchMode === "gmail" ? query : "",
+    { maxResults: PAGE_SIZE, pageToken },
+  );
 
-  // Dobbie mode: use local ILIKE search on indexed emails only
-  const localSearchResult = useSearchLocalEmails(query);
-
+  // Dobbie mode: use local semantic search on indexed emails only
+  const localSearchResult = useSearchLocalEmails(
+    searchMode === "ai" ? query : "",
+  );
   const { data, isLoading, isError, error } =
     searchMode === "ai" && query
       ? {
