@@ -22,6 +22,20 @@
       "when": 1781522148978,
       "tag": "0002_wakeful_black_knight",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1781587264544,
+      "tag": "0003_demonic_weapon_omega",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1781588829264,
+      "tag": "0004_late_sunfire",
+      "breakpoints": true
     }
   ]
 }

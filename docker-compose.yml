@@ -1,6 +1,6 @@
 services:
   postgresdb:
-    image: postgres:15
+    image: pgvector/pgvector:pg15
     restart: unless-stopped
     container_name: postgresdb
 
@@ -14,6 +14,7 @@ services:
 
     volumes:
       - pg_data:/var/lib/postgresql/data
+      - ./docker-init.sql:/docker-entrypoint-initdb.d/init.sql
 
 volumes:
   pg_data:

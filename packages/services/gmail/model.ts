@@ -63,3 +63,37 @@ export const sendEmailResultSchema = z.object({
 });
 
 export type SendEmailResult = z.infer<typeof sendEmailResultSchema>;
+
+// ── Stored email (local DB row) ─────────────────────────────────────
+
+export const storedEmailSchema = z.object({
+  id: z.string(),
+  userId: z.string(),
+  gmailMessageId: z.string(),
+  threadId: z.string(),
+  subject: z.string().nullable(),
+  from: z.string().nullable(),
+  to: z.string().nullable(),
+  snippet: z.string().nullable(),
+  bodyText: z.string().nullable(),
+  receivedAt: z.string().nullable(),
+  lastSyncedAt: z.string().nullable(),
+});
+
+export type StoredEmail = z.infer<typeof storedEmailSchema>;
+
+// ── Sync result ─────────────────────────────────────────────────────
+
+export const syncResultSchema = z.object({
+  synced: z.number(),
+});
+
+export type SyncResult = z.infer<typeof syncResultSchema>;
+
+// ── Email count ─────────────────────────────────────────────────────
+
+export const emailCountSchema = z.object({
+  count: z.number(),
+});
+
+export type EmailCount = z.infer<typeof emailCountSchema>;

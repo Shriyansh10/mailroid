@@ -152,9 +152,8 @@ export async function storeGmailConnectedEmail(userId: string): Promise<string |
   try {
     const tenant = corsair.withTenant(userId);
 
-    // The Corsair-wrapped Gmail token doesn't work with userinfo.
     // Use the Gmail API's native getProfile instead.
-    const profile = await tenant.gmail.api.users.getProfile({ userId: "me" });
+    const profile = await (tenant.gmail.api as any).users.getProfile({ userId: "me" });
     console.log("[storeGmailConnectedEmail] profile:", JSON.stringify(profile));
 
     const email = profile.emailAddress;
@@ -189,7 +188,7 @@ export async function storeCalendarConnectedEmail(userId: string): Promise<strin
   console.log("[storeCalendarConnectedEmail] START userId:", userId);
   try {
     const tenant = corsair.withTenant(userId);
-    const calendarList = await tenant.googlecalendar.api.calendarList.list();
+    const calendarList = await (tenant.googlecalendar.api as any).calendarList.list();
     console.log("[storeCalendarConnectedEmail] list:", JSON.stringify(calendarList));
 
     const primaryCalendar = calendarList.items?.find(

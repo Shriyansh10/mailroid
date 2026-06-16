@@ -1,0 +1,1 @@
+ALTER TABLE "emails" ADD COLUMN "user_id" text NOT NULL;
