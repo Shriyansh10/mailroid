@@ -1,0 +1,21 @@
+{
+  "name": "@repo/ai",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./embeddings/generate": "./src/embeddings/generate.ts"
+  },
+  "dependencies": {
+    "dotenv": "^17.2.3",
+    "openai": "^6.42.0",
+    "typescript": "^6.0.3"
+  },
+  "devDependencies": {
+      "@repo/eslint-config": "workspace:*",
+      "@repo/typescript-config": "workspace:*",
+    "@types/node": "^22.15.3",
+    "dotenv-cli": "^11.0.0"
+  }
+}

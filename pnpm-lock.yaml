@@ -39,6 +39,9 @@ importers:
       '@repo/logger':
         specifier: workspace:*
         version: link:../../packages/logger
+      '@repo/services':
+        specifier: workspace:*
+        version: link:../../packages/services
       '@repo/trpc':
         specifier: workspace:*
         version: link:../../packages/trpc
@@ -312,6 +315,31 @@ importers:
         specifier: 5.9.2
         version: 5.9.2
 
+  packages/ai:
+    dependencies:
+      dotenv:
+        specifier: ^17.2.3
+        version: 17.4.2
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(zod@4.4.3)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+    devDependencies:
+      '@repo/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@repo/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.15.3
+      dotenv-cli:
+        specifier: ^11.0.0
+        version: 11.0.0
+
   packages/corsair:
     dependencies:
       '@corsair-dev/app':
@@ -422,6 +450,34 @@ importers:
         specifier: ^8.50.0
         version: 8.50.0(eslint@9.39.1(jiti@2.6.1))(typescript@5.9.2)
 
+  packages/inngest:
+    dependencies:
+      '@repo/database':
+        specifier: workspace:*
+        version: link:../database
+      dotenv:
+        specifier: ^17.2.3
+        version: 17.4.2
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(zod@4.4.3)
+      typescript:
+        specifier: ^6.0.3
+        version: 6.0.3
+    devDependencies:
+      '@repo/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@repo/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.15.3
+      dotenv-cli:
+        specifier: ^11.0.0
+        version: 11.0.0
+
   packages/logger:
     dependencies:
       winston:
@@ -443,12 +499,18 @@ importers:
 
   packages/services:
     dependencies:
+      '@repo/ai':
+        specifier: workspace:*
+        version: link:../ai
       '@repo/corsair':
         specifier: workspace:*
         version: link:../corsair
       '@repo/database':
         specifier: workspace:*
         version: link:../database
+      '@repo/inngest':
+        specifier: workspace:*
+        version: link:../inngest
       '@repo/logger':
         specifier: workspace:*
         version: link:../logger
@@ -458,6 +520,9 @@ importers:
       google-auth-library:
         specifier: ^10.5.0
         version: 10.5.0
+      openai:
+        specifier: ^6.42.0
+        version: 6.42.0(zod@4.3.5)
       zod:
         specifier: ^4.3.5
         version: 4.3.5
@@ -4914,6 +4979,17 @@ packages:
     resolution: {integrity: sha512-kbpaSSGJTWdAY5KPVeMOKXSrPtr8C8C7wodJbcsd51jRnmD+GZu8Y0VoU6Dm5Z4vWr0Ig/1NKuWRKf7j5aaYSg==}
     engines: {node: '>=6'}
 
+  openai@6.42.0:
+    resolution: {integrity: sha512-1WFEt/uXMXOLhYRNkgJWo08Y2YNvNwpVU72K7ibrWgWpNOXd4VojXLbe6SQ4bLiUQ3Y8jz4IiyVkylJCL1DtZg==}
+    peerDependencies:
+      ws: ^8.18.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
+
   openapi3-ts@4.4.0:
     resolution: {integrity: sha512-9asTNB9IkKEzWMcHmVZE7Ts3kC9G7AFHfs8i7caD8HbI76gEjdkId4z/AkP83xdZsH7PLAnnbl47qZkXuxpArw==}
 
@@ -8794,7 +8870,7 @@ snapshots:
   dotenv-cli@11.0.0:
     dependencies:
       cross-spawn: 7.0.6
-      dotenv: 17.2.3
+      dotenv: 17.4.2
       dotenv-expand: 12.0.3
       minimist: 1.2.8
 
@@ -10432,6 +10508,14 @@ snapshots:
   onetime@5.1.2:
     dependencies:
       mimic-fn: 2.1.0
+
+  openai@6.42.0(zod@4.3.5):
+    optionalDependencies:
+      zod: 4.3.5
+
+  openai@6.42.0(zod@4.4.3):
+    optionalDependencies:
+      zod: 4.4.3
 
   openapi3-ts@4.4.0:
     dependencies:

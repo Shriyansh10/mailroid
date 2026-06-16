@@ -97,3 +97,26 @@ export const emailCountSchema = z.object({
 });
 
 export type EmailCount = z.infer<typeof emailCountSchema>;
+
+// ── Local search result (from emails table) ──────────────────────────
+
+export const localSearchResultSchema = z.object({
+  threads: z.array(threadSummarySchema),
+  total: z.number(),
+});
+
+export type LocalSearchResult = z.infer<typeof localSearchResultSchema>;
+
+// ── Embeddings ───────────────────────────────────────────────────────
+
+export const embedResultSchema = z.object({
+  embedded: z.number(),
+});
+
+export type EmbedResult = z.infer<typeof embedResultSchema>;
+
+export const pendingEmbeddingsCountSchema = z.object({
+  pending: z.number(),
+});
+
+export type PendingEmbeddingsCount = z.infer<typeof pendingEmbeddingsCountSchema>;

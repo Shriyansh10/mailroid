@@ -2,15 +2,17 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon, SparklesIcon } from "lucide-react";
 import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
-import { useSyncEmails, useStoredEmailCount } from "@web/hooks/api/gmail";
+import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount } from "@web/hooks/api/gmail";
 
 const DEBOUNCE_MS = 300;
+
+type SearchMode = "gmail" | "ai";
 
 function getInitials(name: string): string {
   return name
@@ -24,13 +26,18 @@ function getInitials(name: string): string {
 export default function InboxLayout({ children }: { children: React.ReactNode }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const currentQuery = searchParams.get("q") ?? "";
+  const searchMode: SearchMode = (searchParams.get("mode") as SearchMode) ?? "gmail";
+  const currentQuery = searchMode === "gmail"
+    ? (searchParams.get("q") ?? "")
+    : (searchParams.get("aiq") ?? "");
   const [localValue, setLocalValue] = useState(currentQuery);
   const [composeOpen, setComposeOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const { data: session } = useSession();
   const { syncEmailsAsync, isPending: syncing } = useSyncEmails();
   const { data: countData, refetch: refetchCount } = useStoredEmailCount();
+  const { generateEmbeddingsAsync, isPending: embedding } = useGenerateEmbeddings();
+  const { data: pendingData, refetch: refetchPending } = usePendingEmbeddingsCount();
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -44,20 +51,42 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     setLocalValue(currentQuery);
   }, [currentQuery]);
 
+  const setSearchMode = useCallback(
+    (mode: SearchMode) => {
+      const params = new URLSearchParams(searchParams.toString());
+      if (mode === "gmail") {
+        params.delete("aiq");
+        params.delete("mode");
+      } else {
+        params.delete("q");
+        params.set("mode", "ai");
+      }
+      params.delete("page");
+      const path = params.size ? `/inbox?${params.toString()}` : "/inbox";
+      router.replace(path);
+    },
+    [router, searchParams],
+  );
+
   const pushQuery = useCallback(
     (q: string) => {
       const params = new URLSearchParams(searchParams.toString());
       if (q) {
-        params.set("q", q);
-        params.delete("page"); // reset page when search changes
+        if (searchMode === "gmail") {
+          params.set("q", q);
+        } else {
+          params.set("aiq", q);
+        }
+        params.delete("page");
       } else {
-        params.delete("q");
+        if (searchMode === "gmail") params.delete("q");
+        else params.delete("aiq");
         params.delete("page");
       }
       const path = params.size ? `/inbox?${params.toString()}` : "/inbox";
       router.replace(path);
     },
-    [router, searchParams],
+    [router, searchParams, searchMode],
   );
 
   const handleChange = useCallback(
@@ -88,12 +117,22 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     try {
       const result = await syncEmailsAsync();
       refetchCount();
-      // toast will be shown by page or we just log
+      refetchPending();
       console.log(`Synced ${result.synced} emails`);
     } catch (err) {
       console.error("Sync failed:", err);
     }
-  }, [syncEmailsAsync, refetchCount]);
+  }, [syncEmailsAsync, refetchCount, refetchPending]);
+
+  const handleGenerateEmbeddings = useCallback(async () => {
+    try {
+      const result = await generateEmbeddingsAsync();
+      refetchPending();
+      console.log(`Embedded ${result.embedded} emails`);
+    } catch (err) {
+      console.error("Embedding failed:", err);
+    }
+  }, [generateEmbeddingsAsync, refetchPending]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -114,35 +153,61 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           </AvatarFallback>
         </Avatar>
 
-        {/* Search bar */}
-        <div className="relative flex-1 max-w-lg">
-        <SearchIcon
-          className="
-            absolute left-3 top-1/2 -translate-y-1/2
-            size-4 text-muted-foreground pointer-events-none
-          "
-        />
-        <Input
-          type="text"
-          placeholder="Search emails…"
-          value={localValue}
-          onChange={handleChange}
-          className="pl-9 pr-9"
-        />
-        {localValue && (
-          <button
-            onClick={handleClear}
-            aria-label="Clear search"
-            className="
-              absolute right-2 top-1/2 -translate-y-1/2
-              p-1 flex items-center justify-center
-              text-muted-foreground hover:text-foreground
-              rounded-full hover:bg-muted transition-colors
-            "
-          >
-            <XIcon className="size-4" />
-          </button>
-        )}
+        {/* Search mode toggle + input */}
+        <div className="flex flex-col gap-1.5 flex-1 max-w-2xl">
+          <div className="flex items-center gap-2">
+            <div className="inline-flex rounded-lg border bg-muted p-0.5 shrink-0">
+              <button
+                onClick={() => { setSearchMode("gmail"); setLocalValue(""); }}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  searchMode === "gmail"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Search Gmail
+              </button>
+              <button
+                onClick={() => { setSearchMode("ai"); setLocalValue(""); }}
+                className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
+                  searchMode === "ai"
+                    ? "bg-background text-foreground shadow-sm"
+                    : "text-muted-foreground hover:text-foreground"
+                }`}
+              >
+                Ask Dobbie
+              </button>
+            </div>
+
+            <div className="relative flex-1">
+              <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
+              <Input
+                type="text"
+                placeholder={
+                  searchMode === "gmail"
+                    ? "Search your entire Gmail account…"
+                    : "Ask Dobbie about your emails…"
+                }
+                value={localValue}
+                onChange={handleChange}
+                className="pl-9 pr-9"
+              />
+              {localValue && (
+                <button
+                  onClick={handleClear}
+                  aria-label="Clear search"
+                  className="absolute right-2 top-1/2 -translate-y-1/2 p-1 flex items-center justify-center text-muted-foreground hover:text-foreground rounded-full hover:bg-muted transition-colors"
+                >
+                  <XIcon className="size-4" />
+                </button>
+              )}
+            </div>
+          </div>
+          <p className="text-xs text-muted-foreground pl-1 h-4">
+            {searchMode === "ai"
+              ? <>Searching indexed emails only. Indexed Emails: {countData?.count ?? 0}</>
+              : "\u00A0"}
+          </p>
         </div>
 
         {/* Compose button */}
@@ -169,6 +234,19 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             Imported: {countData.count}
           </span>
         )}
+
+        {/* Generate Embeddings button */}
+        <Button
+          variant="outline"
+          onClick={handleGenerateEmbeddings}
+          disabled={embedding}
+          className="shrink-0 gap-2"
+        >
+          <SparklesIcon className="size-4" />
+          {embedding
+            ? "Embedding…"
+            : `Generate Embeddings${pendingData ? ` (${pendingData.pending} pending)` : ""}`}
+        </Button>
 
         {/* Dobbie AI Assistant button */}
         <Button

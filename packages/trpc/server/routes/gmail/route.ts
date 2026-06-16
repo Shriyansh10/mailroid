@@ -2,7 +2,7 @@ import { z } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
 
-import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount } from "../../../services/index.js";
+import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -116,5 +116,50 @@ export const gmailRouter = router({
     .output(z.object({ count: z.number() }))
     .query(async ({ ctx }) => {
       return getStoredEmailCount(ctx.user!.id);
+    }),
+
+  searchLocal: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/search-local"),
+        tags: TAGS,
+      },
+    })
+    .input(z.object({ query: z.string().min(1) }))
+    .output(
+      z.object({
+        threads: threadListOutputModel.shape.threads,
+        total: z.number(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      return searchLocalEmails(ctx.user!.id, input.query);
+    }),
+
+  generateEmbeddings: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/generate-embeddings"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ embedded: z.number() }))
+    .mutation(async ({ ctx }) => {
+      return generateMissingEmbeddings(ctx.user!.id);
+    }),
+
+  pendingEmbeddingsCount: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/pending-embeddings"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ pending: z.number() }))
+    .query(async ({ ctx }) => {
+      return getPendingEmbeddingsCount(ctx.user!.id);
     }),
 });
