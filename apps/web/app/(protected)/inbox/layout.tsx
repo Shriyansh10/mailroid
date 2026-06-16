@@ -2,12 +2,13 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon } from "lucide-react";
 import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
+import { useSyncEmails, useStoredEmailCount } from "@web/hooks/api/gmail";
 
 const DEBOUNCE_MS = 300;
 
@@ -28,6 +29,8 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   const [composeOpen, setComposeOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const { data: session } = useSession();
+  const { syncEmailsAsync, isPending: syncing } = useSyncEmails();
+  const { data: countData, refetch: refetchCount } = useStoredEmailCount();
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -80,6 +83,17 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     await authClient.signOut();
     router.push("/sign-in");
   }, [router]);
+
+  const handleSync = useCallback(async () => {
+    try {
+      const result = await syncEmailsAsync();
+      refetchCount();
+      // toast will be shown by page or we just log
+      console.log(`Synced ${result.synced} emails`);
+    } catch (err) {
+      console.error("Sync failed:", err);
+    }
+  }, [syncEmailsAsync, refetchCount]);
 
   // Cleanup on unmount
   useEffect(() => {
@@ -139,6 +153,22 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           <PencilIcon className="size-4" />
           Compose
         </Button>
+
+        {/* Sync emails button */}
+        <Button
+          variant="outline"
+          onClick={handleSync}
+          disabled={syncing}
+          className="shrink-0 gap-2"
+        >
+          <DownloadIcon className="size-4" />
+          {syncing ? "Syncing…" : "Sync"}
+        </Button>
+        {countData && (
+          <span className="text-xs text-muted-foreground whitespace-nowrap">
+            Imported: {countData.count}
+          </span>
+        )}
 
         {/* Dobbie AI Assistant button */}
         <Button

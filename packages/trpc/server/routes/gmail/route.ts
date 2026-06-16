@@ -2,7 +2,7 @@ import { z } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
 
-import { getThreads, getThread, sendEmail, searchEmails } from "../../../services/index.js";
+import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount } from "../../../services/index.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -90,5 +90,31 @@ export const gmailRouter = router({
         maxResults: input.maxResults,
         pageToken: input.pageToken,
       });
+    }),
+
+  sync: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/sync"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ synced: z.number() }))
+    .mutation(async ({ ctx }) => {
+      return syncEmails(ctx.user!.id, ctx.user!.id);
+    }),
+
+  storedCount: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/stored-count"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ count: z.number() }))
+    .query(async ({ ctx }) => {
+      return getStoredEmailCount(ctx.user!.id);
     }),
 });

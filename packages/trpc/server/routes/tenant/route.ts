@@ -27,15 +27,18 @@ export const authRouter = router({
     }))
     .query(async ({ ctx }) => {
         const tenant = corsair.withTenant(ctx.user.id);
-        console.log("STARTING GMAIL DEBUG");
-        const messages = await tenant.gmail.api.messages.list();
-        console.log('Messages', messages)
-        console.log("GMAIL MESSAGES:", messages.messages[0].threadId);
-        const message = await tenant.gmail.api.messages.get({
-  id: messages.messages[0].threadId!,
-  format: "full",
-});
-        console.log(message)
+        const profile = await (tenant.gmail.api as any).users.getProfile({ userId: "me" });
+        console.log("[storeGmailConnectedEmail] profile:", JSON.stringify(profile));
+        const messages = await (tenant.gmail.api as any).users.messages.list({ userId: "me" });
+        console.log("GMAIL MESSAGES:", messages.messages?.[0]?.threadId);
+        if (messages.messages?.[0]?.threadId) {
+          const message = await (tenant.gmail.api as any).users.messages.get({
+            userId: "me",
+            id: messages.messages[0].threadId,
+            format: "full",
+          });
+          console.log(message);
+        }
         return { token: 'ok' };
     }),
 

@@ -102,3 +102,33 @@ export const useSearchEmails = (
     refetch,
   };
 };
+export const useSyncEmails = () => {
+  const {
+    mutateAsync: syncEmailsAsync,
+    mutate: syncEmails,
+    error,
+    isError,
+    isPending,
+    isSuccess,
+    reset,
+    status,
+  } = trpc.gmail.sync.useMutation();
+
+  return {
+    syncEmailsAsync,
+    syncEmails,
+    error,
+    isError,
+    isPending,
+    isSuccess,
+    reset,
+    status,
+  };
+};
+
+export const useStoredEmailCount = () => {
+  const { data, isLoading, isError, error, refetch } =
+    trpc.gmail.storedCount.useQuery();
+
+  return { data, isLoading, isError, error, refetch };
+};

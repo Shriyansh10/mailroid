@@ -1,4 +1,6 @@
 import { corsair } from "@repo/corsair";
+import { db, eq, sql } from "@repo/database";
+import { emails } from "@repo/database/models/emails";
 import type {
   ThreadSummary,
   ThreadListResult,
@@ -6,6 +8,8 @@ import type {
   MessageDetail,
   SendEmailInput,
   SendEmailResult,
+  SyncResult,
+  EmailCount,
 } from "./model.js";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -302,4 +306,105 @@ export async function searchEmails(
     threads,
     nextPageToken: result.nextPageToken ?? null,
   };
+}
+
+// ── Email Storage ────────────────────────────────────────────────────
+
+/**
+ * Sync the first 100 Gmail messages into local Postgres.
+ * Batches 10 at a time. Idempotent — re-running updates existing rows.
+ */
+export async function syncEmails(tenantId: string, userId: string): Promise<SyncResult> {
+  const tenant = corsair.withTenant(tenantId);
+
+  // Step 1: list message IDs
+  const result = await tenant.gmail.api.messages.list({ maxResults: 100 });
+  const stubs = (result.messages ?? []) as Array<{ id?: string; threadId?: string }>;
+  const valid = stubs.filter((s) => s.id);
+  console.log(`[syncEmails] tenant=${tenantId} found ${valid.length} messages to sync`);
+  if (valid.length === 0) return { synced: 0 };
+
+  // Step 2: fetch full messages in batches of 10
+  const BATCH_SIZE = 10;
+  let synced = 0;
+
+  for (let i = 0; i < valid.length; i += BATCH_SIZE) {
+    const batch = valid.slice(i, i + BATCH_SIZE);
+
+    const fetched = await Promise.all(
+      batch.map((stub) =>
+        tenant.gmail.api.messages.get({
+          id: stub.id!,
+          format: "full",
+        })
+      )
+    );
+
+    // Parse each message and upsert
+    const rows = fetched.map((raw: unknown, idx: number) => {
+      const msg = raw as Record<string, unknown>;
+      const payload = msg.payload as MessagePart | undefined;
+      const headers = (payload?.headers ?? []) as PayloadHeader[];
+
+      const dateHeader = getHeader(headers, "Date");
+      const receivedAt = dateHeader
+        ? new Date(dateHeader)
+        : new Date(Number(msg.internalDate));
+
+      return {
+        userId,
+        gmailMessageId: (msg.id as string) ?? "",
+        threadId: (msg.threadId as string) ?? batch[idx]!.threadId ?? "",
+        subject: getHeader(headers, "Subject") || null,
+        from: getHeader(headers, "From") || null,
+        to: getHeader(headers, "To") || null,
+        snippet: (msg.snippet as string) ?? null,
+        bodyText: extractBody(payload) || null,
+        rawPayload: msg as Record<string, unknown>,
+        receivedAt: isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
+        lastSyncedAt: new Date(),
+      };
+    });
+
+    for (const row of rows) {
+      try {
+        await db
+          .insert(emails)
+          .values(row)
+          .onConflictDoUpdate({
+            target: emails.gmailMessageId,
+            set: {
+              threadId: row.threadId,
+              subject: row.subject,
+              from: row.from,
+              to: row.to,
+              snippet: row.snippet,
+              bodyText: row.bodyText,
+              rawPayload: row.rawPayload,
+              receivedAt: row.receivedAt,
+              lastSyncedAt: row.lastSyncedAt,
+              updatedAt: new Date(),
+            },
+          });
+      } catch (err) {
+        console.error(`[syncEmails] failed to insert message ${row.gmailMessageId}:`, err);
+      }
+    }
+
+    synced += rows.length;
+  }
+
+  console.log(`[syncEmails] done — synced ${synced} emails for tenant=${tenantId}`);
+  return { synced };
+}
+
+/**
+ * Returns the count of locally stored emails for a given user (for verification UI).
+ */
+export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
+  const result = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(emails)
+    .where(eq(emails.userId, userId));
+  return { count: Number(result[0]?.count ?? 0) };
 }
