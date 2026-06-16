@@ -6,6 +6,8 @@ export enum ToolExecutionStatus {
   SUCCESS = "success",
   FAILED = "failed",
   APPROVAL_REQUIRED = "approval_required",
+  APPROVAL_GRANTED = "approval_granted",
+  APPROVAL_CANCELLED = "approval_cancelled",
   TOOL_NOT_FOUND = "tool_not_found",
   PERMISSION_DENIED = "permission_denied",
 }
@@ -64,6 +66,12 @@ export interface ToolResult {
   requestId: string;
   data?: unknown;
   error?: string;
+  /** Only populated when status is APPROVAL_REQUIRED */
+  approvalId?: string;
+  /** Human-readable summary of the pending action */
+  preview?: string;
+  /** DeepSeek tool_call.id — needed to resume the conversation on approve */
+  toolCallId?: string;
 }
 
 // ── Audit entry ──────────────────────────────────────────────────────
@@ -113,6 +121,9 @@ export function makeResult(
   requestId: string,
   data?: unknown,
   error?: string,
+  approvalId?: string,
+  preview?: string,
+  toolCallId?: string,
 ): ToolResult {
-  return { status, toolName, requestId, data, error };
+  return { status, toolName, requestId, data, error, approvalId, preview, toolCallId };
 }

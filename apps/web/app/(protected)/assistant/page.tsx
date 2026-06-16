@@ -1,8 +1,8 @@
 "use client";
 
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import { motion } from "framer-motion";
-import { BotIcon, SendIcon, SparklesIcon, MessageSquareIcon, ArrowLeftIcon } from "lucide-react";
+import { BotIcon, SendIcon, SparklesIcon, MessageSquareIcon, ArrowLeftIcon, Loader2Icon, ShieldAlertIcon, CheckIcon, XIcon } from "lucide-react";
 import { useRouter } from "next/navigation";
 
 const OLD_CHATS = [
@@ -12,47 +12,121 @@ const OLD_CHATS = [
   "Find files related to project Alpha",
 ];
 
+interface ChatMessage {
+  id: string;
+  role: "user" | "ai";
+  content: string;
+  /** Undefined for normal messages, set when AI needs approval */
+  approvalRequired?: {
+    approvalId: string;
+    toolName: string;
+    toolCallId: string;
+    args: Record<string, unknown>;
+    preview: string;
+    reasoningContent: string | null;
+  };
+}
+
 export default function AssistantPage() {
   const router = useRouter();
   const [isMounted, setIsMounted] = useState(false);
   const [isNewChat, setIsNewChat] = useState(true);
   const [prompt, setPrompt] = useState("");
-  const [messages, setMessages] = useState<{ id: string; role: "user" | "ai"; content: string }[]>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  const [isLoading, setIsLoading] = useState(false);
+  const abortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setIsMounted(true);
   }, []);
 
-  const handleSend = (text: string) => {
-    if (!text.trim()) return;
+  const handleSend = async (text: string) => {
+    if (!text.trim() || isLoading) return;
 
-    const newMessage = { id: Date.now().toString(), role: "user" as const, content: text };
-    
+    const userMessage: ChatMessage = { id: Date.now().toString(), role: "user", content: text };
+
     if (isNewChat) {
       setIsNewChat(false);
     }
-    
-    setMessages((prev) => [...prev, newMessage]);
-    setPrompt("");
 
-    // Mock AI response
-    setTimeout(() => {
+    setMessages((prev) => [...prev, userMessage]);
+    setPrompt("");
+    setIsLoading(true);
+
+    // Build conversation history for the API
+    const now = new Date();
+    const systemPrompt = [
+      `You are Dobbie, a helpful executive assistant. Be concise and professional.`,
+      `You help with emails, calendar, and productivity tasks.`,
+      ``,
+      `Current date and time: ${now.toISOString()}`,
+      `User's local time: ${now.toLocaleString("en-US", { dateStyle: "full", timeStyle: "short" })}`,
+      `Timezone offset: UTC${now.getTimezoneOffset() <= 0 ? "+" : "-"}${String(Math.abs(Math.floor(now.getTimezoneOffset() / 60))).padStart(2, "0")}:${String(Math.abs(now.getTimezoneOffset() % 60)).padStart(2, "0")}`,
+      ``,
+      `When creating calendar events, always use ISO 8601 datetime format with the correct year.`,
+      `"Day after tomorrow" means ${new Date(Date.now() + 2 * 86400000).toISOString().slice(0, 10)}.`,
+      `"Tomorrow" means ${new Date(Date.now() + 86400000).toISOString().slice(0, 10)}.`,
+      ``,
+      `After successfully executing a tool, summarize what you did clearly and concisely.`,
+      `If a tool fails, explain the error to the user in plain language.`,
+    ].join("\n");
+
+    const apiMessages = [
+      { role: "system" as const, content: systemPrompt },
+      ...messages.map((m) => ({ role: m.role === "ai" ? ("assistant" as const) : ("user" as const), content: m.content })),
+      { role: "user" as const, content: text },
+    ];
+
+    try {
+      abortRef.current = new AbortController();
+
+      const res = await fetch("/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ messages: apiMessages }),
+        signal: abortRef.current.signal,
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error ?? `Server error (${res.status})`);
+      }
+
+      const data = await res.json();
+
+      const aiMessage: ChatMessage = {
+        id: (Date.now() + 1).toString(),
+        role: "ai",
+        content: data.content ?? "(no response)",
+      };
+
+      // Attach approval info if present
+      if (data.approvalRequired) {
+        aiMessage.approvalRequired = data.approvalRequired;
+      }
+
+      setMessages((prev) => [...prev, aiMessage]);
+    } catch (error) {
+      if (error instanceof DOMException && error.name === "AbortError") return;
+
       setMessages((prev) => [
         ...prev,
         {
           id: (Date.now() + 1).toString(),
           role: "ai",
-          content: "Hello! I am Dobbie, your personal executive assistant. I am ready to help you save time today! (Mock Response)",
+          content: error instanceof Error ? `Error: ${error.message}` : "Something went wrong. Please try again.",
         },
       ]);
-    }, 1000);
+    } finally {
+      setIsLoading(false);
+      abortRef.current = null;
+    }
   };
 
   const handleOpenOldChat = (chatTitle: string) => {
     setIsNewChat(false);
     setPrompt("");
-    
-    // Mock loading a past conversation history
+
     setMessages([
       { id: `old-user-${Date.now()}`, role: "user", content: chatTitle },
       { id: `old-ai-${Date.now()}`, role: "ai", content: `Here is the past conversation regarding "${chatTitle}". Let me know if you need any follow-up on this topic!` },
@@ -62,6 +136,110 @@ export default function AssistantPage() {
   const handleKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       handleSend(prompt);
+    }
+  };
+
+  const handleApprove = async (msg: ChatMessage) => {
+    const ar = msg.approvalRequired;
+    if (!ar) return;
+
+    setIsLoading(true);
+
+    // Build conversation history (same as handleSend)
+    const apiMessages = [
+      {
+        role: "system" as const,
+        content:
+          "You are Dobbie, a helpful executive assistant. Be concise and professional. You help with emails, calendar, and productivity tasks.",
+      },
+      ...messages
+        .filter((m) => !m.approvalRequired) // exclude approval cards
+        .map((m) => ({
+          role: m.role === "ai" ? ("assistant" as const) : ("user" as const),
+          content: m.content,
+        })),
+    ];
+
+    try {
+      const res = await fetch("/api/approvals/approve", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          approvalId: ar.approvalId,
+          messages: apiMessages,
+          reasoningContent: ar.reasoningContent,
+        }),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error ?? `Server error (${res.status})`);
+      }
+
+      const data = await res.json();
+
+      // Remove approval from the message and add AI response
+      setMessages((prev) =>
+        prev
+          .map((m) =>
+            m.id === msg.id
+              ? { ...m, approvalRequired: undefined, content: `${m.content}\n\n✅ Approved` }
+              : m,
+          )
+          .concat({
+            id: `approved-${Date.now()}`,
+            role: "ai",
+            content: data.content ?? "Action completed.",
+          }),
+      );
+    } catch (error) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id
+            ? { ...m, content: `${m.content}\n\n❌ ${error instanceof Error ? error.message : "Approval failed"}` }
+            : m,
+        ),
+      );
+    } finally {
+      setIsLoading(false);
+    }
+  };
+
+  const handleCancel = async (msg: ChatMessage) => {
+    const ar = msg.approvalRequired;
+    if (!ar) return;
+
+    setIsLoading(true);
+
+    try {
+      const res = await fetch("/api/approvals/cancel", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId: ar.approvalId }),
+      });
+
+      if (!res.ok) {
+        const errBody = await res.json().catch(() => ({}));
+        throw new Error(errBody.error ?? `Server error (${res.status})`);
+      }
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id
+            ? { ...m, approvalRequired: undefined, content: `${m.content}\n\n🚫 Cancelled` }
+            : m,
+        ),
+      );
+    } catch (error) {
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id
+            ? { ...m, content: `${m.content}\n\n❌ ${error instanceof Error ? error.message : "Cancel failed"}` }
+            : m,
+        ),
+      );
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -137,6 +315,38 @@ export default function AssistantPage() {
                     : 'py-1 text-slate-800'
                 }`}>
                   {msg.content}
+                  {msg.approvalRequired && (
+                    <div className="mt-3 border border-amber-200 bg-amber-50 rounded-xl p-4 max-w-sm">
+                      <div className="flex items-center gap-2 text-amber-700 font-semibold text-sm mb-2">
+                        <ShieldAlertIcon className="size-4" />
+                        Approval Required
+                      </div>
+                      <p className="text-xs text-amber-600 mb-1 font-mono">
+                        {msg.approvalRequired.toolName}
+                      </p>
+                      <p className="text-sm text-slate-700 mb-3">
+                        {msg.approvalRequired.preview}
+                      </p>
+                      <div className="flex gap-2">
+                        <button
+                          onClick={() => handleApprove(msg)}
+                          disabled={isLoading}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
+                        >
+                          <CheckIcon className="size-3.5" />
+                          Approve
+                        </button>
+                        <button
+                          onClick={() => handleCancel(msg)}
+                          disabled={isLoading}
+                          className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-slate-600 text-xs font-medium rounded-lg border border-slate-300 hover:bg-slate-100 disabled:opacity-50 transition-colors"
+                        >
+                          <XIcon className="size-3.5" />
+                          Cancel
+                        </button>
+                      </div>
+                    </div>
+                  )}
                 </div>
               </motion.div>
             ))}
@@ -175,17 +385,22 @@ export default function AssistantPage() {
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
               placeholder="Message Dobbie..."
+              disabled={isLoading}
               className="w-full bg-transparent border-none outline-none resize-none text-[15px] text-slate-900 placeholder:text-slate-500 py-2 px-1"
             />
             <div className="flex justify-end mt-2">
               <button
                 onClick={() => handleSend(prompt)}
-                disabled={!prompt.trim()}
+                disabled={!prompt.trim() || isLoading}
                 className={`size-8 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
-                  prompt.trim() ? "bg-black text-white hover:bg-slate-800" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                  prompt.trim() && !isLoading ? "bg-black text-white hover:bg-slate-800" : "bg-slate-200 text-slate-400 cursor-not-allowed"
                 }`}
               >
-                <SendIcon className="size-4 ml-0.5" />
+                {isLoading ? (
+                  <Loader2Icon className="size-4 animate-spin" />
+                ) : (
+                  <SendIcon className="size-4 ml-0.5" />
+                )}
               </button>
             </div>
           </motion.div>

@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { auth } from "@web/lib/auth";
 import {
   ToolOrchestrator,
   ToolRegistry,
@@ -28,10 +29,9 @@ const orchestrator = new ToolOrchestrator(registry, permissions, auditLogger);
  *
  * Body: { toolName: string, args?: Record<string, unknown> }
  *
- * The userId is hardcoded to "anonymous" for Phase 1 (no auth on tools route).
- * The requestId is auto-generated for traceability.
- *
- * Phase 2: attach real userId from session.
+ * Auth: reads the Better Auth session cookie from the incoming request.
+ * Returns 401 if no valid session is found.
+ * The requestId is auto-generated per request for traceability.
  */
 export async function POST(request: Request) {
   const requestId = crypto.randomUUID();
@@ -66,11 +66,27 @@ export async function POST(request: Request) {
       );
     }
 
-    // ── Execute via orchestrator ───────────────────────────────────
+    // ── Resolve userId from Better Auth session cookie ─────────────
+    const session = await auth.api.getSession({ headers: request.headers });
+    if (!session?.user?.id) {
+      return NextResponse.json(
+        {
+          status: "permission_denied",
+          toolName: "unknown",
+          error: "Unauthorized",
+          requestId,
+        },
+        { status: 401 },
+      );
+    }
+    const userId = session.user.id;
+    console.log("[api:tools:execute] authenticated userId:", userId);
+
+    // ── Execute via orchestrator ───────────────────────────────
     const result = await orchestrator.executeTool(
       parsed.data.toolName,
       parsed.data.args,
-      "anonymous", // Phase 2: real userId from session
+      userId,
       requestId,
     );
 

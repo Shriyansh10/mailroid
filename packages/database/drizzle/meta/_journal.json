@@ -36,6 +36,13 @@
       "when": 1781588829264,
       "tag": "0004_late_sunfire",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1781626215547,
+      "tag": "0005_spooky_bruce_banner",
+      "breakpoints": true
     }
   ]
 }

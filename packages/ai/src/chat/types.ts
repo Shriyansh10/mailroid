@@ -26,6 +26,30 @@ export const ChatResponseSchema = z.object({
 
 export type ChatResponse = z.infer<typeof ChatResponseSchema>;
 
+// ── Approval required response ───────────────────────────────────────
+
+export interface ApprovalRequiredResponse {
+  role: "assistant";
+  content: string;
+  approvalRequired: {
+    approvalId: string;
+    toolName: string;
+    toolCallId: string;
+    args: Record<string, unknown>;
+    preview: string;
+    /**
+     * The DeepSeek assistant message's `reasoning_content` from the turn
+     * that requested the tool call. Must be passed back verbatim on the
+     * synthetic assistant message when resuming — DeepSeek thinking mode
+     * rejects null/fabricated values.
+     */
+    reasoningContent: string | null;
+  };
+}
+
+/** Union of all possible responses from the agent loop */
+export type AgentResponse = ChatResponse | ApprovalRequiredResponse;
+
 // ── Stream chunk ─────────────────────────────────────────────────────
 
 export const ChatStreamChunkSchema = z.object({

@@ -17,6 +17,10 @@ export type {
 } from "./chat/types.ts";
 
 export { sendChat, streamChat } from "./chat/service.ts";
+export { runAgentLoop } from "./chat/agent.ts";
+export type { RunAgentLoopOptions } from "./chat/agent.ts";
+
+export type { AgentResponse, ApprovalRequiredResponse } from "./chat/types.ts";
 
 // ── Tool Orchestration ─────────────────────────────────────────────────
 export {
@@ -53,3 +57,9 @@ export type {
   CreateEventInput,
   CreateEventOutput,
 } from "./tools/index.ts";
+
+export { toOpenAiToolDefs } from "./tools/convert.ts";
+export type { OpenAiToolDef } from "./tools/convert.ts";
+
+export type { PendingApprovalStore, PendingApproval } from "./tools/approval-store.ts";
+export { ApprovalStatus } from "./tools/approval-store.ts";
