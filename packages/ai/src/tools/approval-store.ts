@@ -52,5 +52,18 @@ export interface PendingApprovalStore {
       executedAt?: Date;
     },
   ): Promise<PendingApproval | undefined>;
+
+  /**
+   * Atomically transition from PENDING → APPROVED.
+   * Returns true if the transition succeeded, false if already consumed.
+   * Prevents approval replay attacks.
+   */
+  useOnce(id: string): Promise<boolean>;
+
+  /**
+   * Count the number of PENDING approvals for a user.
+   * Used for approval flood protection.
+   */
+  countPendingByUser(userId: string): Promise<number>;
 }
 

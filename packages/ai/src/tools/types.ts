@@ -10,7 +10,49 @@ export enum ToolExecutionStatus {
   APPROVAL_CANCELLED = "approval_cancelled",
   TOOL_NOT_FOUND = "tool_not_found",
   PERMISSION_DENIED = "permission_denied",
+  // ── Write-guard block statuses ──
+  WRITE_GUARD_BLOCKED = "write_guard_blocked",
+  SECRET_EXFILTRATION_BLOCKED = "secret_exfiltration_blocked",
+  FINANCIAL_DATA_BLOCKED = "financial_data_blocked",
+  PHISHING_BLOCKED = "phishing_blocked",
+  BULK_EMAIL_BLOCKED = "bulk_email_blocked",
+  CALENDAR_SPAM_BLOCKED = "calendar_spam_blocked",
+  JAILBREAK_ATTEMPT = "jailbreak_attempt",
+  RATE_LIMIT_EXCEEDED = "rate_limit_exceeded",
+  APPROVAL_REPLAY_BLOCKED = "approval_replay_blocked",
+  APPROVAL_FLOOD_BLOCKED = "approval_flood_blocked",
+  POLICY_BYPASS_ATTEMPT = "policy_bypass_attempt",
+  AGENT_STEP_LIMIT_EXCEEDED = "agent_step_limit_exceeded",
 }
+
+// ── Audit event types ───────────────────────────────────────────────
+
+export const AuditEventType = {
+  // Normal flow
+  TOOL_EXECUTED: "TOOL_EXECUTED",
+  TOOL_FAILED: "TOOL_FAILED",
+  TOOL_NOT_FOUND: "TOOL_NOT_FOUND",
+  PERMISSION_DENIED: "PERMISSION_DENIED",
+  APPROVAL_REQUIRED: "APPROVAL_REQUIRED",
+  APPROVAL_GRANTED: "APPROVAL_GRANTED",
+  APPROVAL_CANCELLED: "APPROVAL_CANCELLED",
+  // Security blocks
+  SECRET_EXFILTRATION_BLOCKED: "SECRET_EXFILTRATION_BLOCKED",
+  FINANCIAL_DATA_BLOCKED: "FINANCIAL_DATA_BLOCKED",
+  PHISHING_BLOCKED: "PHISHING_BLOCKED",
+  BULK_EMAIL_BLOCKED: "BULK_EMAIL_BLOCKED",
+  CALENDAR_SPAM_BLOCKED: "CALENDAR_SPAM_BLOCKED",
+  JAILBREAK_ATTEMPT: "JAILBREAK_ATTEMPT",
+  RATE_LIMIT_EXCEEDED: "RATE_LIMIT_EXCEEDED",
+  APPROVAL_REPLAY_BLOCKED: "APPROVAL_REPLAY_BLOCKED",
+  APPROVAL_FLOOD_BLOCKED: "APPROVAL_FLOOD_BLOCKED",
+  POLICY_BYPASS_ATTEMPT: "POLICY_BYPASS_ATTEMPT",
+  SUSPICIOUS_RECIPIENT_DOMAIN: "SUSPICIOUS_RECIPIENT_DOMAIN",
+  WRITE_GUARD_BLOCKED: "WRITE_GUARD_BLOCKED",
+  AGENT_STEP_LIMIT_EXCEEDED: "AGENT_STEP_LIMIT_EXCEEDED",
+} as const;
+
+export type AuditEventType = (typeof AuditEventType)[keyof typeof AuditEventType];
 
 // ── Risk level ──────────────────────────────────────────────────────
 
@@ -72,6 +114,13 @@ export interface ToolResult {
   preview?: string;
   /** DeepSeek tool_call.id — needed to resume the conversation on approve */
   toolCallId?: string;
+  /** Metadata from the tool execution (sensitive flags, source, etc.) */
+  metadata?: {
+    /** Whether the result contains sensitive/tainted data */
+    sensitive?: boolean;
+    /** The source of the data (e.g., 'gmail', 'calendar') */
+    source?: string;
+  };
 }
 
 // ── Audit entry ──────────────────────────────────────────────────────
@@ -84,6 +133,12 @@ export interface AuditEntry {
   args: Record<string, unknown>;
   status: ToolExecutionStatus;
   timestamp: Date;
+  /** Human-readable reason for the block (only set for blocked statuses) */
+  blockReason?: string;
+  /** Machine-readable event type for security events */
+  eventType?: AuditEventType;
+  /** Warnings that didn't block execution (phishing LOW/MEDIUM, suspicious domains) */
+  warnings?: Array<{ eventType: AuditEventType; reason: string }>;
 }
 
 // ── Error classes ─────────────────────────────────────────────────────

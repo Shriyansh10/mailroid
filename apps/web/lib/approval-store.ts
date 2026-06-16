@@ -1,4 +1,4 @@
-import { eq } from "@repo/database";
+import { eq, and, sql } from "@repo/database";
 // @ts-ignore — re-exported via schema.ts
 import { pendingApprovals } from "@repo/database/schema";
 import {
@@ -106,5 +106,46 @@ export class DrizzleApprovalStore implements PendingApprovalStore {
       .where(eq(pendingApprovals.id, id));
 
     return this.get(id);
+  }
+
+  /**
+   * Atomically transition from PENDING → APPROVED.
+   * Uses a conditional UPDATE that only succeeds if status is still PENDING.
+   * Returns true if the transition happened, false if already consumed.
+   * Prevents approval replay attacks.
+   */
+  async useOnce(id: string): Promise<boolean> {
+    const result = await this.db
+      .update(pendingApprovals)
+      .set({
+        status: "APPROVED" as const,
+        approvedAt: new Date(),
+      })
+      .where(
+        and(
+          eq(pendingApprovals.id, id),
+          eq(pendingApprovals.status, "PENDING"),
+        ),
+      )
+      .returning({ id: pendingApprovals.id });
+
+    return result.length > 0;
+  }
+
+  /**
+   * Count the number of PENDING approvals for a user.
+   */
+  async countPendingByUser(userId: string): Promise<number> {
+    const result = await this.db
+      .select({ count: sql<number>`count(*)` })
+      .from(pendingApprovals)
+      .where(
+        and(
+          eq(pendingApprovals.userId, userId),
+          eq(pendingApprovals.status, "PENDING"),
+        ),
+      );
+
+    return Number(result[0]?.count ?? 0);
   }
 }

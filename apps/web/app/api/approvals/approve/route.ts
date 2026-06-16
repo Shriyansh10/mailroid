@@ -69,22 +69,26 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Approval not found" }, { status: 404 });
     }
 
-    if (approval.status !== "PENDING") {
-      return NextResponse.json(
-        { error: `Approval already ${approval.status.toLowerCase()}` },
-        { status: 409 },
-      );
-    }
-
     if (approval.userId !== userId) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 403 });
     }
 
-    // ── Mark APPROVED ──────────────────────────────────────────────
-    await approvalStore.update(body.approvalId, {
-      status: "APPROVED",
-      approvedAt: new Date(),
-    });
+    // ── Expiry check ──────────────────────────────────────────────
+    if (approval.expiresAt && new Date(approval.expiresAt) < new Date()) {
+      return NextResponse.json(
+        { error: "Approval has expired" },
+        { status: 410 },
+      );
+    }
+
+    // ── Atomic single-use: only succeeds if still PENDING ──────────
+    const claimed = await approvalStore.useOnce(body.approvalId);
+    if (!claimed) {
+      return NextResponse.json(
+        { error: "Approval already consumed (replay blocked)" },
+        { status: 409 },
+      );
+    }
 
     // ── Execute tool ───────────────────────────────────────────────
     const requestId = crypto.randomUUID();

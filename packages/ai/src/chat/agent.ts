@@ -3,7 +3,10 @@ import type { ChatMessage } from "./types.ts";
 import type { AgentResponse } from "./types.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
 import type { ToolResult } from "../tools/types.ts";
+import { AuditEventType } from "../tools/types.ts";
 import { toOpenAiToolDefs } from "../tools/convert.ts";
+import { firewall } from "../security/policies.ts";
+import { detectPromptInjection } from "../security/prompt-injection.ts";
 import type OpenAI from "openai";
 
 // ── Internal message type ──────────────────────────────────────────────
@@ -89,7 +92,7 @@ export async function runAgentLoop(
     registry,
     execute,
     userId: _userId,
-    maxIterations = 10,
+    maxIterations = 5,
   } = options;
 
   const toolDefs = toOpenAiToolDefs(registry);
@@ -99,6 +102,28 @@ export async function runAgentLoop(
     role: m.role as "system" | "user",
     content: m.content,
   }));
+
+  // ── Security: sanitize user messages before DeepSeek sees them ────
+  for (const msg of conversation) {
+    if (msg.role === "user") {
+      msg.content = firewall.sanitizeMessage(msg.content);
+    }
+  }
+
+  // ── Jailbreak detection: audit user messages for policy bypass ────
+  for (const msg of conversation) {
+    if (msg.role === "user") {
+      const injectionMatches = detectPromptInjection(msg.content);
+      if (injectionMatches.length > 0) {
+        console.log(
+          `[SECURITY] ${AuditEventType.POLICY_BYPASS_ATTEMPT} | ` +
+          `user=${_userId} | ` +
+          `matches=${injectionMatches.length} | ` +
+          `patterns=${injectionMatches.map((m) => m.pattern.slice(0, 40)).join(", ")}`,
+        );
+      }
+    }
+  }
 
   const start = Date.now();
 
@@ -169,6 +194,12 @@ export async function runAgentLoop(
 
         const result = await execute(toolName, args);
 
+        // ── Security: sanitize tool output before DeepSeek sees it ──
+        const safeResult = {
+          ...result,
+          data: firewall.sanitizeToolOutput(toolName, result.data),
+        };
+
         // ── Approval required: stop and return to UI ──────────────────
         if (result.status === "approval_required") {
           console.log("[agent:approval-required]", {
@@ -190,17 +221,18 @@ export async function runAgentLoop(
           };
         }
 
-        // Serialize the result for the LLM
-        const resultContent =
-          result.status === "success"
-            ? JSON.stringify(result.data)
-            : JSON.stringify({ error: result.error ?? `Tool execution failed: ${result.status}` });
+        // ── XML framing: separate tool data from conversation ──
+        // Prevents email/event content from being interpreted as instructions
+        const framedContent =
+          safeResult.status === "success"
+            ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
+            : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: safeResult.error ?? `Tool execution failed: ${safeResult.status}` })}\n</tool_error>`;
 
-        // Push the tool result back into the conversation
+        // Push the framed tool result back into the conversation
         conversation.push({
           role: "tool",
           tool_call_id: tc.id,
-          content: resultContent,
+          content: framedContent,
         });
       }
 
@@ -215,9 +247,15 @@ export async function runAgentLoop(
 
   // ── Safety limit reached ────────────────────────────────────────────
   console.warn("[agent:max-iterations]", { maxIterations, durationMs: Date.now() - start });
+  console.log(
+    `[SECURITY] ${AuditEventType.AGENT_STEP_LIMIT_EXCEEDED} | ` +
+    `user=${_userId} | ` +
+    `iterations=${maxIterations} | ` +
+    `maxIterations=${maxIterations}`,
+  );
   return {
     role: "assistant",
-    content: "I've reached the maximum number of steps. Please try rephrasing your request.",
+    content: "I've completed the maximum number of steps (5). Please try a more specific request.",
   };
 }
 

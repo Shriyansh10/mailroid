@@ -1,4 +1,4 @@
-export { ToolExecutionStatus, RiskLevel } from "./types.ts";
+export { ToolExecutionStatus, AuditEventType, RiskLevel } from "./types.ts";
 export type {
   ToolDefinition,
   ToolCall,

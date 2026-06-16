@@ -25,6 +25,7 @@ export type { AgentResponse, ApprovalRequiredResponse } from "./chat/types.ts";
 // ── Tool Orchestration ─────────────────────────────────────────────────
 export {
   ToolExecutionStatus,
+  AuditEventType,
   RiskLevel,
   ToolCallSchema,
   ToolNotFoundError,
@@ -63,3 +64,19 @@ export type { OpenAiToolDef } from "./tools/convert.ts";
 
 export type { PendingApprovalStore, PendingApproval } from "./tools/approval-store.ts";
 export { ApprovalStatus } from "./tools/approval-store.ts";
+
+// ── Security Firewall ─────────────────────────────────────────────────
+export { SecurityFirewall, firewall } from "./security/index.ts";
+export { detectSensitive, isSensitive } from "./security/index.ts";
+export { sanitizeText, sanitizeToolResult } from "./security/index.ts";
+export { detectPromptInjection } from "./security/index.ts";
+export { SecurityEventType, SensitivityCategory } from "./security/index.ts";
+export { WriteGuard, writeGuard, PhishingRisk } from "./security/index.ts";
+export { RateLimiter, rateLimiter } from "./security/index.ts";
+export type {
+  SecurityEvent,
+  DetectionResult,
+  SanitizationResult,
+  WriteGuardResult,
+  RateCheckResult,
+} from "./security/index.ts";
