@@ -1,5 +1,4 @@
-import { corsairInstanceIdEnv, googleClientKeysEnv } from '../env.js'
-import { corsairClient,corsair } from "@repo/corsair";
+import { corsair } from "@repo/corsair";
 import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, type GetGmailOAuthUrlOutput, type GetCalendarOAuthUrlOutput, type ConnectedPluginsOutput, type ConnectedAccountsOutput, type GetAccountsExistOutput } from "./model.js";
 import { setupCorsair } from "corsair";
 import { generateOAuthUrl, processOAuthCallback } from "corsair/oauth";
@@ -8,72 +7,43 @@ import { corsairConnectionEmails } from "@repo/database/models/corsair-connectio
 import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
-    const { userId:parseduserId } = await ensureTenantInput.parseAsync({ userId });
-     await setupCorsair(corsair, {
-    tenantId: parseduserId,
-  });
-  const inst = corsairClient.instance(
-    corsairInstanceIdEnv.CORSAIR_INSTANCE_ID as string,
-  );
-  await inst.runtime.refresh();
-
-console.log('after refresh: ', await inst.runtime.status());
-
-  try {
-  const tenant = await inst.tenant(parseduserId).get();
-  console.log("Tenant already exists");
-  return tenant;
-} catch {
-  console.log("Creating tenant");
-  return await inst.tenants.create(parseduserId);
-}
+    const { userId: parseduserId } = await ensureTenantInput.parseAsync({ userId });
+    await setupCorsair(corsair, {
+        tenantId: parseduserId,
+    });
+    console.log("Tenant ensured for user:", parseduserId);
+    return { tenantId: parseduserId };
 }
 
 export async function authorizePlugins({
   userId,
 }: AuthorizePluginsInputType): Promise<AuthorizePluginsOutputType> {
 
-    const { GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET } = googleClientKeysEnv;
   // ── 1. Validate input ──────────────────────────────────────────────
   const { userId: parsedUserId } =
     await authorizePluginsInput.parseAsync({ userId });
 
-
-  // ── 2. Get the Corsair HTTP API client instance ────────────────────
-  const inst = corsairClient.instance(corsairInstanceIdEnv.CORSAIR_INSTANCE_ID as string);
-
+  // ── 2. Ensure tenant exists locally (SDK) ──────────────────────────
   await ensureTenant({ userId: parsedUserId });
 
-  // ── 3. Set root-level Google OAuth credentials ─────────────────────
-  // Corsair uses these to provision per-tenant OAuth tokens.
-  // Each tenant's tokens are encrypted with their own DEK.
+  // ── 3. Generate Gmail OAuth URL via SDK (local OAuth flow) ─────────
+  // Tokens are stored encrypted in the local database on callback.
+  const callbackUrl = process.env.GMAIL_OAUTH_CALLBACK_URL ??
+    "http://localhost:8000/api/auth/gmail-callback";
 
-  await pluginSetRoot(inst, "gmail", "client_id", GOOGLE_CLIENT_ID as string);
-  await pluginSetRoot(inst, "gmail", "client_secret", GOOGLE_CLIENT_SECRET as string);
-  await pluginSetRoot(inst, "googlecalendar", "client_id", GOOGLE_CLIENT_ID as string);
-  await pluginSetRoot(inst, "googlecalendar", "client_secret", GOOGLE_CLIENT_SECRET as string);
-
-  
-  // ── 4. Generate the Connect Link ───────────────────────────────────
-  const tenant = inst.tenant(parsedUserId);
-
-  const { url } = await tenant.connectLink.create({
-    plugins: ["gmail", "googlecalendar"],
+  const { url } = await generateOAuthUrl(corsair, "gmail", {
+    tenantId: parsedUserId,
+    redirectUri: callbackUrl,
   });
 
   return { url };
 }
 
-const pluginSetRoot = async (tenant: any, pluginName: string, key: string, value: string) => {
-    await tenant.plugins.credentials.setRoot(pluginName, key, value);
-}
-
 /**
  * Generates a Gmail OAuth authorization URL using the Corsair SDK.
  *
- * Unlike `authorizePlugins` (which uses Corsair App's connectLink.create),
- * this uses the SDK's `generateOAuthUrl` — when the callback processes the
- * code, tokens are stored directly in your local database (same as CLI flow).
+ * When the callback processes the code, tokens are stored encrypted
+ * in your local database.
  *
  * The caller should:
  *   1. Redirect the user to `url`

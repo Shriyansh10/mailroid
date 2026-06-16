@@ -3,6 +3,16 @@
   "version": "1.0.0",
   "private": true,
   "type": "module",
+  "exports": {
+    "./gmail/index": "./gmail/index.ts",
+    "./gmail/index.js": "./gmail/index.ts",
+    "./calendar/index": "./calendar/index.ts",
+    "./calendar/index.js": "./calendar/index.ts",
+    "./tenant/index": "./tenant/index.ts",
+    "./tenant/index.js": "./tenant/index.ts",
+    "./clients/index": "./clients/index.ts",
+    "./clients/index.js": "./clients/index.ts"
+  },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",

@@ -27,9 +27,6 @@ importers:
 
   apps/api:
     dependencies:
-      '@corsair-dev/app':
-        specifier: ^0.1.5
-        version: 0.1.5
       '@repo/corsair':
         specifier: workspace:*
         version: link:../../packages/corsair
@@ -199,6 +196,24 @@ importers:
       '@repo/ai':
         specifier: workspace:*
         version: link:../../packages/ai
+      '@repo/corsair':
+        specifier: workspace:*
+        version: link:../../packages/corsair
+      '@repo/database':
+        specifier: workspace:*
+        version: link:../../packages/database
+      '@repo/inngest':
+        specifier: workspace:*
+        version: link:../../packages/inngest
+      '@repo/logger':
+        specifier: workspace:*
+        version: link:../../packages/logger
+      '@repo/services':
+        specifier: workspace:*
+        version: link:../../packages/services
+      '@repo/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
       '@repo/trpc':
         specifier: workspace:*
         version: link:../../packages/trpc
@@ -348,9 +363,6 @@ importers:
 
   packages/corsair:
     dependencies:
-      '@corsair-dev/app':
-        specifier: ^0.1.5
-        version: 0.1.5
       '@corsair-dev/cli':
         specifier: ^0.1.19
         version: 0.1.19
@@ -939,9 +951,6 @@ packages:
   '@colors/colors@1.6.0':
     resolution: {integrity: sha512-Ir+AOibqzrIsL6ajt3Rz3LskB7OiMVHqltZmspbW/TJuTVuyOMirVqAkjfY6JISiLHgyNqicAC8AyHHGzNd/dA==}
     engines: {node: '>=0.1.90'}
-
-  '@corsair-dev/app@0.1.5':
-    resolution: {integrity: sha512-Rm5+3LI57DpNHvuznogWpsCMW6eiIhxdIRsaqrJf/d/MBsEoAT5ReH0WCLp/RzxckrbpIDUMNNPxM6kTvTNJ7g==}
 
   '@corsair-dev/cli@0.1.19':
     resolution: {integrity: sha512-48FHBNa6aMqfwq2xwPxKmvwMWS+x3L5tWZvR1J4JLXRxpu43Es8zrYxNxJEV7a4/QLJI/UN6vAP8xJ4R5xFbYw==}
@@ -6365,10 +6374,6 @@ snapshots:
       sisteransi: 1.0.5
 
   '@colors/colors@1.6.0': {}
-
-  '@corsair-dev/app@0.1.5':
-    dependencies:
-      zod: 4.4.3
 
   '@corsair-dev/cli@0.1.19':
     dependencies:
