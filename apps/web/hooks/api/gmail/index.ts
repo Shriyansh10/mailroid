@@ -132,3 +132,58 @@ export const useStoredEmailCount = () => {
 
   return { data, isLoading, isError, error, refetch };
 };
+
+export const useSearchLocalEmails = (query: string) => {
+  const {
+    data,
+    error,
+    isError,
+    isLoading,
+    isSuccess,
+    status,
+    refetch,
+  } = trpc.gmail.searchLocal.useQuery(
+    { query },
+    { enabled: !!query },
+  );
+
+  return {
+    data,
+    error,
+    isError,
+    isLoading,
+    isSuccess,
+    status,
+    refetch,
+  };
+};
+export const useGenerateEmbeddings = () => {
+  const {
+    mutateAsync: generateEmbeddingsAsync,
+    mutate: generateEmbeddings,
+    error,
+    isError,
+    isPending,
+    isSuccess,
+    reset,
+    status,
+  } = trpc.gmail.generateEmbeddings.useMutation();
+
+  return {
+    generateEmbeddingsAsync,
+    generateEmbeddings,
+    error,
+    isError,
+    isPending,
+    isSuccess,
+    reset,
+    status,
+  };
+};
+
+export const usePendingEmbeddingsCount = () => {
+  const { data, isLoading, isError, error, refetch } =
+    trpc.gmail.pendingEmbeddingsCount.useQuery();
+
+  return { data, isLoading, isError, error, refetch };
+};

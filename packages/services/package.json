@@ -13,8 +13,11 @@
     "@repo/corsair": "workspace:*",
     "@repo/database": "workspace:*",
     "@repo/logger": "workspace:*",
+    "@repo/ai": "workspace:*",
+    "@repo/inngest": "workspace:*",
     "corsair": "0.1.76",
     "google-auth-library": "^10.5.0",
+    "openai": "^6.42.0",
     "zod": "^4.3.5"
   }
 }

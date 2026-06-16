@@ -1,5 +1,5 @@
 import { corsair } from "@repo/corsair";
-import { db, eq, sql } from "@repo/database";
+import { db, eq, sql, and, or, ilike } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
 import type {
   ThreadSummary,
@@ -10,7 +10,11 @@ import type {
   SendEmailResult,
   SyncResult,
   EmailCount,
+  LocalSearchResult,
+  EmbedResult,
+  PendingEmbeddingsCount,
 } from "./model.js";
+import OpenAI from "openai";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -407,4 +411,178 @@ export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
     .from(emails)
     .where(eq(emails.userId, userId));
   return { count: Number(result[0]?.count ?? 0) };
+}
+
+/**
+ * Search ALL locally indexed emails for the given user using ILIKE.
+ * Scoped strictly to userId — never leaks across users.
+ * Vector-search ready: swap ILIKE for embedding <=> queryEmbedding when available.
+ */
+export async function searchLocalEmails(
+  userId: string,
+  query: string,
+): Promise<LocalSearchResult> {
+  const pattern = `%${query}%`;
+
+  const rows = await db
+    .select({
+      gmailMessageId: emails.gmailMessageId,
+      threadId: emails.threadId,
+      subject: emails.subject,
+      from: emails.from,
+      snippet: emails.snippet,
+      receivedAt: emails.receivedAt,
+    })
+    .from(emails)
+    .where(
+      and(
+        eq(emails.userId, userId),
+        or(
+          ilike(emails.bodyText, pattern),
+          ilike(emails.subject, pattern),
+          ilike(emails.from, pattern),
+          ilike(emails.snippet, pattern),
+        ),
+      ),
+    )
+    .orderBy(sql`${emails.receivedAt} DESC NULLS LAST`);
+
+  const threads: ThreadSummary[] = rows.map((r) => ({
+    threadId: r.threadId,
+    sender: r.from ?? "",
+    subject: r.subject ?? "(no subject)",
+    date: r.receivedAt ? new Date(r.receivedAt).toISOString() : "",
+    snippet: r.snippet ?? "",
+  }));
+
+  return { threads, total: threads.length };
+}
+
+// ── Embeddings ───────────────────────────────────────────────────────
+
+function getEmbeddingsClient(): OpenAI {
+  return new OpenAI({
+    apiKey: process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
+    baseURL: process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? undefined,
+  });
+}
+
+function getEmbeddingsModel(): string {
+  return process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small";
+}
+
+const EMBED_BATCH_SIZE = 20;
+
+/**
+ * Validate the embeddings API connection on server boot.
+ * Makes a lightweight test call to verify API key, model, network, and credits.
+ * Logs result to console — no UI needed.
+ */
+export async function validateEmbeddingsApi(): Promise<void> {
+  const client = getEmbeddingsClient();
+  const model = getEmbeddingsModel();
+
+  try {
+    const response = await client.embeddings.create({ model, input: "test" });
+
+    if (!response.data?.[0]?.embedding) {
+      console.warn(`[embeddings] ⚠️ API responded but returned no vector (model: ${model})`);
+      return;
+    }
+
+    console.info(`[embeddings] ✅ API OK — model=${model} base=${client.baseURL ?? "default"} dims=${response.data[0].embedding.length}`);
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err);
+    const status = (err as { status?: number }).status;
+
+    if (status === 401) {
+      console.error(`[embeddings] ❌ Invalid API key (401). Check EMBEDDINGS_API_KEY.`);
+    } else if (status === 402 || /insufficient|quota|credits?|billing/i.test(message)) {
+      console.error(`[embeddings] ❌ Insufficient credits/quota (402). Check billing.`);
+    } else if (status === 403) {
+      console.error(`[embeddings] ❌ Access denied (403). Key lacks permissions.`);
+    } else if (status === 404 || /not found|model/i.test(message)) {
+      console.error(`[embeddings] ❌ Model '${model}' not found at provider. Check EMBEDDINGS_MODEL.`);
+    } else if (/ENOTFOUND|ECONNREFUSED|ETIMEDOUT/i.test(message)) {
+      console.error(`[embeddings] ❌ Cannot reach ${client.baseURL ?? "API"}. Network error.`);
+    } else {
+      console.error(`[embeddings] ❌ API failure — ${message}`);
+    }
+  }
+}
+
+/**
+ * Generate embeddings for all emails that don't have one yet.
+ * Batches 20 at a time. Idempotent — safe to re-run.
+ */
+export async function generateMissingEmbeddings(userId: string): Promise<EmbedResult> {
+  console.log(`[embeddings] starting for userId=${userId}`);
+
+  const unEmbedded = await db
+    .select({
+      id: emails.id,
+      subject: emails.subject,
+      bodyText: emails.bodyText,
+    })
+    .from(emails)
+    .where(and(eq(emails.userId, userId), sql`${emails.embedding} IS NULL`));
+
+  if (unEmbedded.length === 0) return { embedded: 0 };
+
+  let embedded = 0;
+
+  for (let i = 0; i < unEmbedded.length; i += EMBED_BATCH_SIZE) {
+    const batch = unEmbedded.slice(i, i + EMBED_BATCH_SIZE);
+    const texts = batch.map(
+      (e) => ((e.subject ?? "") + "\n\n" + (e.bodyText ?? "")).slice(0, 8000),
+    );
+
+    try {
+      const response = await getEmbeddingsClient().embeddings.create({
+        model: getEmbeddingsModel(),
+        input: texts,
+      });
+
+      const vectors = response.data.map((d: { embedding: number[] }) => d.embedding);
+
+      for (let j = 0; j < batch.length; j++) {
+        const vec = vectors[j];
+        if (!vec) {
+          console.warn(`[embeddings] no vector returned for email ${batch[j]!.id}, skipping`);
+          continue;
+        }
+
+        try {
+          await db
+            .update(emails)
+            .set({ embedding: vec })
+            .where(eq(emails.id, batch[j]!.id));
+        } catch (dbErr) {
+          console.error(`[embeddings] DB update failed for email ${batch[j]!.id}:`, dbErr);
+        }
+      }
+
+      embedded += batch.length;
+    } catch (apiErr) {
+      console.error(`[embeddings] API call failed for batch ${Math.floor(i / EMBED_BATCH_SIZE) + 1}:`, apiErr);
+      // Continue to next batch instead of aborting entirely
+    }
+  }
+
+  return { embedded };
+}
+
+/**
+ * Count emails that still need embeddings generated.
+ * Used for the "Generate Embeddings (N pending)" UI badge.
+ */
+export async function getPendingEmbeddingsCount(
+  userId: string,
+): Promise<PendingEmbeddingsCount> {
+  const result = await db
+    .select({ pending: sql<number>`count(*)` })
+    .from(emails)
+    .where(and(eq(emails.userId, userId), sql`${emails.embedding} IS NULL`));
+
+  return { pending: Number(result[0]?.pending ?? 0) };
 }

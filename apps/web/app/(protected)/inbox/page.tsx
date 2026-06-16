@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useMemo, useRef } from "react";
-import { useThreads, useSearchEmails } from "@web/hooks/api/gmail";
+import { useThreads, useSearchEmails, useSearchLocalEmails } from "@web/hooks/api/gmail";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   Table,
@@ -20,20 +20,48 @@ const PAGE_SIZE = 20;
 export default function InboxPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const query = searchParams.get("q") ?? "";
-  const rawPageToken = searchParams.get("pageToken"); // string | null
-  const pageToken = rawPageToken ?? undefined; // string | undefined for hooks
+  const searchMode = (searchParams.get("mode") as "gmail" | "ai") ?? "gmail";
+  const query = searchMode === "gmail"
+    ? (searchParams.get("q") ?? "")
+    : (searchParams.get("aiq") ?? "");
+  const rawPageToken = searchParams.get("pageToken");
+  const pageToken = rawPageToken ?? undefined;
 
-  // Use search hook when query is present, threads hook otherwise
+  // Gmail mode: use existing Corsair search or threads listing
   const threadsResult = useThreads(
     query ? undefined : { maxResults: PAGE_SIZE, pageToken },
   );
-  const searchResult = useSearchEmails(query, {
+  const gmailSearchResult = useSearchEmails(query, {
     maxResults: PAGE_SIZE,
     pageToken,
   });
 
-  const { data, isLoading, isError, error } = query ? searchResult : threadsResult;
+  // Dobbie mode: use local ILIKE search on indexed emails only
+  const localSearchResult = useSearchLocalEmails(query);
+
+  const { data, isLoading, isError, error } =
+    searchMode === "ai" && query
+      ? {
+          data: localSearchResult.data?.threads
+            ? { threads: localSearchResult.data.threads, nextPageToken: null }
+            : undefined,
+          isLoading: localSearchResult.isLoading,
+          isError: localSearchResult.isError,
+          error: localSearchResult.error,
+        }
+      : query
+        ? {
+            data: gmailSearchResult.data,
+            isLoading: gmailSearchResult.isLoading,
+            isError: gmailSearchResult.isError,
+            error: gmailSearchResult.error,
+          }
+        : {
+            data: threadsResult.data,
+            isLoading: threadsResult.isLoading,
+            isError: threadsResult.isError,
+            error: threadsResult.error,
+          };
 
   // Page token history stack for previous navigation
   const prevTokensRef = useRef<string[]>([]);
@@ -84,6 +112,7 @@ export default function InboxPage() {
   const hasPrevious = rawPageToken !== null;
   const hasNext = Boolean(data?.nextPageToken);
   const isSearchActive = query.length > 0;
+  const isDobbieSearch = searchMode === "ai" && isSearchActive;
 
   // Page number indicator
   const pageNumber = useMemo(() => {
@@ -116,7 +145,23 @@ export default function InboxPage() {
   return (
     <div>
       {/* Search status message */}
-      {isSearchActive && (
+      {isDobbieSearch && (
+        <div style={{ color: "var(--muted-foreground, #888)", fontSize: "0.85rem", marginBottom: "1rem" }}>
+          <p>
+            Dobbie search results for: <strong>{query}</strong>
+          </p>
+          <p style={{ fontSize: "0.8rem", marginTop: "0.25rem" }}>
+            Results from all your indexed emails.
+          </p>
+          {threads.length === 0 && (
+            <p style={{ marginTop: "0.5rem", color: "var(--destructive, #ef4444)" }}>
+              No results found. Try syncing more emails or using different search terms.
+            </p>
+          )}
+        </div>
+      )}
+
+      {isSearchActive && !isDobbieSearch && (
         <p style={{ color: "var(--muted-foreground, #888)", fontSize: "0.85rem", marginBottom: "1rem" }}>
           Search results for: <strong>{query}</strong>
           {threads.length === 0 && " — No results found."}
@@ -152,7 +197,8 @@ export default function InboxPage() {
             </TableBody>
           </Table>
 
-          {/* Pagination controls */}
+          {/* Pagination (Gmail mode only — Dobbie has no pages) */}
+          {!isDobbieSearch && (
           <div
             style={{
               display: "flex",
@@ -187,6 +233,7 @@ export default function InboxPage() {
               <ChevronRightIcon className="size-4" />
             </Button>
           </div>
+          )}
         </>
       )}
     </div>
