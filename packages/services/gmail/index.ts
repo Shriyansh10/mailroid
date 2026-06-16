@@ -14,7 +14,7 @@ import type {
   LocalSearchResult,
   EmbedResult,
   PendingEmbeddingsCount,
-} from "./model.js";
+} from "./model.ts";
 import { createEmbedding, createEmbeddingsBatch, embedSearchQuery } from "@repo/ai";
 
 // ── Helpers ──────────────────────────────────────────────────────────

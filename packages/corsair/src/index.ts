@@ -1,4 +1,2 @@
-// @ts-ignore
-export { corsair } from "./corsair";
-// @ts-ignore
-export { getTenant } from "./tenant";
+export { corsair } from "./corsair.ts";
+export { getTenant } from "./tenant.ts";

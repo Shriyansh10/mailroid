@@ -4,7 +4,7 @@ import type {
   GetEventsInput,
   CreateEventInput,
   UpdateEventInput,
-} from "./model.js";
+} from "./model.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
