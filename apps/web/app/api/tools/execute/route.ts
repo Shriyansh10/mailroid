@@ -8,12 +8,15 @@ import {
   ToolExecutionStatus,
 } from "@repo/ai";
 import crypto from "node:crypto";
+import { registerProductionExecutors } from "@web/lib/executors/index";
 
 export const runtime = "nodejs";
 
 // ── Singletons (created once at module level) ───────────────────────
 
 const registry = new ToolRegistry();
+registerProductionExecutors(registry);
+
 const permissions = new PermissionService();
 const auditLogger = new ConsoleAuditLogger();
 const orchestrator = new ToolOrchestrator(registry, permissions, auditLogger);
