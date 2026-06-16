@@ -4,6 +4,8 @@
   "extends": "./base.json",
   "compilerOptions": {
     "moduleResolution": "nodenext",
-    "module": "nodenext"
+    "module": "nodenext",
+    "allowImportingTsExtensions": true,
+    "noEmit": true
   }
 }
