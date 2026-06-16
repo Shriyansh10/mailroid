@@ -58,16 +58,30 @@ function normalizeEvent(raw: RawEvent): CalendarEvent {
 
 /**
  * Build the Corsair start/end object from our simplified input.
+ *
+ * Google Calendar API requires either:
+ *   - dateTime with an offset (e.g. "2025-02-26T10:00:00+05:30")
+ *   - dateTime with a separate timeZone field
+ *
+ * If the input has no offset, we add timeZone: "UTC" as a safe default.
  */
 function buildEventTime(
   isoString: string,
   allDay: boolean
-): { date?: string; dateTime?: string } {
+): { date?: string; dateTime?: string; timeZone?: string } {
   if (allDay) {
     // All-day events use YYYY-MM-DD format
     return { date: isoString.slice(0, 10) };
   }
-  return { dateTime: isoString };
+
+  // Check if the string already has a timezone offset (+HH:MM, -HH:MM, or Z)
+  const hasOffset = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoString);
+  if (hasOffset) {
+    return { dateTime: isoString };
+  }
+
+  // No offset — append timeZone so Google Calendar accepts it
+  return { dateTime: isoString, timeZone: "UTC" };
 }
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -117,16 +131,19 @@ export async function createEvent(
   const tenant = corsair.withTenant(tenantId);
   const allDay = input.allDay ?? false;
 
-  const raw = await tenant.googlecalendar.api.events.create({
-    event: {
-      summary: input.title,
-      description: input.description,
-      location: input.location,
-      start: buildEventTime(input.start, allDay),
-      end: buildEventTime(input.end, allDay),
-      attendees: input.attendees?.map((email) => ({ email })),
-    },
-  });
+  const event: Record<string, unknown> = {
+    summary: input.title,
+    start: buildEventTime(input.start, allDay),
+    end: buildEventTime(input.end, allDay),
+  };
+
+  if (input.description) event.description = input.description;
+  if (input.location) event.location = input.location;
+  if (input.attendees?.length) {
+    event.attendees = input.attendees.map((email) => ({ email }));
+  }
+
+  const raw = await tenant.googlecalendar.api.events.create({ event });
 
   return normalizeEvent(raw as unknown as RawEvent);
 }

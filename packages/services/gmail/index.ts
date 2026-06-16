@@ -289,6 +289,14 @@ export async function searchEmails(
     pageToken: opts?.pageToken,
   });
 
+  console.log("[gmail:searchEmails] threads.list raw", {
+    tenantId,
+    query,
+    resultThreadCount: (result.threads ?? []).length,
+    nextPageToken: result.nextPageToken ?? null,
+    rawResult: JSON.stringify(result).slice(0, 500),
+  });
+
   const threadStubs = result.threads ?? [];
   if (threadStubs.length === 0) {
     return { threads: [], nextPageToken: null };

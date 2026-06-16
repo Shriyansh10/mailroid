@@ -21,6 +21,9 @@ export { ToolOrchestrator } from "./orchestrator.ts";
 export type { AuditLogger } from "./audit.ts";
 export { ConsoleAuditLogger } from "./audit.ts";
 
+export type { PendingApprovalStore, PendingApproval } from "./approval-store.ts";
+export { ApprovalStatus } from "./approval-store.ts";
+
 export type { ToolExecutor } from "./tool-executor.ts";
 export {
   SearchEmailsExecutor,

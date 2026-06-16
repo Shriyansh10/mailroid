@@ -27,9 +27,11 @@ export class SearchEmailsExecutor
   implements ToolExecutor<SearchEmailsInput, SearchEmailsOutput>
 {
   async execute(
-    _args: SearchEmailsInput,
-    _ctx: ToolExecutionContext,
+    args: SearchEmailsInput,
+    ctx: ToolExecutionContext,
   ): Promise<SearchEmailsOutput> {
+    console.log("SEARCH USER", ctx.userId);
+    console.log("SEARCH QUERY", args.query);
     return { emails: [] };
   }
 }

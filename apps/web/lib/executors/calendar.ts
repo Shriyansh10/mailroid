@@ -1,6 +1,6 @@
 import type { ToolExecutor } from "@repo/ai";
 import { ToolExecutionError } from "@repo/ai";
-import { getEvents as corsairGetEvents } from "@repo/services/calendar/index";
+import { getEvents as corsairGetEvents, createEvent as corsairCreateEvent } from "@repo/services/calendar/index";
 
 const MAX_EVENT_RESULTS = 20;
 
@@ -58,3 +58,60 @@ export class CorsairGetEventsExecutor
     }
   }
 }
+
+// ── createEvent ──────────────────────────────────────────────────────
+
+export interface CreateEventInput {
+  title: string;
+  start: string;
+  end: string;
+  attendees?: string[];
+  description?: string;
+}
+
+export interface CreateEventOutput {
+  draft: boolean;
+  id?: string;
+}
+
+/**
+ * Production executor for createEvent.
+ *
+ * Delegates to @repo/services/calendar → createEvent() which calls
+ * Corsair's Google Calendar events.create().
+ *
+ * Returns the created event ID on success.
+ */
+export class CorsairCreateEventExecutor
+  implements ToolExecutor<CreateEventInput, CreateEventOutput>
+{
+  async execute(
+    args: CreateEventInput,
+    ctx: { userId: string; requestId: string },
+  ): Promise<CreateEventOutput> {
+    console.log("[executor:createEvent] START", {
+      userId: ctx.userId,
+      title: args.title,
+      start: args.start,
+      end: args.end,
+      attendees: args.attendees,
+    });
+    try {
+      const result = await corsairCreateEvent(ctx.userId, {
+        title: args.title,
+        start: args.start,
+        end: args.end,
+        allDay: false,
+        attendees: args.attendees,
+        description: args.description,
+      });
+
+      console.log("[executor:createEvent] SUCCESS", { id: result.id, title: result.title });
+      return { draft: false, id: result.id };
+    } catch (error) {
+      console.error("[executor:createEvent] ERROR", { error: String(error), userId: ctx.userId });
+      throw new ToolExecutionError("createEvent", error);
+    }
+  }
+}
+
