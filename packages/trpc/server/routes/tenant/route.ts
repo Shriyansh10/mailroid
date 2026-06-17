@@ -22,24 +22,20 @@ export const authRouter = router({
       },
     })
     .input(zodUndefinedModel)
-    .output(z.object({ 
-        token: z.string().nullable()
-    }))
+    .output(z.any())
     .query(async ({ ctx }) => {
         const tenant = corsair.withTenant(ctx.user.id);
-        const profile = await (tenant.gmail.api as any).users.getProfile({ userId: "me" });
-        console.log("[storeGmailConnectedEmail] profile:", JSON.stringify(profile));
-        const messages = await (tenant.gmail.api as any).users.messages.list({ userId: "me" });
-        console.log("GMAIL MESSAGES:", messages.messages?.[0]?.threadId);
-        if (messages.messages?.[0]?.threadId) {
-          const message = await (tenant.gmail.api as any).users.messages.get({
+        const messages = await tenant.gmail.db.messages.list();
+        console.log("GMAIL MESSAGES:", messages[10]);
+        if (messages.messages?.[1]?.threadId) {
+          const message = await tenant.gmail.db.messages.get({
             userId: "me",
-            id: messages.messages[0].threadId,
+            id: messages.messages[1].threadId,
             format: "full",
           });
           console.log(message);
         }
-        return { token: 'ok' };
+        return messages;
     }),
 
     createTenant: protectedProcedure

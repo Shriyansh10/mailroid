@@ -43,6 +43,13 @@
       "when": 1781626215547,
       "tag": "0005_spooky_bruce_banner",
       "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1781681778051,
+      "tag": "0008_round_professor_monster",
+      "breakpoints": true
     }
   ]
 }
