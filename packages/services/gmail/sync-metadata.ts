@@ -29,7 +29,6 @@ export function deriveCategory(labels: string[]): string {
   for (const label of labels) {
     const match = LABEL_TO_CATEGORY[label];
     if (match) {
-      logger.debug("[CATEGORY] deriveCategory match", { label, match, allLabels: labels });
       return match;
     }
   }

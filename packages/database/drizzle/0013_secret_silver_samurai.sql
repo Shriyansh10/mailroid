@@ -1,0 +1,1 @@
+ALTER TABLE "gmail_tenant_mappings" ADD COLUMN "watch_expiration" timestamp with time zone;

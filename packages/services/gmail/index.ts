@@ -2,6 +2,7 @@ import { corsair } from "@repo/corsair";
 import { db, eq, sql, and, or, ilike } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
 import { logger } from "@repo/logger";
+import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
 import type {
   ThreadSummary,
   ThreadListResult,
@@ -369,7 +370,104 @@ export async function searchEmails(
   };
 }
 
-// ── Email Storage ────────────────────────────────────────────────────
+/**
+ * Ingest a single Gmail message: fetches full details, inserts/upserts into emails,
+ * derives category and flags, updates message_metadata, and optionally triggers embeddings.
+ */
+export async function ingestMessage(
+  tenantId: string,
+  messageId: string,
+  triggerEmbeddings = true
+): Promise<void> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] ingestMessage start", { tenantId, messageId });
+
+  const tenant = corsair.withTenant(tenantId);
+
+  // Fetch full message details
+  const msg = await tenant.gmail.api.messages.get({
+    id: messageId,
+    format: "full",
+  });
+
+  const raw = msg as Record<string, unknown>;
+  const payload = raw.payload as MessagePart | undefined;
+  const headers = (payload?.headers ?? []) as PayloadHeader[];
+
+  const dateHeader = getHeader(headers, "Date");
+  const receivedAt = dateHeader
+    ? new Date(dateHeader)
+    : new Date(Number(raw.internalDate));
+
+  const threadId = (raw.threadId as string) ?? "";
+  const subject = getHeader(headers, "Subject") || null;
+  const from = getHeader(headers, "From") || null;
+  const to = getHeader(headers, "To") || null;
+  const snippet = (raw.snippet as string) ?? null;
+  const bodyText = extractBody(payload) || null;
+  const labels: string[] = (raw.labelIds as string[]) ?? [];
+
+  // Classify and derive metadata
+  const category = deriveCategory(labels);
+  const flags = deriveFlags(labels);
+
+  const emailRow = {
+    userId: tenantId,
+    gmailMessageId: messageId,
+    threadId,
+    subject,
+    from,
+    to,
+    snippet,
+    bodyText,
+    rawPayload: raw,
+    receivedAt: isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
+    lastSyncedAt: new Date(),
+  };
+
+  // 1. Store in emails table
+  await db
+    .insert(emails)
+    .values(emailRow)
+    .onConflictDoUpdate({
+      target: emails.gmailMessageId,
+      set: {
+        threadId: emailRow.threadId,
+        subject: emailRow.subject,
+        from: emailRow.from,
+        to: emailRow.to,
+        snippet: emailRow.snippet,
+        bodyText: emailRow.bodyText,
+        rawPayload: emailRow.rawPayload,
+        receivedAt: emailRow.receivedAt,
+        lastSyncedAt: emailRow.lastSyncedAt,
+        updatedAt: new Date(),
+      },
+    });
+
+  // 2. Store in message_metadata table
+  await upsertMessageMetadata({
+    entityId: messageId,
+    userId: tenantId,
+    gmailLabels: labels,
+    sender: from || undefined,
+    subject: subject || undefined,
+    snippet: snippet || undefined,
+    category,
+    ...flags,
+    receivedAt: emailRow.receivedAt,
+    threadId,
+  });
+
+  // 3. Trigger embeddings asynchronously (fire-and-forget)
+  if (triggerEmbeddings) {
+    void generateMissingEmbeddings(tenantId).catch((err) => {
+      logger.error("[SERVICE] generateMissingEmbeddings failed in ingestMessage", { tenantId, messageId, error: String(err) });
+    });
+  }
+
+  logger.info("[SERVICE] ingestMessage completed", { tenantId, messageId, durationMs: Date.now() - startMs });
+}
 
 /**
  * Sync the first 100 Gmail messages into local Postgres.
@@ -391,76 +489,29 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
   });
   if (valid.length === 0) return { synced: 0 };
 
-  // Step 2: fetch full messages in batches of 10
+  // Step 2: Ingest all messages in batches of 10
   const BATCH_SIZE = 10;
   let synced = 0;
 
   for (let i = 0; i < valid.length; i += BATCH_SIZE) {
     const batch = valid.slice(i, i + BATCH_SIZE);
 
-    const fetched = await Promise.all(
+    await Promise.all(
       batch.map((stub) =>
-        tenant.gmail.api.messages.get({
-          id: stub.id!,
-          format: "full",
-        })
+        ingestMessage(tenantId, stub.id!, false).catch((err) =>
+          logger.error("[DB] syncEmails upsert failed", { gmailMessageId: stub.id, error: String(err) })
+        )
       )
     );
 
-    // Parse each message and upsert
-    const rows = fetched.map((raw: unknown, idx: number) => {
-      const msg = raw as Record<string, unknown>;
-      const payload = msg.payload as MessagePart | undefined;
-      const headers = (payload?.headers ?? []) as PayloadHeader[];
-
-      const dateHeader = getHeader(headers, "Date");
-      const receivedAt = dateHeader
-        ? new Date(dateHeader)
-        : new Date(Number(msg.internalDate));
-
-      return {
-        userId,
-        gmailMessageId: (msg.id as string) ?? "",
-        threadId: (msg.threadId as string) ?? batch[idx]!.threadId ?? "",
-        subject: getHeader(headers, "Subject") || null,
-        from: getHeader(headers, "From") || null,
-        to: getHeader(headers, "To") || null,
-        snippet: (msg.snippet as string) ?? null,
-        bodyText: extractBody(payload) || null,
-        rawPayload: msg as Record<string, unknown>,
-        receivedAt: isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
-        lastSyncedAt: new Date(),
-      };
-    });
-
-    for (const row of rows) {
-      try {
-        await db
-          .insert(emails)
-          .values(row)
-          .onConflictDoUpdate({
-            target: emails.gmailMessageId,
-            set: {
-              threadId: row.threadId,
-              subject: row.subject,
-              from: row.from,
-              to: row.to,
-              snippet: row.snippet,
-              bodyText: row.bodyText,
-              rawPayload: row.rawPayload,
-              receivedAt: row.receivedAt,
-              lastSyncedAt: row.lastSyncedAt,
-              updatedAt: new Date(),
-            },
-          });
-      } catch (err) {
-        logger.error("[DB] syncEmails upsert failed", { gmailMessageId: row.gmailMessageId, error: String(err) });
-      }
-    }
-
-    synced += rows.length;
-    logger.debug("[SERVICE] syncEmails batch processed", { batchIndex: i / BATCH_SIZE + 1, batchSize: rows.length });
+    synced += batch.length;
+    logger.debug("[SERVICE] syncEmails batch processed", { batchIndex: i / BATCH_SIZE + 1, batchSize: batch.length });
   }
+
+  // Step 3: Trigger embeddings for all newly synced emails at once (fire-and-forget)
+  void generateMissingEmbeddings(tenantId).catch((err) => {
+    logger.error("[SERVICE] generateMissingEmbeddings failed in syncEmails", { tenantId, error: String(err) });
+  });
 
   logger.info("[SERVICE] syncEmails completed", { tenantId, synced, totalDurationMs: Date.now() - startMs });
   return { synced };

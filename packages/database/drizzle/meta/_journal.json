@@ -64,6 +64,27 @@
       "when": 1781704898711,
       "tag": "0010_pink_reaper",
       "breakpoints": true
+    },
+    {
+      "idx": 11,
+      "version": "7",
+      "when": 1781727319880,
+      "tag": "0011_lean_roland_deschain",
+      "breakpoints": true
+    },
+    {
+      "idx": 12,
+      "version": "7",
+      "when": 1781728825160,
+      "tag": "0012_concerned_midnight",
+      "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1781730462420,
+      "tag": "0013_secret_silver_samurai",
+      "breakpoints": true
     }
   ]
 }

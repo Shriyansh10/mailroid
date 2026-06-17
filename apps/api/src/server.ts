@@ -14,6 +14,10 @@ import { authHandler } from "./auth/handler.js";
 import { auth } from "./auth/index.js";
 import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
+import { handleCorsairWebhook } from "./auth/webhook-handler.js";
+import { serve } from "inngest/express";
+import { inngest } from "@repo/inngest";
+import { gmailWatchCron } from "@repo/services/gmail/watch-cron.js";
 
 
 export const app = express();
@@ -23,17 +27,42 @@ const openApiDocument = generateOpenApiDocument(serverRouter, {
   baseUrl: env.BASE_URL.concat("/api"),
 });
 
-if (env.NODE_ENV !== "prod") {
+// if (env.NODE_ENV !== "prod") {
   app.use(
     cors({
-      origin: "http://localhost:3000",
+      origin: [
+        "http://localhost:3000",
+      ],
       credentials: true,
     }),
     
   );
-}
+// }
 
 app.use(express.json());
+
+// Corsair webhooks — single endpoint for all plugins
+app.post("/api/webhook", async (req, res) => {
+  try {
+    const result = await handleCorsairWebhook({
+      headers: req.headers as Record<string, string | string[] | undefined>,
+      body: req.body,
+      url: `${req.protocol}://${req.get("host")}${req.originalUrl}`,
+    });
+
+    if (result.plugin) {
+      console.log(`[webhook] ${result.plugin}.${result.action}`);
+    }
+
+    res
+      .status(result.response?.statusCode ?? 200)
+      .set(result.response?.responseHeaders ?? {})
+      .json(result.response?.data ?? {});
+  } catch (err) {
+    console.error("[webhook] handler failed:", err);
+    res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
 
 app.get("/", (req, res) => {
   return res.json({ message: "Streamyst is up and running..." });
@@ -46,6 +75,15 @@ app.get("/health", (req, res) => {
 app.use("/api/auth/gmail-callback", gmailOAuthRouter);
 app.use("/api/auth/calendar-callback", calendarOAuthRouter);
 app.use("/api/auth", authHandler);
+
+// Inngest serve endpoint
+app.use(
+  "/api/inngest",
+  serve({
+    client: inngest,
+    functions: [gmailWatchCron],
+  })
+);
 
 logger.debug(`openapi.json: ${env.BASE_URL}/openapi.json`);
 app.get("/openapi.json", (req, res) => {

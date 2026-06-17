@@ -5,6 +5,7 @@ import { generateOAuthUrl, processOAuthCallback } from "corsair/oauth";
 import { db, eq } from "@repo/database";
 import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
 import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
+import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
     const { userId: parseduserId } = await ensureTenantInput.parseAsync({ userId });
@@ -122,8 +123,23 @@ export async function storeGmailConnectedEmail(userId: string): Promise<string |
   try {
     const tenant = corsair.withTenant(userId);
 
-    // Use the Gmail API's native getProfile instead.
-    const profile = await (tenant.gmail.api as any).users.getProfile({ userId: "me" });
+    const accessToken = await tenant.gmail.keys.get_access_token();
+    if (!accessToken) {
+      console.log("[storeGmailConnectedEmail] ❌ no access token");
+      return null;
+    }
+
+    const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to fetch Gmail profile: ${response.statusText}`);
+    }
+
+    const profile = await response.json() as { emailAddress?: string };
     console.log("[storeGmailConnectedEmail] profile:", JSON.stringify(profile));
 
     const email = profile.emailAddress;
@@ -138,6 +154,14 @@ export async function storeGmailConnectedEmail(userId: string): Promise<string |
       .onConflictDoUpdate({
         target: corsairConnectionEmails.userId,
         set: { gmailEmail: email, updatedAt: new Date() },
+      });
+
+    await db
+      .insert(gmailTenantMappings)
+      .values({ emailAddress: email, tenantId: userId })
+      .onConflictDoUpdate({
+        target: gmailTenantMappings.emailAddress,
+        set: { tenantId: userId, updatedAt: new Date() },
       });
 
     console.log("[storeGmailConnectedEmail] ✅ stored:", email);

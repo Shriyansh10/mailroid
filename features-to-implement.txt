@@ -4,4 +4,111 @@ left sidebar for inbox
 add forward mails and reply to the same mail
 add a thread of mails whose origin is same
 add inngest for all the webhooks and cron jobs later
-use db to call emails after getting mails that are already in the db and then call the api for mails that are not in the db
+
+TODO: Replace webhook tenant resolution with persistent Gmail email mapping
+
+Current implementation:
+- Webhook receives Gmail emailAddress
+- Iterates through all Gmail tenants
+- Calls tenant.gmail.api.users.getProfile() repeatedly
+- Builds an in-memory email → tenant cache
+- Resolves tenantId and passes it to processWebhook()
+
+Problems:
+- O(n) Gmail API calls on cold start
+- Cache is lost on server restart
+- Doesn't scale to many tenants
+- Unnecessary Gmail API traffic
+
+Future implementation:
+1. During Gmail OAuth callback:
+   - Call users.getProfile({ userId: "me" })
+   - Extract emailAddress
+   - Persist:
+       tenantId
+       gmailEmail
+   - Store in dedicated table
+
+2. During webhook processing:
+   - Decode Pub/Sub payload
+   - Extract emailAddress
+   - Query DB:
+       SELECT tenantId
+       FROM gmail_connections
+       WHERE gmailEmail = ?
+   - Pass resolved tenantId into processWebhook()
+
+Benefits:
+- O(1) lookup
+- Single DB query
+- No Gmail API calls
+- Survives restarts
+- Scales to thousands of users
+
+Priority:
+- Low (post-hackathon optimization)
+
+Current status:
+- Existing cache-based solution is acceptable for demo/hackathon.
+- Revisit before production launch.
+
+TODO: Move Gmail Sync State Out of corsair_accounts.config
+
+Current State
+
+lastHistoryId is stored inside:
+corsair_accounts.config
+Same JSON blob currently stores:
+access_token
+refresh_token
+expires_at
+lastHistoryId
+
+Problem
+
+OAuth credentials and application sync state are mixed together.
+Harder to debug and maintain.
+Risk of accidentally overwriting sync state when token data changes.
+Doesn't scale if more Gmail sync metadata is needed later.
+
+Future Refactor
+
+Create a dedicated table:
+
+gmail_sync_state
+-------------------------
+tenant_id        TEXT PRIMARY KEY
+last_history_id  TEXT NOT NULL
+updated_at       TIMESTAMPTZ
+
+Migration Steps
+
+Create gmail_sync_state table.
+Add Drizzle model.
+Backfill existing lastHistoryId values from corsair_accounts.config.
+Update webhook handler to read/write from gmail_sync_state.
+Remove lastHistoryId from corsair_accounts.config.
+
+Benefits
+
+Clean separation of concerns.
+OAuth tokens remain managed by Corsair.
+Sync state managed by Mailroid.
+Easier debugging of webhook/history sync issues.
+Easier future additions:
+last_full_sync_at
+sync_status
+last_error
+messages_processed
+watch_expiration
+
+Priority
+
+🔵 Low priority
+Do after:
+Webhooks fully working
+Realtime ingestion verified
+Executive Summary implemented
+UI polish completed
+
+For the hackathon, keeping lastHistoryId in corsair_accounts.config is acceptable. The bigger priority is getting the History API → ingestMessage() flow verified end-to-end.

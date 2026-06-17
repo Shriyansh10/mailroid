@@ -1,0 +1,1 @@
+ALTER TABLE "gmail_tenant_mappings" ADD COLUMN "last_history_id" text;

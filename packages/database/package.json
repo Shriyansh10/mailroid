@@ -11,7 +11,8 @@
     "./models/corsair-connections": "./models/corsair-connections.ts",
     "./models/corsair": "./models/corsair.ts",
     "./models/emails": "./models/emails.ts",
-    "./models/message-metadata": "./models/message-metadata.ts"
+    "./models/message-metadata": "./models/message-metadata.ts",
+    "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

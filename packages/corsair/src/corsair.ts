@@ -10,5 +10,3 @@ export const corsair = createCorsair({
   kek: process.env.CORSAIR_KEK!,
   multiTenancy: true,
 });
-
-    
