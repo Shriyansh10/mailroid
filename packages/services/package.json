@@ -6,6 +6,9 @@
   "exports": {
     "./gmail/index": "./gmail/index.ts",
     "./gmail/index.js": "./gmail/index.ts",
+    "./gmail/metadata": "./gmail/metadata.ts",
+    "./gmail/metadata.js": "./gmail/metadata.ts",
+    "./gmail/sync-metadata": "./gmail/sync-metadata.ts",
     "./calendar/index": "./calendar/index.ts",
     "./calendar/index.js": "./calendar/index.ts",
     "./tenant/index": "./tenant/index.ts",

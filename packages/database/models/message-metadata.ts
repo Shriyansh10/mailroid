@@ -36,9 +36,14 @@ export const messageMetadata = pgTable(
   {
     entityId: text("entity_id").primaryKey(),
 
+    userId: text("user_id").notNull(),
+
     gmailLabels: jsonb("gmail_labels").notNull().default([]),
 
     category: mailCategoryEnum("category").default("OTHER"),
+
+    receivedAt: timestamp("received_at", { withTimezone: true }),
+    threadId: text("thread_id"),
 
     isUnread: boolean("is_unread").notNull().default(true),
     isInInbox: boolean("is_in_inbox").notNull().default(false),
@@ -48,6 +53,10 @@ export const messageMetadata = pgTable(
     priority: priorityEnum("priority").default("MEDIUM"),
     priorityScore: real("priority_score"),
     priorityReason: text("priority_reason"),
+
+    sender: text("sender"),
+subject: text("subject"),
+snippet: text("snippet"),
 
     isActionRequired: boolean("is_action_required").notNull().default(false),
     isReplyNeeded: boolean("is_reply_needed").notNull().default(false),
@@ -70,5 +79,7 @@ export const messageMetadata = pgTable(
       table.priority,
       table.isInInbox,
     ),
+    index("idx_mm_user_category").on(table.userId, table.category),
+    index("idx_mm_user_received").on(table.userId, table.receivedAt),
   ],
 );

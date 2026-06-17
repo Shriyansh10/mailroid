@@ -25,7 +25,7 @@ calendarOAuthRouter.get("/", async (req, res) => {
     const result = await processOAuthCallbackForPlugin(code, state, CALENDAR_CALLBACK_URL);
 
     // Fetch and persist the connected Calendar account email
-    await storeCalendarConnectedEmail(result.tenantId);
+    //await storeCalendarConnectedEmail(result.tenantId);
 
     return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);
   } catch (err) {

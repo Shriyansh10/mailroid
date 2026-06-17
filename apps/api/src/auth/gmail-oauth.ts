@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { processOAuthCallbackForPlugin, storeGmailConnectedEmail } from "@repo/trpc/services";
+import { syncMailbox } from "@repo/services/gmail/sync-metadata";
 
 const GMAIL_CALLBACK_URL =
   process.env.GMAIL_OAUTH_CALLBACK_URL ??
@@ -26,7 +27,12 @@ gmailOAuthRouter.get("/", async (req, res) => {
     const result = await processOAuthCallbackForPlugin(code, state, GMAIL_CALLBACK_URL);
 
     // Fetch and persist the connected Gmail email address
-    await storeGmailConnectedEmail(result.tenantId);
+    //await storeGmailConnectedEmail(result.tenantId);
+
+    // Sync mailbox metadata for all categories so the inbox is immediately populated
+    void syncMailbox(result.tenantId).catch((err) =>
+      console.error("[gmail-oauth] syncMailbox failed:", err),
+    );
 
     return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);
   } catch (err) {

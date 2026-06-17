@@ -50,6 +50,20 @@
       "when": 1781681778051,
       "tag": "0008_round_professor_monster",
       "breakpoints": true
+    },
+    {
+      "idx": 9,
+      "version": "7",
+      "when": 1781686270766,
+      "tag": "0009_sweet_brood",
+      "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1781704898711,
+      "tag": "0010_pink_reaper",
+      "breakpoints": true
     }
   ]
 }

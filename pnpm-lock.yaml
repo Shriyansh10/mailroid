@@ -585,6 +585,9 @@ importers:
       '@repo/corsair':
         specifier: workspace:*
         version: link:../corsair
+      '@repo/logger':
+        specifier: workspace:*
+        version: link:../logger
       '@repo/services':
         specifier: workspace:*
         version: link:../services

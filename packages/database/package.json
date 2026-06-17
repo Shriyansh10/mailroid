@@ -10,7 +10,8 @@
     "./schema": "./schema.ts",
     "./models/corsair-connections": "./models/corsair-connections.ts",
     "./models/corsair": "./models/corsair.ts",
-    "./models/emails": "./models/emails.ts"
+    "./models/emails": "./models/emails.ts",
+    "./models/message-metadata": "./models/message-metadata.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

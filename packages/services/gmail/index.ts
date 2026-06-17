@@ -195,13 +195,19 @@ export async function getThreads(
   tenantId: string,
   opts?: { maxResults?: number; pageToken?: string }
 ): Promise<ThreadListResult> {
+  const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
   // Step 1: Get thread IDs
+  const gmailStart = Date.now();
   const result = await tenant.gmail.api.threads.list({
     maxResults: opts?.maxResults ?? 20,
     pageToken: opts?.pageToken,
     labelIds: ["INBOX"],
+  });
+  logger.info("[GMAIL] threads.list (getThreads)", {
+    tenantId, threadCount: (result.threads ?? []).length,
+    hasNextPage: !!result.nextPageToken, durationMs: Date.now() - gmailStart,
   });
 
   const threadStubs = result.threads ?? [];
@@ -210,6 +216,7 @@ export async function getThreads(
   }
 
   // Step 2: Fetch metadata for each thread in parallel
+  const threadGetStart = Date.now();
   const detailed = await Promise.all(
     threadStubs.map((t: { id?: string }) =>
       tenant.gmail.api.threads.get({
@@ -218,13 +225,21 @@ export async function getThreads(
       })
     )
   );
-
+  logger.info("[GMAIL] threads.get batch (getThreads)", {
+    tenantId, threadCount: detailed.length, durationMs: Date.now() - threadGetStart,
+  });
 
   // Step 3: Transform to ThreadSummary[]
   const threads = detailed.map((t: Record<string, unknown>) =>{
       return extractThreadSummary(t as Record<string, unknown>)
     }
   );
+
+  logger.info("[SERVICE] getThreads completed", {
+    tenantId, threadCount: threads.length,
+    nextPageToken: result.nextPageToken ?? null,
+    totalDurationMs: Date.now() - startMs,
+  });
 
   return {
     threads,
@@ -239,14 +254,24 @@ export async function getThread(
   tenantId: string,
   threadId: string
 ): Promise<ThreadDetail> {
+  const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
+  const gmailStart = Date.now();
   const thread = await tenant.gmail.api.threads.get({
     id: threadId,
     format: "full",
   });
+  logger.info("[GMAIL] threads.get (getThread)", {
+    tenantId, threadId, durationMs: Date.now() - gmailStart,
+  });
 
-  return transformThreadDetail(thread as unknown as Record<string, unknown>);
+  const result = transformThreadDetail(thread as unknown as Record<string, unknown>);
+  logger.info("[SERVICE] getThread completed", {
+    tenantId, threadId, messageCount: result.messages?.length ?? 0,
+    totalDurationMs: Date.now() - startMs,
+  });
+  return result;
 }
 
 /**
@@ -257,6 +282,10 @@ export async function sendEmail(
   tenantId: string,
   input: SendEmailInput
 ): Promise<SendEmailResult> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] sendEmail start", {
+    tenantId, to: input.to, subject: input.subject, hasThreadId: !!input.threadId,
+  });
   const tenant = corsair.withTenant(tenantId);
 
   const raw = buildRawEmail(input.to, input.subject, input.body);
@@ -264,6 +293,11 @@ export async function sendEmail(
   const result = await tenant.gmail.api.messages.send({
     raw,
     threadId: input.threadId,
+  });
+
+  logger.info("[SERVICE] sendEmail completed", {
+    tenantId, messageId: result.id, threadId: result.threadId,
+    durationMs: Date.now() - startMs,
   });
 
   return {
@@ -281,20 +315,24 @@ export async function searchEmails(
   query: string,
   opts?: { maxResults?: number; pageToken?: string }
 ): Promise<ThreadListResult> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] searchEmails start", {
+    tenantId, query, maxResults: opts?.maxResults, pageToken: opts?.pageToken,
+  });
+
   const tenant = corsair.withTenant(tenantId);
 
+  const gmailStart = Date.now();
   const result = await tenant.gmail.api.threads.list({
     q: query,
     maxResults: opts?.maxResults ?? 20,
     pageToken: opts?.pageToken,
   });
-
-  console.log("[gmail:searchEmails] threads.list raw", {
-    tenantId,
-    query,
-    resultThreadCount: (result.threads ?? []).length,
+  logger.info("[GMAIL] threads.list (searchEmails)", {
+    tenantId, query,
+    threadCount: (result.threads ?? []).length,
     nextPageToken: result.nextPageToken ?? null,
-    rawResult: JSON.stringify(result).slice(0, 500),
+    gmailDurationMs: Date.now() - gmailStart,
   });
 
   const threadStubs = result.threads ?? [];
@@ -310,10 +348,20 @@ export async function searchEmails(
       })
     )
   );
+  logger.info("[GMAIL] threads.get batch (searchEmails)", {
+    tenantId, query, threadCount: detailed.length,
+    durationMs: Date.now() - gmailStart,
+  });
 
   const threads = detailed.map((t: Record<string, unknown>) =>
     extractThreadSummary(t as Record<string, unknown>)
   );
+
+  logger.info("[SERVICE] searchEmails completed", {
+    tenantId, query, threadCount: threads.length,
+    nextPageToken: result.nextPageToken ?? null,
+    totalDurationMs: Date.now() - startMs,
+  });
 
   return {
     threads,
@@ -328,13 +376,19 @@ export async function searchEmails(
  * Batches 10 at a time. Idempotent — re-running updates existing rows.
  */
 export async function syncEmails(tenantId: string, userId: string): Promise<SyncResult> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] syncEmails start", { tenantId, userId });
+
   const tenant = corsair.withTenant(tenantId);
 
   // Step 1: list message IDs
+  const gmailStart = Date.now();
   const result = await tenant.gmail.api.messages.list({ maxResults: 100 });
   const stubs = (result.messages ?? []) as Array<{ id?: string; threadId?: string }>;
   const valid = stubs.filter((s) => s.id);
-  console.log(`[syncEmails] tenant=${tenantId} found ${valid.length} messages to sync`);
+  logger.info("[GMAIL] messages.list (syncEmails)", {
+    tenantId, foundCount: valid.length, gmailDurationMs: Date.now() - gmailStart,
+  });
   if (valid.length === 0) return { synced: 0 };
 
   // Step 2: fetch full messages in batches of 10
@@ -400,14 +454,15 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
             },
           });
       } catch (err) {
-        console.error(`[syncEmails] failed to insert message ${row.gmailMessageId}:`, err);
+        logger.error("[DB] syncEmails upsert failed", { gmailMessageId: row.gmailMessageId, error: String(err) });
       }
     }
 
     synced += rows.length;
+    logger.debug("[SERVICE] syncEmails batch processed", { batchIndex: i / BATCH_SIZE + 1, batchSize: rows.length });
   }
 
-  console.log(`[syncEmails] done — synced ${synced} emails for tenant=${tenantId}`);
+  logger.info("[SERVICE] syncEmails completed", { tenantId, synced, totalDurationMs: Date.now() - startMs });
   return { synced };
 }
 
@@ -415,11 +470,14 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
  * Returns the count of locally stored emails for a given user (for verification UI).
  */
 export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
+  const startMs = Date.now();
   const result = await db
     .select({ count: sql<number>`count(*)` })
     .from(emails)
     .where(eq(emails.userId, userId));
-  return { count: Number(result[0]?.count ?? 0) };
+  const count = Number(result[0]?.count ?? 0);
+  logger.debug("[DB] getStoredEmailCount", { userId, count, durationMs: Date.now() - startMs });
+  return { count };
 }
 
 /**
@@ -474,6 +532,9 @@ async function searchByEmbedding(
   query: string,
   limit: number,
 ): Promise<ThreadSummary[]> {
+  const startMs = Date.now();
+  logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, query, limit });
+
   const queryVector = await embedSearchQuery(query);
   const vectorLiteral = `[${queryVector.join(",")}]`;
 
@@ -494,13 +555,16 @@ async function searchByEmbedding(
     `,
   );
 
-  return result.rows.map((r) => ({
+  const threads = result.rows.map((r) => ({
     threadId: r.thread_id,
     sender: r.from ?? "",
     subject: r.subject ?? "(no subject)",
     date: r.received_at ? new Date(r.received_at).toISOString() : "",
     snippet: r.snippet ?? "",
   }));
+
+  logger.debug("[SEARCH] searchByEmbedding result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
+  return threads;
 }
 
 /**
@@ -511,6 +575,9 @@ async function searchByText(
   userId: string,
   query: string,
 ): Promise<LocalSearchResult> {
+  const startMs = Date.now();
+  logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, query });
+
   const pattern = `%${query}%`;
 
   const rows = await db
@@ -544,6 +611,7 @@ async function searchByText(
     snippet: r.snippet ?? "",
   }));
 
+  logger.info("[SEARCH] searchByText (ILIKE) result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
   return { threads, total: threads.length };
 }
 
@@ -592,7 +660,8 @@ export async function validateEmbeddingsApi(): Promise<void> {
  * Idempotent — safe to re-run.
  */
 export async function generateMissingEmbeddings(userId: string): Promise<EmbedResult> {
-  console.log(`[embeddings] starting for userId=${userId}`);
+  const startMs = Date.now();
+  logger.info("[SERVICE] generateMissingEmbeddings start", { userId });
 
   const unEmbedded = await db
     .select({
@@ -603,11 +672,17 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
     .from(emails)
     .where(and(eq(emails.userId, userId), sql`${emails.embedding} IS NULL`));
 
-  if (unEmbedded.length === 0) return { embedded: 0 };
+  logger.info("[DB] generateMissingEmbeddings count pending", { userId, pendingCount: unEmbedded.length });
+
+  if (unEmbedded.length === 0) {
+    logger.info("[SERVICE] generateMissingEmbeddings - nothing to do", { userId });
+    return { embedded: 0 };
+  }
 
   let embedded = 0;
 
   for (let i = 0; i < unEmbedded.length; i += EMBED_BATCH_SIZE) {
+    const batchStart = Date.now();
     const batch = unEmbedded.slice(i, i + EMBED_BATCH_SIZE);
     const texts = batch.map(
       (e) => ((e.subject ?? "") + "\n\n" + (e.bodyText ?? "")).slice(0, 8000),
@@ -619,7 +694,7 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
       for (let j = 0; j < batch.length; j++) {
         const vec = vectors[j];
         if (!vec) {
-          console.warn(`[embeddings] no vector returned for email ${batch[j]!.id}, skipping`);
+          logger.warn("[SERVICE] no vector returned for email, skipping", { emailId: batch[j]!.id });
           continue;
         }
 
@@ -629,16 +704,23 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
             .set({ embedding: vec })
             .where(eq(emails.id, batch[j]!.id));
         } catch (dbErr) {
-          console.error(`[embeddings] DB update failed for email ${batch[j]!.id}:`, dbErr);
+          logger.error("[DB] embedding DB update failed", { emailId: batch[j]!.id, error: String(dbErr) });
         }
       }
 
       embedded += batch.length;
+      logger.debug("[SERVICE] generateMissingEmbeddings batch completed", {
+        batchIndex: Math.floor(i / EMBED_BATCH_SIZE) + 1, batchSize: batch.length,
+        batchDurationMs: Date.now() - batchStart,
+      });
     } catch (apiErr) {
-      console.error(`[embeddings] API call failed for batch ${Math.floor(i / EMBED_BATCH_SIZE) + 1}:`, apiErr);
+      logger.error("[SERVICE] embedding API batch failed", {
+        batchIndex: Math.floor(i / EMBED_BATCH_SIZE) + 1, error: String(apiErr),
+      });
     }
   }
 
+  logger.info("[SERVICE] generateMissingEmbeddings completed", { userId, embedded, totalDurationMs: Date.now() - startMs });
   return { embedded };
 }
 
@@ -649,10 +731,12 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
 export async function getPendingEmbeddingsCount(
   userId: string,
 ): Promise<PendingEmbeddingsCount> {
+  const startMs = Date.now();
   const result = await db
     .select({ pending: sql<number>`count(*)` })
     .from(emails)
     .where(and(eq(emails.userId, userId), sql`${emails.embedding} IS NULL`));
-
-  return { pending: Number(result[0]?.pending ?? 0) };
+  const pending = Number(result[0]?.pending ?? 0);
+  logger.debug("[DB] getPendingEmbeddingsCount", { userId, pending, durationMs: Date.now() - startMs });
+  return { pending };
 }
