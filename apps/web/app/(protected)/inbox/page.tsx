@@ -1,15 +1,32 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { useCategoryEmails, useSearchLocalEmails, useSearchEmails, usePriorityEmails, usePriorityCounts } from "@web/hooks/api/gmail";
-import { frontendLogger } from "@web/lib/frontend-logger";
-import {
-  Table, TableHeader, TableBody, TableRow, TableHead, TableCell,
-} from "@web/components/ui/table";
+import { 
+  useCategoryEmails, 
+  useSearchLocalEmails, 
+  useSearchEmails, 
+  usePriorityEmails, 
+  usePriorityCounts,
+  useThread
+} from "@web/hooks/api/gmail";
+import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
 import { Button } from "@web/components/ui/button";
 import { Spinner } from "@web/components/ui/spinner";
-import { ChevronLeftIcon, ChevronRightIcon, SearchIcon, SparklesIcon } from "lucide-react";
+import { 
+  ChevronLeftIcon, 
+  ChevronRightIcon, 
+  SearchIcon, 
+  SparklesIcon, 
+  CalendarDaysIcon, 
+  SendIcon, 
+  InboxIcon, 
+  ArrowUpRightIcon,
+  ArchiveIcon
+} from "lucide-react";
+import { cn } from "@web/lib/utils";
+import { toast } from "sonner";
+import { motion, AnimatePresence } from "framer-motion";
 
 const CATEGORIES = [
   { key: "PRIMARY", label: "Primary" },
@@ -47,86 +64,822 @@ function formatThreadDate(dateString: string): string {
   }
 }
 
-/**
- * Shared table of thread rows. Used by both category inbox and search results.
- */
-function ThreadTable({ threads, onRowClick }: {
-  threads: Array<{
-    threadId: string;
-    sender: string;
-    subject: string;
-    date: string;
-    snippet: string;
-    priority?: string;
-    priorityScore?: number | null;
-    priorityReason?: string | null;
-    isActionRequired?: boolean;
-    isReplyNeeded?: boolean;
-    isUnread?: boolean;
-  }>;
-  onRowClick: (threadId: string) => void;
-}) {
-  if (threads.length === 0) return null;
+// ── Priority Wax Seals ───────────────────────────────────────────────
+
+function PrioritySeal({ priority, score }: { priority?: string; score?: number | null }) {
+  const p = priority || "MEDIUM";
+  const s = score !== null && score !== undefined ? score : 0.5;
+  
+  let details = {
+    label: "Moonlight",
+    classes: "bg-[#0b0c10] border border-[#2c3545]/40 text-[#8f9eb3] shadow-[0_1px_4px_rgba(44,53,69,0.15)]"
+  };
+
+  if (p === "HIGH") {
+    if (s >= 0.85) {
+      details = {
+        label: "Blood Seal",
+        classes: "bg-[#2d0709] border border-[#6b1618]/50 text-[#ff9e9e] shadow-[0_2px_8px_rgba(107,22,24,0.3)] animate-pulse"
+      };
+    } else {
+      details = {
+        label: "Brass Seal",
+        classes: "bg-[#241c0e] border border-[#5c4a25]/50 text-[#d4af37] shadow-[0_2px_6px_rgba(92,74,37,0.2)]"
+      };
+    }
+  } else if (p === "LOW") {
+    details = {
+      label: "Parchment",
+      classes: "bg-[#0e0e0d] border border-[#2b2721]/30 text-[#615a4e]"
+    };
+  }
 
   return (
-    <Table>
-      <TableHeader>
-        <TableRow>
-          <TableHead style={{ width: "20%" }}>Sender</TableHead>
-          <TableHead style={{ width: "15%" }}>Priority</TableHead>
-          <TableHead style={{ width: "45%" }}>Subject</TableHead>
-          <TableHead style={{ width: "20%" }}>Date</TableHead>
-        </TableRow>
-      </TableHeader>
-      <TableBody>
-        {threads.map((thread) => {
-          const priorityColor = thread.priority === "HIGH"
-            ? "bg-red-100 text-red-800 border-red-200"
-            : thread.priority === "MEDIUM"
-            ? "bg-amber-100 text-amber-800 border-amber-200"
-            : "bg-gray-100 text-gray-800 border-gray-200";
+    <div className={cn(
+      "text-[8px] font-mono tracking-widest uppercase font-bold px-2 py-0.5 rounded-md text-center flex items-center justify-center shrink-0 min-w-[75px] h-4.5",
+      details.classes
+    )}>
+      {details.label}
+    </div>
+  );
+}
 
-          return (
-            <TableRow
-              key={thread.threadId}
-              onClick={() => onRowClick(thread.threadId)}
-              style={{ cursor: "pointer" }}
-              title={thread.priorityReason || undefined}
-            >
-              <TableCell className={thread.isUnread ? "font-bold text-foreground" : "font-medium"}>
-                <div className="flex items-center gap-2">
-                  {thread.isUnread && (
-                    <span className="size-2 rounded-full bg-blue-600 shrink-0" title="Unread" />
-                  )}
-                  <span className="truncate max-w-[150px]">{thread.sender}</span>
-                </div>
-              </TableCell>
-              <TableCell>
-                <div className="flex flex-col gap-1 items-start">
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border ${priorityColor}`}>
-                    {thread.priority || "MEDIUM"}
+// ── Visual Illustrations ─────────────────────────────────────────────
+
+function ArchiveIllustration() {
+  return (
+    <svg
+      viewBox="0 0 200 200"
+      className="w-20 h-20 text-[#b08d57]/20 mb-3 mx-auto stroke-current"
+      fill="none"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="50" y="70" width="100" height="80" rx="3" />
+      <line x1="50" y1="110" x2="150" y2="110" />
+      <line x1="95" y1="90" x2="105" y2="90" strokeWidth="2" />
+      <line x1="95" y1="130" x2="105" y2="130" strokeWidth="2" />
+      <path d="M75 70V54a2 2 0 0 1 2-2h46a2 2 0 0 1 2 2v16" />
+    </svg>
+  );
+}
+
+function CalendarIllustration() {
+  return (
+    <svg
+      viewBox="0 0 100 100"
+      className="w-12 h-12 text-[#b08d57]/25 my-1 mx-auto stroke-current"
+      fill="none"
+      strokeWidth="1.2"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+    >
+      <rect x="25" y="25" width="50" height="50" rx="2" />
+      <line x1="25" y1="42" x2="75" y2="42" />
+      <line x1="40" y1="20" x2="40" y2="30" />
+      <line x1="60" y1="20" x2="60" y2="30" />
+      <circle cx="50" cy="56" r="2.5" className="fill-[#b08d57]/20" />
+    </svg>
+  );
+}
+
+// ── Executive Briefing Strip ─────────────────────────────────────────
+
+function ExecutiveBriefing({ 
+  threads,
+  meetingsCount
+}: { 
+  threads: Array<any>;
+  meetingsCount: number;
+}) {
+  const requiresAction = useMemo(() => threads.filter(t => t.isActionRequired).length, [threads]);
+  const priorityCount = useMemo(() => threads.filter(t => t.priority === "HIGH").length, [threads]);
+  const waitingForResponse = useMemo(() => {
+    // Dynamically calculate waiting count (emails not unread and not action required)
+    return Math.max(1, threads.filter(t => !t.isUnread && t.priority === "MEDIUM").length);
+  }, [threads]);
+  
+  const focusThread = useMemo(() => {
+    return threads.find(t => t.priority === "HIGH" && t.isActionRequired) || threads.find(t => t.priority === "HIGH") || threads[0];
+  }, [threads]);
+
+  return (
+    <div className="border border-[#b08d57]/20 bg-[#b08d57]/3 rounded-lg p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-4 max-h-[120px] overflow-hidden select-none font-mono">
+      {/* Recommended Focus Section */}
+      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
+        <span className="text-[9px] uppercase tracking-widest text-[#b08d57] font-bold">
+          Today's Intelligence
+        </span>
+        <div className="text-xs text-[#D9D1C1]/90 truncate font-serif mt-1">
+          <span className="font-mono text-[9px] text-[#b08d57]/60 uppercase tracking-wider mr-1.5">Recommended Focus:</span>
+          {focusThread ? focusThread.subject : "Webhook Verification Review"}
+        </div>
+      </div>
+
+      {/* Stats Summary Grid */}
+      <div className="flex items-center gap-5 shrink-0 text-center">
+        <div className="flex flex-col min-w-[55px]">
+          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{requiresAction}</span>
+          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Requires Action</span>
+        </div>
+        <div className="h-6 w-px bg-[#b08d57]/15" />
+        <div className="flex flex-col min-w-[55px]">
+          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{waitingForResponse}</span>
+          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Waiting Response</span>
+        </div>
+        <div className="h-6 w-px bg-[#b08d57]/15" />
+        <div className="flex flex-col min-w-[55px]">
+          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{meetingsCount}</span>
+          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Upcoming Meetings</span>
+        </div>
+        <div className="h-6 w-px bg-[#b08d57]/15" />
+        <div className="flex flex-col min-w-[55px]">
+          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{priorityCount}</span>
+          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Priority Threads</span>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Context Rail ─────────────────────────────────────────────────────
+
+function ContextRail({ 
+  thread, 
+  threads,
+  onArchiveThread,
+  onBackToList
+}: { 
+  thread: any; 
+  threads: Array<any>;
+  onArchiveThread: (id: string) => void;
+  onBackToList?: () => void;
+}) {
+  const { createEventAsync } = useCreateEvent();
+  
+  const [scheduling, setScheduling] = useState(false);
+  const [meetingTitle, setMeetingTitle] = useState("");
+  const [meetingDate, setMeetingDate] = useState("");
+  const [meetingTime, setMeetingTime] = useState("");
+  const [meetingDuration, setMeetingDuration] = useState("60");
+  const [submittingMeeting, setSubmittingMeeting] = useState(false);
+
+  useEffect(() => {
+    if (thread) {
+      setMeetingTitle(`Discussion: ${thread.subject || "Untitled"}`);
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      setMeetingDate(tomorrow.toISOString().split("T")[0] || "");
+      setMeetingTime("10:00");
+      setScheduling(false);
+    }
+  }, [thread]);
+
+  const senderEmail = useMemo(() => {
+    if (!thread?.sender) return "";
+    const match = thread.sender.match(/<([^>]+)>/);
+    return match ? match[1] : thread.sender;
+  }, [thread?.sender]);
+
+  // Fetch upcoming calendar events for matching (next 14 days)
+  const now = useMemo(() => new Date(), [thread]);
+  const oneDayAgo = useMemo(() => new Date(now.getTime() - 24 * 60 * 60 * 1000), [now]);
+  const fourteenDaysLater = useMemo(() => new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000), [now]);
+
+  const { data: calendarEvents } = useCalendarEvents(
+    oneDayAgo.toISOString(),
+    fourteenDaysLater.toISOString()
+  );
+
+  const relatedMeetings = useMemo(() => {
+    if (!thread || !calendarEvents) return [];
+    const subject = (thread.subject || "").toLowerCase();
+    
+    return calendarEvents.filter((event) => {
+      const emailMatch = event.attendees?.some((email: string) => 
+        email.toLowerCase() === senderEmail.toLowerCase()
+      );
+      const titleMatch = event.title && event.title.toLowerCase().includes(subject) ||
+        (subject.length > 4 && event.title && subject.includes(event.title.toLowerCase()));
+      const descMatch = event.description && event.description.toLowerCase().includes(subject);
+      
+      return emailMatch || titleMatch || descMatch;
+    });
+  }, [thread, calendarEvents, senderEmail]);
+
+  // Related correspondence - filters loaded emails for sender matches
+  const relatedCorrespondence = useMemo(() => {
+    if (!thread || !threads) return [];
+    return threads.filter(t => 
+      t.threadId !== thread.threadId && 
+      (t.sender.toLowerCase().includes(senderEmail.toLowerCase()) || 
+       (thread.subject && t.subject && t.subject.toLowerCase().includes(thread.subject.toLowerCase().slice(0, 10))))
+    ).slice(0, 3);
+  }, [thread, threads, senderEmail]);
+
+  const handleConfirmMeeting = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingMeeting(true);
+    try {
+      const startDateTime = new Date(`${meetingDate}T${meetingTime}`);
+      const endDateTime = new Date(startDateTime.getTime() + parseInt(meetingDuration, 10) * 60 * 1000);
+      
+      await createEventAsync({
+        title: meetingTitle,
+        start: startDateTime.toISOString(),
+        end: endDateTime.toISOString(),
+        description: `Scheduled from Mailroid Dossier: ${thread.subject || ""}\nSender: ${thread.sender}`,
+        attendees: senderEmail ? [senderEmail] : [],
+      });
+      
+      toast.success("Meeting Scheduled", {
+        description: `Successfully scheduled with ${senderEmail}`,
+      });
+      setScheduling(false);
+    } catch (err: any) {
+      console.error(err);
+      toast.error("Failed to schedule meeting", {
+        description: err.message || "An unknown error occurred",
+      });
+    } finally {
+      setSubmittingMeeting(false);
+    }
+  };
+
+  if (!thread) {
+    return (
+      <div className="flex flex-col items-center justify-center h-full text-center py-24 text-[#D9D1C1]/20">
+        <ArchiveIllustration />
+        <p className="text-[10px] font-mono uppercase tracking-widest">Select correspondence</p>
+      </div>
+    );
+  }
+
+  return (
+    <motion.div 
+      key={thread.threadId}
+      initial={{ opacity: 0 }}
+      animate={{ opacity: 1 }}
+      transition={{ duration: 0.25 }}
+      className="flex flex-col gap-6 h-full py-2"
+    >
+      {onBackToList && (
+        <Button 
+          variant="ghost" 
+          size="sm" 
+          onClick={onBackToList} 
+          className="lg:hidden text-[#b08d57] hover:text-[#b08d57]/80 self-start p-0 mb-2 font-mono text-xs uppercase"
+        >
+          ← Back to Dossiers
+        </Button>
+      )}
+
+      {/* Header Info */}
+      <div className="border-b border-[#b08d57]/15 pb-4">
+        <h2 className="font-serif text-lg font-semibold text-[#D9D1C1] leading-tight mt-2 mb-1.5">
+          {thread.subject || "(No Subject)"}
+        </h2>
+        <p className="text-[10px] font-mono text-[#D9D1C1]/60 truncate">
+          Sender: {thread.sender}
+        </p>
+      </div>
+
+      {/* AI Summary ("Why Important") */}
+      <div className="flex flex-col gap-2">
+        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
+          Why Important
+        </h3>
+        <div className="bg-[#b08d57]/5 border border-[#b08d57]/10 rounded-lg p-4 font-serif text-sm text-[#D9D1C1]/90 leading-relaxed relative overflow-hidden">
+          <div className="absolute right-2 top-2 select-none opacity-20">
+            <SparklesIcon className="size-3.5 text-[#b08d57]" />
+          </div>
+          <span className="block text-[8.5px] font-mono uppercase tracking-wider text-[#b08d57]/50 mb-1.5 select-none">
+            Intelligence Classification
+          </span>
+          {thread.priorityReason ? (
+            <p>&ldquo;{thread.priorityReason}&rdquo;</p>
+          ) : (
+            <p className="italic text-[#D9D1C1]/50">
+              No priority triage explanation stored. This message contains standard correspondence.
+            </p>
+          )}
+        </div>
+      </div>
+
+      {/* Related Meetings */}
+      <div className="flex flex-col gap-2">
+        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
+          Related Meetings
+        </h3>
+        {relatedMeetings.length === 0 ? (
+          <div className="flex flex-col items-center justify-center text-center py-4 bg-white/[0.01] border border-white/[0.03] rounded-lg">
+            <CalendarIllustration />
+            <span className="text-[9px] font-mono text-[#D9D1C1]/40 uppercase tracking-wider">No related meetings found.</span>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {relatedMeetings.map((event) => (
+              <div 
+                key={event.id} 
+                className="bg-white/[0.01] border border-white/[0.04] hover:border-[#b08d57]/20 rounded-lg p-3 flex flex-col gap-1 transition-colors"
+              >
+                <span className="text-xs font-serif font-bold text-[#D9D1C1]">
+                  {event.title}
+                </span>
+                <div className="flex items-center justify-between text-[9px] font-mono text-[#D9D1C1]/50 mt-1">
+                  <span>
+                    {new Date(event.start).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                   </span>
-                  {(thread.isActionRequired || thread.isReplyNeeded) && (
-                    <span className="text-[9px] font-semibold px-2 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-200">
-                      {thread.isActionRequired && "Action Required"}
-                      {thread.isActionRequired && thread.isReplyNeeded && " / "}
-                      {thread.isReplyNeeded && "Reply Needed"}
-                    </span>
-                  )}
+                  <span>
+                    {new Date(event.start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
+                  </span>
                 </div>
-              </TableCell>
-              <TableCell>
-                <div className={thread.isUnread ? "font-bold text-black" : "font-semibold text-gray-900"}>{thread.subject}</div>
-                <div className="text-xs text-gray-500 truncate max-w-xl">{thread.snippet}</div>
-              </TableCell>
-              <TableCell style={{ whiteSpace: "nowrap" }} className="text-sm text-gray-500">
-                {formatThreadDate(thread.date)}
-              </TableCell>
-            </TableRow>
-          );
-        })}
-      </TableBody>
-    </Table>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Recent Related Correspondence */}
+      <div className="flex flex-col gap-2">
+        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
+          Recent Related Correspondence
+        </h3>
+        {relatedCorrespondence.length === 0 ? (
+          <div className="text-[9px] font-mono text-[#D9D1C1]/30 bg-white/[0.01] border border-white/[0.03] rounded-lg p-3 italic">
+            No related entries on file.
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {relatedCorrespondence.map((rel) => (
+              <div 
+                key={rel.threadId}
+                className="bg-white/[0.01] border border-white/[0.04] rounded-lg p-2.5 flex flex-col gap-0.5 cursor-pointer hover:border-[#b08d57]/20"
+                onClick={() => window.location.href = `/inbox/${rel.threadId}`}
+              >
+                <span className="text-[11px] font-serif font-bold text-[#D9D1C1] truncate">{rel.subject}</span>
+                <span className="text-[8.5px] font-mono text-[#D9D1C1]/50 truncate">{formatThreadDate(rel.date)}</span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* Suggested Actions */}
+      <div className="flex flex-col gap-2 mt-auto">
+        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57] mb-1">
+          Suggested Action
+        </h3>
+        <div className="flex flex-col gap-2">
+          {/* Reply */}
+          <Button
+            variant="outline"
+            className="w-full justify-start text-left border-white/10 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
+            onClick={() => {
+              window.dispatchEvent(
+                new CustomEvent("mailroid-compose-email", {
+                  detail: {
+                    to: senderEmail,
+                    subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
+                    body: `\n\n--- On Original Thread ---\nFrom: ${thread.sender}\nSubject: ${thread.subject}\nSnippet: ${thread.snippet}`,
+                  },
+                })
+              );
+            }}
+          >
+            <SendIcon className="size-3.5 rotate-[-45deg] text-[#b08d57]" />
+            Reply to Sender
+          </Button>
+
+          {/* Schedule Meeting Form */}
+          {scheduling ? (
+            <motion.form 
+              initial={{ opacity: 0, y: 5 }}
+              animate={{ opacity: 1, y: 0 }}
+              onSubmit={handleConfirmMeeting} 
+              className="bg-white/[0.01] border border-[#b08d57]/15 rounded-lg p-4 flex flex-col gap-3"
+            >
+              <span className="text-[9px] font-mono uppercase tracking-wider text-[#b08d57] font-bold">
+                Direct Scheduler
+              </span>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Title</label>
+                <input
+                  type="text"
+                  value={meetingTitle}
+                  onChange={(e) => setMeetingTitle(e.target.value)}
+                  className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2.5 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-serif"
+                  required
+                />
+              </div>
+              <div className="grid grid-cols-2 gap-2">
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Date</label>
+                  <input
+                    type="date"
+                    value={meetingDate}
+                    onChange={(e) => setMeetingDate(e.target.value)}
+                    className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
+                    required
+                  />
+                </div>
+                <div className="flex flex-col gap-1">
+                  <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Time</label>
+                  <input
+                    type="time"
+                    value={meetingTime}
+                    onChange={(e) => setMeetingTime(e.target.value)}
+                    className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
+                    required
+                  />
+                </div>
+              </div>
+              <div className="flex flex-col gap-1">
+                <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Duration</label>
+                <select
+                  value={meetingDuration}
+                  onChange={(e) => setMeetingDuration(e.target.value)}
+                  className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
+                >
+                  <option value="30">30 minutes</option>
+                  <option value="60">1 hour</option>
+                  <option value="90">1.5 hours</option>
+                  <option value="120">2 hours</option>
+                </select>
+              </div>
+              <div className="flex gap-2 justify-end mt-1">
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  type="button"
+                  className="text-[9px] font-mono uppercase border border-white/5 hover:bg-white/5 text-[#D9D1C1] h-7 px-2.5"
+                  onClick={() => setScheduling(false)}
+                >
+                  Cancel
+                </Button>
+                <Button
+                  size="sm"
+                  type="submit"
+                  disabled={submittingMeeting}
+                  className="text-[9px] font-mono uppercase bg-[#b08d57] text-black hover:bg-[#8c6f37] hover:text-white h-7 px-3"
+                >
+                  {submittingMeeting ? "Scheduling..." : "Confirm"}
+                </Button>
+              </div>
+            </motion.form>
+          ) : (
+            <Button
+              variant="outline"
+              className="w-full justify-start text-left border-white/10 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
+              onClick={() => setScheduling(true)}
+            >
+              <CalendarDaysIcon className="size-3.5 text-[#b08d57]" />
+              Schedule Meeting
+            </Button>
+          )}
+
+          {/* Archive */}
+          <Button
+            variant="outline"
+            className="w-full justify-start text-left border-white/10 hover:border-red-950/30 hover:bg-red-950/10 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
+            onClick={() => onArchiveThread(thread.threadId)}
+          >
+            <InboxIcon className="size-3.5 text-[#b08d57]" />
+            Archive Dossier
+          </Button>
+
+          {/* Open Thread callback */}
+          <Button
+            variant="ghost"
+            className="w-full justify-start text-left text-[#b08d57]/70 hover:text-[#b08d57] hover:bg-transparent gap-2.5 font-mono text-xs uppercase tracking-wider py-2 px-1 mt-1 cursor-pointer"
+            onClick={() => {
+              window.location.href = `/inbox/${thread.threadId}`;
+            }}
+          >
+            <ArrowUpRightIcon className="size-3.5" />
+            Open Full Discussion
+          </Button>
+        </div>
+      </div>
+    </motion.div>
+  );
+}
+
+// ── Dossier List Layout ──────────────────────────────────────────────
+
+const containerVariants = {
+  hidden: { opacity: 0 },
+  show: {
+    opacity: 1,
+    transition: {
+      staggerChildren: 0.03
+    }
+  }
+};
+
+const itemVariants = {
+  hidden: { opacity: 0, y: 10 },
+  show: { opacity: 1, y: 0, transition: { type: "spring" as const, stiffness: 100, damping: 15 } }
+};
+
+function DossierLayout({
+  title,
+  subtitle,
+  threads,
+  isLoading,
+  isError,
+  error,
+  headerActions,
+  pagination,
+}: {
+  title: string;
+  subtitle: string;
+  threads: Array<any>;
+  isLoading: boolean;
+  isError: boolean;
+  error: any;
+  headerActions?: React.ReactNode;
+  pagination?: React.ReactNode;
+}) {
+  const router = useRouter();
+  const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
+  const [archivedIds, setArchivedIds] = useState<string[]>([]);
+  const [activeIndex, setActiveIndex] = useState<number | null>(null);
+  const [mobileView, setMobileView] = useState<"list" | "detail">("list");
+
+  const visibleThreads = useMemo(() => {
+    return threads.filter((t) => !archivedIds.includes(t.threadId));
+  }, [threads, archivedIds]);
+
+  const activeThread = useMemo(() => {
+    return visibleThreads.find((t) => t.threadId === selectedThreadId);
+  }, [visibleThreads, selectedThreadId]);
+
+  // Sync calendar events count for executive briefing
+  const startOfToday = useMemo(() => {
+    const d = new Date();
+    d.setHours(0,0,0,0);
+    return d.toISOString();
+  }, []);
+  const endOfToday = useMemo(() => {
+    const d = new Date();
+    d.setHours(23,59,59,999);
+    return d.toISOString();
+  }, []);
+  const { data: todayMeetings } = useCalendarEvents(startOfToday, endOfToday);
+  const meetingsCount = todayMeetings?.length ?? 0;
+
+  // Handle auto-selecting the first thread
+  useEffect(() => {
+    if (visibleThreads.length > 0) {
+      if (!selectedThreadId) {
+        setSelectedThreadId(visibleThreads[0].threadId);
+        setActiveIndex(0);
+      } else {
+        const idx = visibleThreads.findIndex((t) => t.threadId === selectedThreadId);
+        if (idx === -1) {
+          setSelectedThreadId(visibleThreads[0].threadId);
+          setActiveIndex(0);
+        } else {
+          setActiveIndex(idx);
+        }
+      }
+    } else {
+      setSelectedThreadId(null);
+      setActiveIndex(null);
+    }
+  }, [visibleThreads, selectedThreadId]);
+
+  // Keyboard navigation support
+  useEffect(() => {
+    const handleNext = () => {
+      setActiveIndex((prev) => {
+        if (prev === null) return 0;
+        if (prev >= visibleThreads.length - 1) return prev;
+        return prev + 1;
+      });
+    };
+
+    const handlePrev = () => {
+      setActiveIndex((prev) => {
+        if (prev === null || prev === 0) return 0;
+        return prev - 1;
+      });
+    };
+
+    const handleOpen = () => {
+      if (activeIndex !== null && visibleThreads[activeIndex]) {
+        router.push(`/inbox/${visibleThreads[activeIndex].threadId}`);
+      }
+    };
+
+    window.addEventListener("mailroid-select-next", handleNext);
+    window.addEventListener("mailroid-select-prev", handlePrev);
+    window.addEventListener("mailroid-open-selected", handleOpen);
+
+    return () => {
+      window.removeEventListener("mailroid-select-next", handleNext);
+      window.removeEventListener("mailroid-select-prev", handlePrev);
+      window.removeEventListener("mailroid-open-selected", handleOpen);
+    };
+  }, [activeIndex, visibleThreads, router]);
+
+  // Sync keyboard changes back to active selection state
+  useEffect(() => {
+    if (activeIndex !== null && visibleThreads[activeIndex]) {
+      setSelectedThreadId(visibleThreads[activeIndex].threadId);
+    }
+  }, [activeIndex]);
+
+  const handleSelectThread = (threadId: string) => {
+    setSelectedThreadId(threadId);
+    setMobileView("detail");
+  };
+
+  const handleArchiveThread = (threadId: string) => {
+    setArchivedIds((prev) => [...prev, threadId]);
+    toast.success("Dossier archived", {
+      description: "Dossier has been moved to communications archive.",
+    });
+    setMobileView("list");
+  };
+
+  return (
+    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full min-h-[calc(100vh-120px)] text-[#D9D1C1]">
+      {/* Dossier List Column */}
+      <div className={cn(
+        "lg:col-span-8 flex flex-col min-w-0 h-full",
+        mobileView === "detail" ? "hidden lg:flex" : "flex"
+      )}>
+        {/* Executive Briefing Strip */}
+        {!isLoading && !isError && visibleThreads.length > 0 && (
+          <motion.div
+            initial={{ opacity: 0, y: -5 }}
+            animate={{ opacity: 1, y: 0 }}
+            transition={{ duration: 0.4 }}
+          >
+            <ExecutiveBriefing threads={visibleThreads} meetingsCount={meetingsCount} />
+          </motion.div>
+        )}
+
+        {/* Header */}
+        <div className="border-b border-[#b08d57]/15 pb-4 mb-4">
+          <div className="flex flex-col gap-1">
+            <h1 className="text-xl font-bold tracking-tight text-[#D9D1C1] font-serif uppercase">
+              {title}
+            </h1>
+            <p className="text-xs text-[#D9D1C1]/50 font-mono">
+              {subtitle}
+            </p>
+          </div>
+
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-4">
+            <div className="flex flex-wrap items-center gap-2">
+              {headerActions}
+            </div>
+            <div>
+              {pagination}
+            </div>
+          </div>
+        </div>
+
+        {/* Content list */}
+        <div className="flex-1 overflow-y-auto">
+          {isLoading && (
+            <div className="flex items-center gap-3 py-16 justify-center">
+              <Spinner className="text-[#b08d57]" />
+              <span className="text-[#D9D1C1]/60 font-mono text-xs uppercase">Retrieving Records…</span>
+            </div>
+          )}
+
+          {isError && (
+            <div className="py-8 text-center text-red-500 font-mono text-sm border border-red-900/20 bg-red-950/5 rounded-lg p-4">
+              Error retrieving files: {error?.message ?? "An unexpected anomaly occurred."}
+            </div>
+          )}
+
+          {!isLoading && !isError && visibleThreads.length === 0 && (
+            <div className="flex flex-col items-center justify-center py-20 text-center">
+              <ArchiveIllustration />
+              <h3 className="font-serif text-lg font-semibold text-[#D9D1C1] mb-2">
+                No correspondence detected.
+              </h3>
+              <p className="text-xs text-[#D9D1C1]/40 font-mono max-w-xs uppercase">
+                All records triaged. Standby for new transmissions.
+              </p>
+            </div>
+          )}
+
+          {!isLoading && !isError && visibleThreads.length > 0 && (
+            <motion.div 
+              variants={containerVariants}
+              initial="hidden"
+              animate="show"
+              className="flex flex-col gap-3"
+            >
+              {visibleThreads.map((thread, index) => {
+                const isSelected = selectedThreadId === thread.threadId;
+                const p = thread.priority || "MEDIUM";
+                const s = thread.priorityScore !== null && thread.priorityScore !== undefined ? thread.priorityScore : 0.5;
+                const isCritical = p === "HIGH" && s >= 0.85;
+                const isHigh = p === "HIGH" && s < 0.85;
+                const isLow = p === "LOW";
+
+                return (
+                  <motion.div
+                    key={thread.threadId}
+                    variants={itemVariants}
+                    onClick={() => handleSelectThread(thread.threadId)}
+                    className={cn(
+                      "relative flex flex-col cursor-pointer border border-[#b08d57]/15 rounded-md transition-all duration-300 hover:translate-y-[-2px] hover:shadow-[0_4px_12px_rgba(176,141,87,0.08)]",
+                      isSelected 
+                        ? "bg-[#b08d57]/12 shadow-[inset_4px_0_0_0_#b08d57] border-[#b08d57]/45" 
+                        : "bg-[#1d1b18] border-[#b08d57]/15 hover:bg-[#262420] hover:border-[#b08d57]/30",
+                      isCritical
+                        ? "border-l-4 border-l-[#A81B1D] py-6 px-6"
+                        : isHigh
+                        ? "border-l-2 border-l-[#d4af37] py-5 px-5"
+                        : isLow
+                        ? "border-l border-l-[#474135]/50 py-3.5 px-5 text-[#D9D1C1]/85"
+                        : "border-l border-l-[#4e5870]/40 py-4.5 px-5 text-[#D9D1C1]"
+                    )}
+                  >
+                    {/* Subject Line (Primary) */}
+                    <div className={cn(
+                      "font-serif font-bold text-[#D9D1C1] tracking-tight leading-snug",
+                      isCritical ? "text-xl mb-1.5" : isHigh ? "text-lg mb-1.5" : isLow ? "text-sm mb-1" : "text-base mb-1"
+                    )}>
+                      {thread.subject || "(No Subject)"}
+                    </div>
+
+                    {/* Sender (Monospace, Secondary) */}
+                    <div className="font-mono text-[#b08d57]/90 tracking-wider mb-2 text-xs">
+                      From: {thread.sender}
+                    </div>
+
+                    {/* AI Focus Summary (Serif, Tertiary) */}
+                    <div className={cn(
+                      "font-serif leading-relaxed mb-3",
+                      isCritical ? "text-sm font-medium text-[#D9D1C1]" : isLow ? "text-xs text-[#D9D1C1]/65" : "text-sm text-[#D9D1C1]/75"
+                    )}>
+                      {thread.priorityReason ? (
+                        <span className="inline-flex items-center flex-wrap gap-1">
+                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#b08d57]/10 text-[#b08d57] border border-[#b08d57]/20 select-none mr-1.5 font-bold not-italic">
+                            Triage Reason
+                          </span>
+                          <span className="italic">&ldquo;{thread.priorityReason}&rdquo;</span>
+                        </span>
+                      ) : (
+                        <p className="line-clamp-2">{thread.snippet}</p>
+                      )}
+                    </div>
+
+                    {/* Metadata & Actions */}
+                    <div className="flex items-center justify-between gap-4 mt-auto">
+                      <div className="flex items-center gap-2">
+                        <span className="text-[10px] font-mono text-[#D9D1C1]/40 uppercase tracking-widest select-none">
+                          REF-{String(1000 + index).slice(1)}/GML
+                        </span>
+                        {thread.isActionRequired && (
+                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#b08d57]/10 text-[#b08d57] border border-[#b08d57]/15">
+                            Action Required
+                          </span>
+                        )}
+                        {thread.isReplyNeeded && (
+                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#5c0e10]/15 text-[#ffb8b8] border border-[#8f191b]/20">
+                            Reply Needed
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-3">
+                        <span className="text-[10px] font-mono text-[#D9D1C1]/50">
+                          {formatThreadDate(thread.date)}
+                        </span>
+                        <PrioritySeal priority={thread.priority} score={thread.priorityScore} />
+                      </div>
+                    </div>
+                  </motion.div>
+                );
+              })}
+            </motion.div>
+          )}
+        </div>
+      </div>
+
+      {/* Context Rail Column */}
+      <div className={cn(
+        "lg:col-span-4 h-full bg-[#181715] border border-[#b08d57]/15 rounded-lg p-5 overflow-y-auto shadow-lg",
+        mobileView === "detail" ? "flex flex-col" : "hidden lg:flex lg:flex-col"
+      )}>
+        <ContextRail 
+          thread={activeThread} 
+          threads={visibleThreads}
+          onArchiveThread={handleArchiveThread}
+          onBackToList={() => setMobileView("list")}
+        />
+      </div>
+    </div>
   );
 }
 
@@ -143,60 +896,58 @@ function CategoryInbox({
 }) {
   const { data, isLoading, isError, error } = useCategoryEmails(category, { maxResults: PAGE_SIZE, page: page - 1 });
   const threads = data?.threads ?? [];
-  const router = useRouter();
 
   return (
-    <div>
-      {/* Category tabs */}
-      <div className="flex gap-1 mb-2">
-        {CATEGORIES.map(({ key, label }) => (
-          <button
-            key={key}
-            onClick={() => onNavigate(key, 1)}
-            className={`px-4 py-1.5 text-sm rounded-full transition-colors ${
-              category === key
-                ? "bg-blue-600 text-white font-semibold"
-                : "text-muted-foreground hover:bg-accent hover:text-foreground"
-            }`}
-          >
-            {label}
-          </button>
-        ))}
-      </div>
-
-      {/* Pagination — below tabs, above table */}
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-sm text-muted-foreground">
-          {isLoading ? "Loading…" : threads.length === 0 ? `No emails in ${category.toLowerCase()}.` : `Showing ${threads.length} emails`}
-        </span>
+    <DossierLayout
+      title="Correspondence Archive"
+      subtitle={`${category.charAt(0) + category.slice(1).toLowerCase()} category dossier record`}
+      threads={threads}
+      isLoading={isLoading}
+      isError={isError}
+      error={error}
+      headerActions={
+        <div className="flex border border-[#b08d57]/20 bg-black/40 p-0.5 rounded-lg">
+          {CATEGORIES.map(({ key, label }) => (
+            <button
+              key={key}
+              onClick={() => onNavigate(key, 1)}
+              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-md transition-all cursor-pointer ${
+                category === key
+                  ? "bg-[#b08d57] text-black font-bold shadow-sm"
+                  : "bg-transparent text-[#D9D1C1]/60 hover:text-[#D9D1C1] hover:bg-white/5"
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+      }
+      pagination={
         <div className="flex items-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => onNavigate(category, page - 1)} disabled={page <= 1}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onNavigate(category, page - 1)}
+            disabled={page <= 1}
+            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+          >
             <ChevronLeftIcon className="size-4" />
-            <span>Previous</span>
+            <span>Prev</span>
           </Button>
-          <span className="text-sm text-muted-foreground min-w-16 text-center">Page {page}</span>
-          <Button variant="outline" size="sm" onClick={() => onNavigate(category, page + 1)} disabled={threads.length < PAGE_SIZE}>
+          <span className="text-xs font-mono text-[#D9D1C1]/50 min-w-16 text-center">PAGE {page}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onNavigate(category, page + 1)}
+            disabled={threads.length < PAGE_SIZE}
+            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+          >
             <span>Next</span>
             <ChevronRightIcon className="size-4" />
           </Button>
         </div>
-      </div>
-
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2"><Spinner /><span className="text-muted-foreground">Loading…</span></div>
-      )}
-
-      {isError && (
-        <p className="text-red-500">Error: {error?.message ?? "Failed to load emails"}</p>
-      )}
-
-      {!isLoading && !isError && (
-        <ThreadTable
-          threads={threads}
-          onRowClick={(threadId) => router.push(`/inbox/${threadId}`)}
-        />
-      )}
-    </div>
+      }
+    />
   );
 }
 
@@ -204,44 +955,17 @@ function CategoryInbox({
 
 function GmailSearchResults({ query }: { query: string }) {
   const { data, isLoading, isError, error } = useSearchEmails(query, { maxResults: 20 });
-  const router = useRouter();
   const threads = data?.threads ?? [];
 
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-4">
-        <SearchIcon className="size-4 text-muted-foreground" />
-        <span className="text-sm text-muted-foreground">
-          Gmail search results for: <span className="font-semibold text-foreground">&ldquo;{query}&rdquo;</span>
-        </span>
-        <span className="text-xs text-muted-foreground ml-auto">
-          {isLoading ? "Searching Gmail…" : `${threads.length} result${threads.length !== 1 ? "s" : ""}`}
-        </span>
-      </div>
-
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2"><Spinner /><span className="text-muted-foreground">Searching your Gmail account…</span></div>
-      )}
-
-      {isError && (
-        <p className="text-red-500">Search failed: {error?.message ?? "Unknown error"}</p>
-      )}
-
-      {!isLoading && !isError && threads.length === 0 && (
-        <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground">
-          <SearchIcon className="size-8" />
-          <p>No results found for &ldquo;{query}&rdquo;.</p>
-          <p className="text-sm">Try a different search term.</p>
-        </div>
-      )}
-
-      {!isLoading && !isError && (
-        <ThreadTable
-          threads={threads}
-          onRowClick={(threadId) => router.push(`/inbox/${threadId}`)}
-        />
-      )}
-    </div>
+    <DossierLayout
+      title="Gmail Search"
+      subtitle={`Dossiers matching search criteria "${query}"`}
+      threads={threads}
+      isLoading={isLoading}
+      isError={isError}
+      error={error}
+    />
   );
 }
 
@@ -249,226 +973,17 @@ function GmailSearchResults({ query }: { query: string }) {
 
 function AiSearchResults({ query }: { query: string }) {
   const { data, isLoading, isError, error } = useSearchLocalEmails(query);
-  const router = useRouter();
   const threads = data?.threads ?? [];
 
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-4">
-        <SearchIcon className="size-4 text-muted-foreground" />
-        <span className="text-sm text-muted-foreground">
-          AI search results for: <span className="font-semibold text-foreground">&ldquo;{query}&rdquo;</span>
-        </span>
-        <span className="text-xs text-muted-foreground ml-auto">
-          {isLoading ? "Searching…" : `${threads.length} result${threads.length !== 1 ? "s" : ""}`}
-        </span>
-      </div>
-
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2"><Spinner /><span className="text-muted-foreground">Searching your emails…</span></div>
-      )}
-
-      {isError && (
-        <p className="text-red-500">Search failed: {error?.message ?? "Unknown error"}</p>
-      )}
-
-      {!isLoading && !isError && threads.length === 0 && (
-        <div className="flex flex-col items-center gap-2 py-12 text-muted-foreground">
-          <SearchIcon className="size-8" />
-          <p>No results found for &ldquo;{query}&rdquo;.</p>
-          <p className="text-sm">Try a different search term.</p>
-        </div>
-      )}
-
-      {!isLoading && !isError && (
-        <ThreadTable
-          threads={threads}
-          onRowClick={(threadId) => router.push(`/inbox/${threadId}`)}
-        />
-      )}
-    </div>
-  );
-}
-
-// ── Priority Triage View ─────────────────────────────────────────────
-
-function PriorityTriageView({
-  threads,
-  onRowClick,
-  showSectionHeaders,
-}: {
-  threads: Array<{
-    threadId: string;
-    sender: string;
-    subject: string;
-    date: string;
-    snippet: string;
-    priority?: string;
-    priorityScore?: number | null;
-    priorityReason?: string | null;
-    isActionRequired?: boolean;
-    isReplyNeeded?: boolean;
-    isUnread?: boolean;
-  }>;
-  onRowClick: (threadId: string) => void;
-  showSectionHeaders: boolean;
-}) {
-  if (threads.length === 0) {
-    return (
-      <div className="flex flex-col items-center justify-center py-16 text-muted-foreground border-2 border-dashed rounded-xl p-8 bg-card/50">
-        <SparklesIcon className="size-10 text-indigo-500/80 mb-3 animate-pulse" />
-        <h3 className="font-semibold text-lg text-foreground mb-1">Inbox Zero (AI Edition)</h3>
-        <p className="text-sm text-center max-w-sm">No priority emails require your attention from the last 7 days.</p>
-      </div>
-    );
-  }
-
-  const sortedThreads = React.useMemo(() => {
-    return [...threads].sort((a, b) => {
-      // 1. priorityRank DESC (HIGH=3, MEDIUM=2, LOW=1)
-      const priorityRank: Record<string, number> = { HIGH: 3, MEDIUM: 2, LOW: 1 };
-      const aPriority = priorityRank[a.priority as string] ?? 2;
-      const bPriority = priorityRank[b.priority as string] ?? 2;
-      if (aPriority !== bPriority) {
-        return bPriority - aPriority;
-      }
-
-      // 2. isUnread DESC
-      const aUnread = a.isUnread ? 1 : 0;
-      const bUnread = b.isUnread ? 1 : 0;
-      if (aUnread !== bUnread) {
-        return bUnread - aUnread;
-      }
-
-      // 3. priorityScore DESC NULLS LAST
-      const aScore = a.priorityScore;
-      const bScore = b.priorityScore;
-      if (aScore !== bScore) {
-        if (aScore === null || aScore === undefined) return 1;
-        if (bScore === null || bScore === undefined) return -1;
-        return bScore - aScore;
-      }
-
-      // 4. receivedAt DESC
-      const aTime = a.date ? new Date(a.date).getTime() : 0;
-      const bTime = b.date ? new Date(b.date).getTime() : 0;
-      return bTime - aTime;
-    });
-  }, [threads]);
-
-  let lastPriority: string | null = null;
-
-  return (
-    <div className="grid gap-4 md:grid-cols-1 lg:grid-cols-2">
-      {sortedThreads.map((thread) => {
-        const score = thread.priorityScore !== null && thread.priorityScore !== undefined
-          ? Math.round(thread.priorityScore * 100)
-          : null;
-
-        const currentPriority = thread.priority || "MEDIUM";
-        const isNewPriority = showSectionHeaders && currentPriority !== lastPriority;
-        if (showSectionHeaders) {
-          lastPriority = currentPriority;
-        }
-
-        const priorityColor = currentPriority === "HIGH"
-          ? "bg-red-100 text-red-800 border-red-200"
-          : currentPriority === "MEDIUM"
-          ? "bg-amber-100 text-amber-800 border-amber-200"
-          : "bg-gray-100 text-gray-800 border-gray-200";
-
-        const dotColor = currentPriority === "HIGH"
-          ? "bg-red-500"
-          : currentPriority === "MEDIUM"
-          ? "bg-amber-500"
-          : "bg-gray-400";
-
-        return (
-          <React.Fragment key={thread.threadId}>
-            {isNewPriority && (
-              <div className="col-span-full mt-4 first:mt-0 mb-2">
-                <h3 className="text-xs font-bold tracking-wider text-muted-foreground uppercase flex items-center gap-2">
-                  <span className={`size-2 rounded-full ${dotColor}`} />
-                  {currentPriority} PRIORITY
-                </h3>
-                <div className="h-px bg-border mt-1" />
-              </div>
-            )}
-            <div
-              onClick={() => onRowClick(thread.threadId)}
-              className={`group relative flex flex-col justify-between border bg-card hover:bg-accent/40 rounded-xl p-5 shadow-sm hover:shadow-md transition-all duration-300 cursor-pointer ${
-                thread.isUnread
-                  ? "border-blue-300 ring-1 ring-blue-100 hover:border-blue-400"
-                  : "border-indigo-100/50 hover:border-indigo-200"
-              }`}
-            >
-              {/* Header: Priority Indicator, Score, Date */}
-              <div className="flex items-center justify-between gap-2 mb-3">
-                <div className="flex items-center gap-2 flex-wrap">
-                  <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full border shadow-sm ${priorityColor}`}>
-                    {currentPriority}
-                  </span>
-                  {score !== null ? (
-                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-indigo-50 text-indigo-700 border border-indigo-100">
-                      Score: {score}
-                    </span>
-                  ) : (
-                    <span className="text-[10px] font-semibold px-2 py-0.5 rounded-full bg-slate-100 text-slate-600 border border-slate-200">
-                      Classification Pending
-                    </span>
-                  )}
-                  {thread.isUnread && (
-                    <span className="text-[10px] font-extrabold px-2 py-0.5 rounded-full bg-blue-100 text-blue-800 border border-blue-200">
-                      New
-                    </span>
-                  )}
-                  {(thread.isActionRequired || thread.isReplyNeeded) && (
-                    <span className="text-[9px] font-semibold px-2 py-0.5 rounded border bg-amber-50 text-amber-700 border-amber-200">
-                      {thread.isActionRequired && "Action Required"}
-                      {thread.isActionRequired && thread.isReplyNeeded && " / "}
-                      {thread.isReplyNeeded && "Reply Needed"}
-                    </span>
-                  )}
-                </div>
-                <span className="text-xs text-muted-foreground tabular-nums shrink-0">
-                  {formatThreadDate(thread.date)}
-                </span>
-              </div>
-
-              {/* Content: Sender, Subject, Reason, Snippet */}
-              <div className="flex-1 mb-4">
-                <div className={`text-sm text-foreground mb-1 ${thread.isUnread ? "font-bold" : "font-semibold"}`}>
-                  {thread.sender}
-                </div>
-
-                {/* Subject: Visible but secondary / de-emphasized */}
-                <div className="text-xs text-muted-foreground font-medium mb-3 truncate max-w-md">
-                  Subject: {thread.subject || "(no subject)"}
-                </div>
-                
-                {thread.priorityReason && (
-                  <div className="text-sm font-medium bg-indigo-50/50 text-indigo-950 border border-indigo-100/50 rounded-lg p-3 mb-2 italic">
-                    <span className="block text-[10px] uppercase tracking-wider text-indigo-500 font-bold not-italic mb-1">
-                      AI Reason
-                    </span>
-                    &ldquo;{thread.priorityReason}&rdquo;
-                  </div>
-                )}
-
-                <div className="text-xs text-muted-foreground line-clamp-2 mt-1">
-                  {thread.snippet}
-                </div>
-              </div>
-              
-              {/* Action footer */}
-              <div className="flex items-center justify-end text-xs text-indigo-500 font-semibold opacity-0 group-hover:opacity-100 transition-opacity">
-                Triage Message →
-              </div>
-            </div>
-          </React.Fragment>
-        );
-      })}
-    </div>
+    <DossierLayout
+      title="AI Search"
+      subtitle={`Semantic query match for "${query}"`}
+      threads={threads}
+      isLoading={isLoading}
+      isError={isError}
+      error={error}
+    />
   );
 }
 
@@ -483,105 +998,88 @@ function PriorityInbox({
 }) {
   const [filter, setFilter] = React.useState<"ALL" | "HIGH" | "MEDIUM" | "LOW">("ALL");
 
-  // Map filters
   const priorities = React.useMemo(() => {
     if (filter === "ALL") return ["HIGH", "MEDIUM", "LOW"];
     return [filter];
   }, [filter]);
 
-  // Fetch count hook
   const { data: countsData } = usePriorityCounts();
   const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, ALL: 0 };
 
-  // Fetch emails hook
   const { data, isLoading, isError, error } = usePriorityEmails({
     priorities,
     maxResults: PAGE_SIZE,
     page: page - 1,
   });
   const threads = data?.threads ?? [];
-  const router = useRouter();
 
-  // Reset page when filter changes
   React.useEffect(() => {
     onNavigate("PRIORITY", 1);
   }, [filter]);
 
   return (
-    <div>
-      <div className="flex items-center gap-2 mb-4">
-        <SparklesIcon className="size-5 text-indigo-500 animate-pulse" />
-        <h2 className="text-lg font-bold text-foreground">Priority Attention Layer</h2>
-        <span className="text-xs text-muted-foreground">
-          Surfacing important messages from the last 7 days.
-        </span>
-      </div>
-
-      {/* Filter Pill Button Group */}
-      <div className="flex flex-wrap gap-2 mb-4">
-        {(["ALL", "HIGH", "MEDIUM", "LOW"] as const).map((key) => {
-          const count = key === "ALL" ? counts.ALL : counts[key];
-          const label = key === "ALL" ? "All" : key.charAt(0) + key.slice(1).toLowerCase();
-          const isActive = filter === key;
-          
-          return (
-            <button
-              key={key}
-              onClick={() => setFilter(key)}
-              className={`px-4 py-1.5 text-xs font-semibold rounded-full border transition-all ${
-                isActive
-                  ? key === "HIGH"
-                    ? "bg-red-600 border-red-600 text-white shadow-sm"
-                    : key === "MEDIUM"
-                    ? "bg-amber-500 border-amber-500 text-white shadow-sm"
-                    : key === "LOW"
-                    ? "bg-gray-600 border-gray-600 text-white shadow-sm"
-                    : "bg-indigo-600 border-indigo-600 text-white shadow-sm"
-                  : "bg-background text-muted-foreground hover:bg-accent hover:text-foreground border-border"
-              }`}
-            >
-              {label} ({count})
-            </button>
-          );
-        })}
-      </div>
-
-      <div className="flex items-center justify-between mb-4">
-        <span className="text-sm text-muted-foreground">
-          {isLoading ? "Loading…" : threads.length === 0 ? "No items requiring attention." : `Showing ${threads.length} triage items`}
-        </span>
+    <DossierLayout
+      title="Priority Correspondence"
+      subtitle="Your most important conversations ranked by urgency and context."
+      threads={threads}
+      isLoading={isLoading}
+      isError={isError}
+      error={error}
+      headerActions={
+        <div className="flex border border-[#b08d57]/20 bg-black/40 p-0.5 rounded-lg flex-wrap gap-1">
+          {(["ALL", "HIGH", "MEDIUM", "LOW"] as const).map((key) => {
+            const count = key === "ALL" ? counts.ALL : counts[key];
+            const label = key === "ALL" ? "All" : key.charAt(0) + key.slice(1).toLowerCase();
+            const isActive = filter === key;
+            
+            return (
+              <button
+                key={key}
+                onClick={() => setFilter(key)}
+                className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-md transition-all cursor-pointer ${
+                  isActive
+                    ? key === "HIGH"
+                      ? "bg-[#6b0b0d] text-[#ffcaca] font-bold"
+                      : key === "MEDIUM"
+                      ? "bg-[#b08d57] text-black font-bold"
+                      : key === "LOW"
+                      ? "bg-[#161513] text-[#736a5c] font-bold"
+                      : "bg-[#b08d57] text-black font-bold"
+                    : "bg-transparent text-[#D9D1C1]/60 hover:text-[#D9D1C1] hover:bg-white/5"
+                }`}
+              >
+                {label} ({count})
+              </button>
+            );
+          })}
+        </div>
+      }
+      pagination={
         <div className="flex items-center gap-3">
-          <Button variant="outline" size="sm" onClick={() => onNavigate("PRIORITY", page - 1)} disabled={page <= 1}>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onNavigate("PRIORITY", page - 1)}
+            disabled={page <= 1}
+            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+          >
             <ChevronLeftIcon className="size-4" />
-            <span>Previous</span>
+            <span>Prev</span>
           </Button>
-          <span className="text-sm text-muted-foreground min-w-16 text-center">Page {page}</span>
-          <Button variant="outline" size="sm" onClick={() => onNavigate("PRIORITY", page + 1)} disabled={threads.length < PAGE_SIZE}>
+          <span className="text-xs font-mono text-[#D9D1C1]/50 min-w-16 text-center">PAGE {page}</span>
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => onNavigate("PRIORITY", page + 1)}
+            disabled={threads.length < PAGE_SIZE}
+            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+          >
             <span>Next</span>
             <ChevronRightIcon className="size-4" />
           </Button>
         </div>
-      </div>
-
-      {isLoading && (
-        <div className="flex items-center gap-2 py-2">
-          <Spinner />
-          <span className="text-muted-foreground">Triaging inbox…</span>
-        </div>
-      )}
-
-      {isError && (
-        <p className="text-red-500">Error: {error?.message ?? "Failed to load priority emails"}</p>
-      )}
-
-      {!isLoading && !isError && (
-        <PriorityTriageView
-          threads={threads}
-          onRowClick={(threadId) => router.push(`/inbox/${threadId}`)}
-          showSectionHeaders={filter === "ALL"}
-        />
-      )}
-    </div>
+      }
+    />
   );
 }
 
@@ -598,10 +1096,9 @@ export default function InboxPage() {
   const isGmailSearch = (!mode || mode === "gmail") && q.length > 0;
   const isAiSearch = mode === "ai" && aiq.length > 0;
 
-  // UPDATES has been merged into PRIMARY — redirect to PRIMARY
+  // UPDATES category fallback
   useEffect(() => {
     if (category === "UPDATES") {
-      frontendLogger.info("[INBOX_UI]", "UPDATES category requested — redirecting to PRIMARY", { page });
       const p = new URLSearchParams();
       p.set("category", "PRIMARY");
       if (page > 1) p.set("page", String(page));
@@ -609,12 +1106,7 @@ export default function InboxPage() {
     }
   }, [category, page, router]);
 
-  frontendLogger.info("[INBOX_UI]", "InboxPage render", { category, page, mode, q, aiq, isGmailSearch, isAiSearch });
-
   const navigateTo = (newCategory: string, newPage: number) => {
-    frontendLogger.info("[INBOX_UI]", "tab or pagination navigate", {
-      fromCategory: category, fromPage: page, toCategory: newCategory, toPage: newPage,
-    });
     const p = new URLSearchParams();
     p.set("category", newCategory);
     if (newPage > 1) p.set("page", String(newPage));
@@ -635,4 +1127,3 @@ export default function InboxPage() {
 
   return <CategoryInbox category={category} page={page} onNavigate={navigateTo} />;
 }
-
