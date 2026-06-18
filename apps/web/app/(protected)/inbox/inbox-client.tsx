@@ -3,6 +3,18 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon, SparklesIcon, InboxIcon, SendIcon } from "lucide-react";
+import Image from "next/image";
+import { 
+  DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
+  DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger 
+} from "@web/components/ui/dropdown-menu";
+import {
+  Dialog, DialogContent, DialogDescription, DialogHeader,
+  DialogTitle, DialogTrigger,
+} from "@web/components/ui/dialog";
+import { SettingsIcon, KeyboardIcon, CheckCircle2, RefreshCwIcon } from "lucide-react";
+import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+
 import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
@@ -100,77 +112,114 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   const count = (cat: string) => categoryCounts?.[cat] ?? 0;
 
   return (
-    <div className="flex h-screen">
+    <div className="flex h-screen bg-background text-foreground">
       {/* ── Sidebar ─────────────────────────────────────────── */}
-      <div className="w-56 shrink-0 border-r bg-muted/30 flex flex-col px-3 py-4 gap-1">
-        <button
-          onClick={() => navigateTo({ category: "PRIMARY", q: undefined })}
-          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-colors ${
-            category === "PRIMARY" || INBOX_CATEGORIES.some((c) => c.key === category)
-              ? "bg-accent"
-              : "hover:bg-accent/50"
-          }`}
-        >
-          <InboxIcon className="size-4" />
-          <span className="flex-1 text-left">Inbox</span>
-        </button>
+      <div className="w-64 shrink-0 border-r bg-muted/10 flex flex-col px-4 py-6 gap-1 overflow-y-auto">
+        {/* Sidebar Logo Area */}
+        <div className="flex items-center gap-3 px-2 mb-6">
+          <Image src={logoImg} alt="Mailroid" className="h-8 w-8 object-contain" />
+          <span className="font-semibold tracking-tight text-lg">Mailroid</span>
+        </div>
 
-        {INBOX_CATEGORIES.map(({ key, label }) => (
+        {/* Compose */}
+        <Button onClick={() => setComposeOpen(true)} className="w-full justify-start gap-2 h-11 font-medium shadow-sm mb-4">
+          <PencilIcon className="size-4" />
+          Compose
+        </Button>
+
+        {/* Navigation section 1 */}
+        <div className="space-y-0.5">
           <button
-            key={key}
-            onClick={() => navigateTo({ category: key, q: undefined })}
-            className={`flex items-center gap-3 px-3 py-1.5 rounded-lg text-sm pl-10 transition-colors ${
-              category === key ? "bg-accent font-semibold" : "hover:bg-accent/50 text-muted-foreground"
+            onClick={() => navigateTo({ category: "PRIMARY", q: undefined })}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              category === "PRIMARY" || (!["PRIORITY", "SENT"].includes(category) && !INBOX_CATEGORIES.some(c => c.key === category))
+                ? "bg-accent text-foreground"
+                : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
             }`}
           >
-            <span className="flex-1 text-left">{label}</span>
-            <span className="text-xs text-muted-foreground tabular-nums">{count(key)}</span>
+            <InboxIcon className="size-4" />
+            <span className="flex-1 text-left">Inbox</span>
           </button>
-        ))}
 
-        <button
-          onClick={() => navigateTo({ category: "PRIORITY", q: undefined })}
-          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-colors mt-1 ${
-            category === "PRIORITY" ? "bg-accent text-foreground" : "hover:bg-accent/50 text-muted-foreground"
-          }`}
-        >
-          <SparklesIcon className="size-4 text-indigo-500" />
-          <span className="flex-1 text-left">Priority</span>
-        </button>
+          <button
+            onClick={() => navigateTo({ category: "PRIORITY", q: undefined })}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              category === "PRIORITY" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+            }`}
+          >
+            <SparklesIcon className="size-4" />
+            <span className="flex-1 text-left">Priority</span>
+          </button>
 
-        <div className="mt-3 mb-1 border-t" />
+          {/* Inbox Sub-categories */}
+          <div className="mt-1 mb-2 space-y-0.5">
+            {INBOX_CATEGORIES.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => navigateTo({ category: key, q: undefined })}
+                className={`w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-sm pl-10 transition-colors ${
+                  category === key ? "text-foreground font-medium bg-accent/40" : "hover:bg-accent/30 text-muted-foreground"
+                }`}
+              >
+                <span className="flex-1 text-left">{label}</span>
+                <span className="text-xs text-muted-foreground opacity-60 tabular-nums">{count(key)}</span>
+              </button>
+            ))}
+          </div>
 
-        <button
-          onClick={() => navigateTo({ category: "SENT", q: undefined })}
-          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
-            category === "SENT" ? "bg-accent font-semibold" : "hover:bg-accent/50 text-muted-foreground"
-          }`}
-        >
-          <SendIcon className="size-4" />
-          <span className="flex-1 text-left">Sent</span>
-          <span className="text-xs text-muted-foreground tabular-nums">{count("SENT")}</span>
-        </button>
+          <button
+            onClick={() => navigateTo({ category: "SENT", q: undefined })}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              category === "SENT" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+            }`}
+          >
+            <SendIcon className="size-4" />
+            <span className="flex-1 text-left">Sent</span>
+            <span className="text-xs text-muted-foreground opacity-60 tabular-nums">{count("SENT")}</span>
+          </button>
+        </div>
+
+        <div className="my-3 border-t border-border/40" />
+
+        {/* Navigation section 2 */}
+        <div className="space-y-0.5">
+          <button
+            onClick={() => router.push("/calendar")}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+          >
+            <CalendarDaysIcon className="size-4" />
+            <span className="flex-1 text-left">Calendar</span>
+          </button>
+
+          <button
+            onClick={() => router.push("/assistant")}
+            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/15"
+          >
+            <BotIcon className="size-4" />
+            <span className="flex-1 text-left">Dobbie</span>
+          </button>
+        </div>
+
+        <div className="my-3 border-t border-border/40" />
+
+        
 
         <div className="flex-grow" />
 
-        <div className="mt-auto pt-4 border-t border-slate-200">
+        {/* Usage Widget */}
+        <div className="mt-auto pt-4 border-t border-border/40">
           <DailyUsageWidget />
         </div>
       </div>
 
       {/* ── Main area ───────────────────────────────────────── */}
-      <div className="flex-1 flex flex-col min-w-0">
+      <div className="flex-1 flex flex-col min-w-0 bg-background">
         {/* Top bar */}
-        <div className="flex items-center gap-3 px-6 py-3 border-b">
-          <Avatar className="size-8 shrink-0 ring-2 ring-chart-1/50">
-            {avatarUrl && <AvatarImage src={avatarUrl} alt={session?.user?.name ?? "User"} />}
-            <AvatarFallback className="bg-chart-1 text-primary-foreground text-xs font-semibold">{initials}</AvatarFallback>
-          </Avatar>
-
-          <div className="flex items-center gap-2 flex-1 max-w-2xl">
+        <div className="flex items-center gap-4 px-8 py-3 h-16 border-b border-border/40 shrink-0 w-full">
+          <div className="flex items-center gap-2">
             <div className="inline-flex rounded-lg border bg-muted p-0.5 shrink-0">
               <button
-                onClick={() => { frontendLogger.info("[INBOX_UI]", "search mode gmail clicked", { category }); navigateTo({ category, q: undefined, mode: undefined }); }}
+                onClick={() => { navigateTo({ category, q: undefined, mode: undefined }); }}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                   searchMode === "gmail"
                     ? "bg-background text-foreground shadow-sm"
@@ -180,7 +229,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 Search Gmail
               </button>
               <button
-                onClick={() => { frontendLogger.info("[INBOX_UI]", "search mode ai clicked", { category }); navigateTo({ category, aiq: undefined, mode: "ai" }); }}
+                onClick={() => { navigateTo({ category, aiq: undefined, mode: "ai" }); }}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                   searchMode === "ai"
                     ? "bg-background text-foreground shadow-sm"
@@ -190,18 +239,21 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 Ask Dobbie
               </button>
             </div>
-            <div className="relative flex-1">
+          </div>
+          
+          <div className="flex-1 min-w-0">
+            <div className="relative w-full">
               <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
               <Input
                 type="text"
-                placeholder={searchMode === "gmail" ? "Search your entire Gmail account…" : "Ask Dobbie about your emails…"}
+                placeholder={searchMode === "gmail" ? "Search your workspace..." : "Ask Dobbie about your emails…"}
                 value={localValue}
                 onChange={handleChange}
-                className="pl-9 pr-9"
+                className="pl-10 pr-10 w-full bg-transparent border-border text-muted-foreground focus-visible:bg-background focus-visible:text-foreground focus-visible:border-input transition-colors shadow-sm"
               />
               {localValue && (
                 <button
-                  onClick={() => { frontendLogger.info("[INBOX_UI]", "search cleared", { category, searchMode }); setLocalValue(""); navigateTo({ category, q: undefined, aiq: undefined }); }}
+                  onClick={() => { setLocalValue(""); navigateTo({ category, q: undefined, aiq: undefined }); }}
                   className="absolute right-2 top-1/2 -translate-y-1/2 p-1 text-muted-foreground hover:text-foreground rounded-full hover:bg-muted"
                 >
                   <XIcon className="size-4" />
@@ -210,18 +262,57 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             </div>
           </div>
 
-          <Button onClick={() => setComposeOpen(true)} className="gap-1.5"><PencilIcon className="size-4" />Compose</Button>
-          <Button variant="outline" onClick={handleSync} disabled={syncing} className="gap-1.5"><DownloadIcon className="size-4" />{syncing ? "Syncing…" : "Sync"}</Button>
-          {countData && <span className="text-xs text-muted-foreground whitespace-nowrap">Imported: {countData.count}</span>}
-          <Button variant="outline" onClick={handleGenerateEmbeddings} disabled={embedding} className="gap-1.5"><SparklesIcon className="size-4" />{embedding ? "Embedding…" : "Embed"}</Button>
-          <Button onClick={() => router.push("/assistant")} className="gap-1.5 bg-indigo-600 hover:bg-indigo-700 text-white"><BotIcon className="size-4" />Dobbie</Button>
-          <Button variant="outline" onClick={() => router.push("/calendar")} className="gap-1.5"><CalendarDaysIcon className="size-4" />Calendar</Button>
-          <Button variant="ghost" onClick={handleLogout}><LogOutIcon className="size-4" /></Button>
+
+          <div className="flex items-center gap-3 mr-4">
+            <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="gap-1.5 text-xs h-8">
+              <DownloadIcon className="size-3.5" />{syncing ? "Syncing…" : "Sync"}
+            </Button>
+            {countData && <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider whitespace-nowrap">Imported: {countData.count}</span>}
+            <Button variant="outline" size="sm" onClick={handleGenerateEmbeddings} disabled={embedding} className="gap-1.5 text-xs h-8">
+              <SparklesIcon className="size-3.5" />{embedding ? "Embedding…" : "Embed"}
+            </Button>
+            {pendingData !== undefined && <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider whitespace-nowrap">Pending: {pendingData.pending}</span>}
+          </div>
+
+          <DropdownMenu>
+            <DropdownMenuTrigger asChild>
+              <button className="rounded-full ring-offset-background transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-offset-2 hover:opacity-80">
+                <Avatar className="size-9 border border-border/50 shadow-sm">
+                  {avatarUrl && <AvatarImage src={avatarUrl} alt={session?.user?.name ?? "User"} />}
+                  <AvatarFallback className="bg-muted text-foreground text-xs font-semibold">{initials}</AvatarFallback>
+                </Avatar>
+              </button>
+            </DropdownMenuTrigger>
+            <DropdownMenuContent align="end" className="w-56 mt-1 shadow-md">
+              <DropdownMenuLabel className="font-normal">
+                <div className="flex flex-col space-y-1">
+                  <p className="text-sm font-medium leading-none">{session?.user?.name ?? "User"}</p>
+                  <p className="text-xs leading-none text-muted-foreground">{session?.user?.email ?? ""}</p>
+                </div>
+              </DropdownMenuLabel>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings")}>
+                <SettingsIcon className="mr-2 h-4 w-4" />
+                <span>Settings</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
+                <KeyboardIcon className="mr-2 h-4 w-4" />
+                <span>Keyboard Shortcuts</span>
+              </DropdownMenuItem>
+              <DropdownMenuSeparator />
+              <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={handleLogout}>
+                <LogOutIcon className="mr-2 h-4 w-4" />
+                <span>Sign Out</span>
+              </DropdownMenuItem>
+            </DropdownMenuContent>
+          </DropdownMenu>
         </div>
 
         <ComposeDialog open={composeOpen} onOpenChange={setComposeOpen} />
-        <div className="flex-1 overflow-auto px-6 py-4">{children}</div>
+        
+        <div className="flex-1 overflow-auto bg-background">{children}</div>
       </div>
     </div>
   );
 }
+

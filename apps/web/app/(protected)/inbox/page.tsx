@@ -12,6 +12,7 @@ import {
 } from "@web/hooks/api/gmail";
 import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
 import { Button } from "@web/components/ui/button";
+import { Badge } from "@web/components/ui/badge";
 import { Spinner } from "@web/components/ui/spinner";
 import { 
   ChevronLeftIcon, 
@@ -20,9 +21,13 @@ import {
   SparklesIcon, 
   CalendarDaysIcon, 
   SendIcon, 
-  InboxIcon, 
-  ArrowUpRightIcon,
-  ArchiveIcon
+  ArchiveIcon,
+  SquareIcon,
+  StarIcon,
+  RefreshCwIcon,
+  MoreVerticalIcon,
+  InboxIcon,
+  ArrowUpRightIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { toast } from "sonner";
@@ -66,42 +71,11 @@ function formatThreadDate(dateString: string): string {
 
 // ── Priority Wax Seals ───────────────────────────────────────────────
 
-function PrioritySeal({ priority, score }: { priority?: string; score?: number | null }) {
+function PrioritySeal({ priority }: { priority?: string; score?: number | null }) {
   const p = priority || "MEDIUM";
-  const s = score !== null && score !== undefined ? score : 0.5;
-  
-  let details = {
-    label: "Moonlight",
-    classes: "bg-[#0b0c10] border border-[#2c3545]/40 text-[#8f9eb3] shadow-[0_1px_4px_rgba(44,53,69,0.15)]"
-  };
-
-  if (p === "HIGH") {
-    if (s >= 0.85) {
-      details = {
-        label: "Blood Seal",
-        classes: "bg-[#2d0709] border border-[#6b1618]/50 text-[#ff9e9e] shadow-[0_2px_8px_rgba(107,22,24,0.3)] animate-pulse"
-      };
-    } else {
-      details = {
-        label: "Brass Seal",
-        classes: "bg-[#241c0e] border border-[#5c4a25]/50 text-[#d4af37] shadow-[0_2px_6px_rgba(92,74,37,0.2)]"
-      };
-    }
-  } else if (p === "LOW") {
-    details = {
-      label: "Parchment",
-      classes: "bg-[#0e0e0d] border border-[#2b2721]/30 text-[#615a4e]"
-    };
-  }
-
-  return (
-    <div className={cn(
-      "text-[8px] font-mono tracking-widest uppercase font-bold px-2 py-0.5 rounded-md text-center flex items-center justify-center shrink-0 min-w-[75px] h-4.5",
-      details.classes
-    )}>
-      {details.label}
-    </div>
-  );
+  if (p === "HIGH") return <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase rounded">HIGH</Badge>;
+  if (p === "LOW") return <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-muted-foreground bg-muted rounded">LOW</Badge>;
+  return <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-amber-600 border-amber-600/30 bg-amber-500/10 rounded">MEDIUM</Badge>;
 }
 
 // ── Visual Illustrations ─────────────────────────────────────────────
@@ -155,48 +129,31 @@ function ExecutiveBriefing({
 }) {
   const requiresAction = useMemo(() => threads.filter(t => t.isActionRequired).length, [threads]);
   const priorityCount = useMemo(() => threads.filter(t => t.priority === "HIGH").length, [threads]);
-  const waitingForResponse = useMemo(() => {
-    // Dynamically calculate waiting count (emails not unread and not action required)
-    return Math.max(1, threads.filter(t => !t.isUnread && t.priority === "MEDIUM").length);
-  }, [threads]);
-  
   const focusThread = useMemo(() => {
     return threads.find(t => t.priority === "HIGH" && t.isActionRequired) || threads.find(t => t.priority === "HIGH") || threads[0];
   }, [threads]);
 
   return (
-    <div className="border border-[#b08d57]/20 bg-[#b08d57]/3 rounded-lg p-3.5 flex flex-col md:flex-row md:items-center justify-between gap-4 max-h-[120px] overflow-hidden select-none font-mono">
-      {/* Recommended Focus Section */}
-      <div className="flex flex-col gap-0.5 min-w-0 flex-1">
-        <span className="text-[9px] uppercase tracking-widest text-[#b08d57] font-bold">
-          Today's Intelligence
-        </span>
-        <div className="text-xs text-[#D9D1C1]/90 truncate font-serif mt-1">
-          <span className="font-mono text-[9px] text-[#b08d57]/60 uppercase tracking-wider mr-1.5">Recommended Focus:</span>
-          {focusThread ? focusThread.subject : "Webhook Verification Review"}
+    <div className="rounded-xl border bg-card p-4 sm:p-5 shadow-sm flex flex-col md:flex-row md:items-center justify-between gap-6 mb-6">
+      <div className="flex flex-col gap-1 min-w-0 flex-1">
+        <span className="text-xs font-semibold text-foreground tracking-tight uppercase">Today</span>
+        <div className="text-sm text-muted-foreground truncate">
+          <span className="font-medium text-foreground mr-1">Focus:</span>
+          {focusThread ? focusThread.subject : "Inbox Zero"}
         </div>
       </div>
-
-      {/* Stats Summary Grid */}
-      <div className="flex items-center gap-5 shrink-0 text-center">
-        <div className="flex flex-col min-w-[55px]">
-          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{requiresAction}</span>
-          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Requires Action</span>
+      <div className="flex items-center gap-6 shrink-0 text-center">
+        <div className="flex flex-col">
+          <span className="text-xl font-semibold text-foreground">{requiresAction}</span>
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mt-0.5">Action Required</span>
         </div>
-        <div className="h-6 w-px bg-[#b08d57]/15" />
-        <div className="flex flex-col min-w-[55px]">
-          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{waitingForResponse}</span>
-          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Waiting Response</span>
+        <div className="flex flex-col">
+          <span className="text-xl font-semibold text-foreground">{meetingsCount}</span>
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mt-0.5">Meetings</span>
         </div>
-        <div className="h-6 w-px bg-[#b08d57]/15" />
-        <div className="flex flex-col min-w-[55px]">
-          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{meetingsCount}</span>
-          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Upcoming Meetings</span>
-        </div>
-        <div className="h-6 w-px bg-[#b08d57]/15" />
-        <div className="flex flex-col min-w-[55px]">
-          <span className="text-sm font-bold text-[#D9D1C1] font-sans">{priorityCount}</span>
-          <span className="text-[7.5px] text-[#D9D1C1]/40 uppercase tracking-wider mt-0.5">Priority Threads</span>
+        <div className="flex flex-col">
+          <span className="text-xl font-semibold text-foreground">{priorityCount}</span>
+          <span className="text-[10px] font-medium text-muted-foreground uppercase tracking-wider mt-0.5">Priority Threads</span>
         </div>
       </div>
     </div>
@@ -706,41 +663,22 @@ function DossierLayout({
   };
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 h-full min-h-[calc(100vh-120px)] text-[#D9D1C1]">
+    <div className="flex flex-col h-full min-h-[calc(100vh-120px)] text-foreground">
       {/* Dossier List Column */}
       <div className={cn(
-        "lg:col-span-8 flex flex-col min-w-0 h-full",
+        "flex flex-col min-w-0 h-full w-full px-4 lg:px-8",
         mobileView === "detail" ? "hidden lg:flex" : "flex"
       )}>
-        {/* Executive Briefing Strip */}
-        {!isLoading && !isError && visibleThreads.length > 0 && (
-          <motion.div
-            initial={{ opacity: 0, y: -5 }}
-            animate={{ opacity: 1, y: 0 }}
-            transition={{ duration: 0.4 }}
-          >
-            <ExecutiveBriefing threads={visibleThreads} meetingsCount={meetingsCount} />
-          </motion.div>
-        )}
 
-        {/* Header */}
-        <div className="border-b border-[#b08d57]/15 pb-4 mb-4">
-          <div className="flex flex-col gap-1">
-            <h1 className="text-xl font-bold tracking-tight text-[#D9D1C1] font-serif uppercase">
-              {title}
-            </h1>
-            <p className="text-xs text-[#D9D1C1]/50 font-mono">
-              {subtitle}
-            </p>
+        {/* Gmail Style Toolbar */}
+        <div className="flex items-center justify-between h-12 px-4 border-b border-border bg-background sticky top-0 z-10">
+          <div className="flex items-center gap-4 text-muted-foreground/70">
+            
+            <RefreshCwIcon className="size-4 hover:text-foreground cursor-pointer transition-colors" onClick={() => window.location.reload()} />
+            {headerActions}
           </div>
-
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mt-4">
-            <div className="flex flex-wrap items-center gap-2">
-              {headerActions}
-            </div>
-            <div>
-              {pagination}
-            </div>
+          <div className="flex items-center gap-2 text-xs text-muted-foreground">
+            {pagination}
           </div>
         </div>
 
@@ -776,88 +714,75 @@ function DossierLayout({
               variants={containerVariants}
               initial="hidden"
               animate="show"
-              className="flex flex-col gap-3"
+              className="flex flex-col border-t border-border"
             >
               {visibleThreads.map((thread, index) => {
                 const isSelected = selectedThreadId === thread.threadId;
-                const p = thread.priority || "MEDIUM";
-                const s = thread.priorityScore !== null && thread.priorityScore !== undefined ? thread.priorityScore : 0.5;
-                const isCritical = p === "HIGH" && s >= 0.85;
-                const isHigh = p === "HIGH" && s < 0.85;
-                const isLow = p === "LOW";
+
+                // Extract sender name
+                let senderName = thread.sender;
+                if (senderName) {
+                  const match = senderName.match(/^([^<]+)/);
+                  if (match) senderName = match[1].replace(/"/g, "").trim();
+                }
 
                 return (
                   <motion.div
                     key={thread.threadId}
                     variants={itemVariants}
-                    onClick={() => handleSelectThread(thread.threadId)}
+                    onClick={() => {
+                      router.push(`/inbox/${thread.threadId}`);
+                    }}
                     className={cn(
-                      "relative flex flex-col cursor-pointer border border-[#b08d57]/15 rounded-md transition-all duration-300 hover:translate-y-[-2px] hover:shadow-[0_4px_12px_rgba(176,141,87,0.08)]",
-                      isSelected 
-                        ? "bg-[#b08d57]/12 shadow-[inset_4px_0_0_0_#b08d57] border-[#b08d57]/45" 
-                        : "bg-[#1d1b18] border-[#b08d57]/15 hover:bg-[#262420] hover:border-[#b08d57]/30",
-                      isCritical
-                        ? "border-l-4 border-l-[#A81B1D] py-6 px-6"
-                        : isHigh
-                        ? "border-l-2 border-l-[#d4af37] py-5 px-5"
-                        : isLow
-                        ? "border-l border-l-[#474135]/50 py-3.5 px-5 text-[#D9D1C1]/85"
-                        : "border-l border-l-[#4e5870]/40 py-4.5 px-5 text-[#D9D1C1]"
+                      "group relative flex flex-row items-center justify-between py-3 px-4 cursor-pointer border-b border-border transition-colors",
+                      isSelected ? "bg-accent/40" : "bg-transparent hover:bg-muted/50"
                     )}
                   >
-                    {/* Subject Line (Primary) */}
-                    <div className={cn(
-                      "font-serif font-bold text-[#D9D1C1] tracking-tight leading-snug",
-                      isCritical ? "text-xl mb-1.5" : isHigh ? "text-lg mb-1.5" : isLow ? "text-sm mb-1" : "text-base mb-1"
-                    )}>
-                      {thread.subject || "(No Subject)"}
-                    </div>
-
-                    {/* Sender (Monospace, Secondary) */}
-                    <div className="font-mono text-[#b08d57]/90 tracking-wider mb-2 text-xs">
-                      From: {thread.sender}
-                    </div>
-
-                    {/* AI Focus Summary (Serif, Tertiary) */}
-                    <div className={cn(
-                      "font-serif leading-relaxed mb-3",
-                      isCritical ? "text-sm font-medium text-[#D9D1C1]" : isLow ? "text-xs text-[#D9D1C1]/65" : "text-sm text-[#D9D1C1]/75"
-                    )}>
-                      {thread.priorityReason ? (
-                        <span className="inline-flex items-center flex-wrap gap-1">
-                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#b08d57]/10 text-[#b08d57] border border-[#b08d57]/20 select-none mr-1.5 font-bold not-italic">
-                            Triage Reason
-                          </span>
-                          <span className="italic">&ldquo;{thread.priorityReason}&rdquo;</span>
-                        </span>
-                      ) : (
-                        <p className="line-clamp-2">{thread.snippet}</p>
-                      )}
-                    </div>
-
-                    {/* Metadata & Actions */}
-                    <div className="flex items-center justify-between gap-4 mt-auto">
-                      <div className="flex items-center gap-2">
-                        <span className="text-[10px] font-mono text-[#D9D1C1]/40 uppercase tracking-widest select-none">
-                          REF-{String(1000 + index).slice(1)}/GML
-                        </span>
-                        {thread.isActionRequired && (
-                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#b08d57]/10 text-[#b08d57] border border-[#b08d57]/15">
-                            Action Required
-                          </span>
-                        )}
-                        {thread.isReplyNeeded && (
-                          <span className="text-[8px] font-mono uppercase tracking-wider px-2 py-0.5 rounded bg-[#5c0e10]/15 text-[#ffb8b8] border border-[#8f191b]/20">
-                            Reply Needed
-                          </span>
-                        )}
+                    {/* Left & Center: Icons + Sender + Subject + Snippet */}
+                    <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
+                      <div className="w-40 shrink-0 truncate font-semibold text-[13px] text-foreground">
+                        {senderName}
                       </div>
-                      <div className="flex items-center gap-3">
-                        <span className="text-[10px] font-mono text-[#D9D1C1]/50">
-                          {formatThreadDate(thread.date)}
+                      <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate text-[13px]">
+                        <span className="font-semibold text-foreground truncate shrink-0 max-w-[50%]">
+                          {thread.subject || "(No Subject)"}
                         </span>
-                        <PrioritySeal priority={thread.priority} score={thread.priorityScore} />
+                        <span className="text-muted-foreground truncate font-normal">
+                          <span className="mr-1.5 opacity-50">-</span>
+                          {thread.snippet}
+                        </span>
                       </div>
+                    </div>
+
+                    {/* Right: Actions, Badge, Date */}
+                    <div className="flex items-center gap-4 shrink-0">
+                      {/* Hover Actions */}
+                      <div className="hidden group-hover:flex items-center gap-1">
+                        <Button 
+                          variant="ghost" 
+                          size="icon" 
+                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            window.dispatchEvent(
+                              new CustomEvent("mailroid-compose-email", {
+                                detail: {
+                                  to: thread.sender,
+                                  subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
+                                  body: `\n\n--- On Original Thread ---\nFrom: ${thread.sender}\nSubject: ${thread.subject}\nSnippet: ${thread.snippet}`,
+                                },
+                              })
+                            );
+                          }}
+                        >
+                          <SendIcon className="size-3.5 rotate-[-45deg]" />
+                        </Button>
+                      </div>
+
+                      {thread.priority && <PrioritySeal priority={thread.priority} score={thread.priorityScore} />}
+                      <span className="text-[11px] font-semibold text-foreground/80 w-14 text-right tabular-nums">
+                        {formatThreadDate(thread.date)}
+                      </span>
                     </div>
                   </motion.div>
                 );
@@ -867,18 +792,7 @@ function DossierLayout({
         </div>
       </div>
 
-      {/* Context Rail Column */}
-      <div className={cn(
-        "lg:col-span-4 h-full bg-[#181715] border border-[#b08d57]/15 rounded-lg p-5 overflow-y-auto shadow-lg",
-        mobileView === "detail" ? "flex flex-col" : "hidden lg:flex lg:flex-col"
-      )}>
-        <ContextRail 
-          thread={activeThread} 
-          threads={visibleThreads}
-          onArchiveThread={handleArchiveThread}
-          onBackToList={() => setMobileView("list")}
-        />
-      </div>
+
     </div>
   );
 }
@@ -906,15 +820,15 @@ function CategoryInbox({
       isError={isError}
       error={error}
       headerActions={
-        <div className="flex border border-[#b08d57]/20 bg-black/40 p-0.5 rounded-lg">
+        <div className="flex items-center gap-2 px-2">
           {CATEGORIES.map(({ key, label }) => (
             <button
               key={key}
               onClick={() => onNavigate(key, 1)}
-              className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-md transition-all cursor-pointer ${
+              className={`px-4 py-3 text-[13px] font-medium transition-all cursor-pointer border-b-2 ${
                 category === key
-                  ? "bg-[#b08d57] text-black font-bold shadow-sm"
-                  : "bg-transparent text-[#D9D1C1]/60 hover:text-[#D9D1C1] hover:bg-white/5"
+                  ? "border-primary text-primary"
+                  : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/30 rounded-t-sm"
               }`}
             >
               {label}
@@ -929,18 +843,18 @@ function CategoryInbox({
             size="sm"
             onClick={() => onNavigate(category, page - 1)}
             disabled={page <= 1}
-            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+            className="border-border text-xs font-bold uppercase bg-transparent text-foreground hover:bg-muted"
           >
             <ChevronLeftIcon className="size-4" />
             <span>Prev</span>
           </Button>
-          <span className="text-xs font-mono text-[#D9D1C1]/50 min-w-16 text-center">PAGE {page}</span>
+          <span className="text-xs font-bold text-foreground min-w-16 text-center">PAGE {page}</span>
           <Button
             variant="outline"
             size="sm"
             onClick={() => onNavigate(category, page + 1)}
             disabled={threads.length < PAGE_SIZE}
-            className="border-white/10 text-xs font-mono uppercase bg-transparent text-[#D9D1C1] hover:bg-white/5"
+            className="border-border text-xs font-bold uppercase bg-transparent text-foreground hover:bg-muted"
           >
             <span>Next</span>
             <ChevronRightIcon className="size-4" />
@@ -1026,7 +940,7 @@ function PriorityInbox({
       isError={isError}
       error={error}
       headerActions={
-        <div className="flex border border-[#b08d57]/20 bg-black/40 p-0.5 rounded-lg flex-wrap gap-1">
+        <div className="flex items-center gap-2 px-2">
           {(["ALL", "HIGH", "MEDIUM", "LOW"] as const).map((key) => {
             const count = key === "ALL" ? counts.ALL : counts[key];
             const label = key === "ALL" ? "All" : key.charAt(0) + key.slice(1).toLowerCase();
@@ -1036,19 +950,13 @@ function PriorityInbox({
               <button
                 key={key}
                 onClick={() => setFilter(key)}
-                className={`px-4 py-1.5 text-xs font-mono uppercase tracking-wider rounded-md transition-all cursor-pointer ${
+                className={`px-4 py-3 text-[13px] font-medium transition-all cursor-pointer border-b-2 ${
                   isActive
-                    ? key === "HIGH"
-                      ? "bg-[#6b0b0d] text-[#ffcaca] font-bold"
-                      : key === "MEDIUM"
-                      ? "bg-[#b08d57] text-black font-bold"
-                      : key === "LOW"
-                      ? "bg-[#161513] text-[#736a5c] font-bold"
-                      : "bg-[#b08d57] text-black font-bold"
-                    : "bg-transparent text-[#D9D1C1]/60 hover:text-[#D9D1C1] hover:bg-white/5"
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/30 rounded-t-sm"
                 }`}
               >
-                {label} ({count})
+                {label} <span className="opacity-70 ml-0.5">({count})</span>
               </button>
             );
           })}
