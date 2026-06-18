@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import { motion } from "framer-motion";
 import { 
   BotIcon, 
@@ -20,6 +20,19 @@ import remarkGfm from "remark-gfm";
 import { useConversations, useConversationMessages, useDeleteConversation } from "@web/hooks/api/assistant";
 import { useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
+import { Button } from "@web/components/ui/button";
+
+interface RenderableItem {
+  type: "message" | "tool_call";
+  id: string;
+  role?: string;
+  content?: string;
+  msgRef?: ChatMessage;
+  toolName?: string;
+  toolArgs?: any;
+  status?: "running" | "success" | "error";
+  resultSummary?: string;
+}
 
 interface ChatMessage {
   id: string;
@@ -139,9 +152,173 @@ export default function AssistantPage() {
   const { messages: dbMessages, isLoading: isLoadingMessages, refetch: refetchMessages } = useConversationMessages(currentConversationId);
   const { deleteConversationAsync } = useDeleteConversation();
 
+  const messagesEndRef = useRef<HTMLDivElement>(null);
+
+  // Scroll to bottom on new messages
+  useEffect(() => {
+    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [messages, isLoading]);
+
   useEffect(() => {
     setIsMounted(true);
   }, []);
+
+  const getGreeting = () => {
+    const hr = new Date().getHours();
+    if (hr < 12) return "Good morning";
+    if (hr < 17) return "Good afternoon";
+    return "Good evening";
+  };
+
+  const getToolRunningText = (name: string): string => {
+    if (name === "searchEmails") return "Searching Gmail...";
+    if (name === "getEvents") return "Retrieving calendar events...";
+    if (name === "sendEmail") return "Sending email...";
+    if (name === "createEvent") return "Creating calendar event...";
+    if (name === "generateExecutiveBrief") return "Generating executive briefing...";
+    return `Executing tool ${name}...`;
+  };
+
+  const getToolSuccessText = (name: string): string => {
+    if (name === "searchEmails") return "✓ Searched Gmail";
+    if (name === "getEvents") return "✓ Calendar events retrieved";
+    if (name === "sendEmail") return "✓ Email sent successfully";
+    if (name === "createEvent") return "✓ Event created successfully";
+    if (name === "generateExecutiveBrief") return "✓ Executive briefing generated";
+    return `✓ Executed tool ${name}`;
+  };
+
+  // Group conversations by date (Today, Yesterday, Older)
+  const groupedConversations = useMemo(() => {
+    if (!conversations) return { today: [], yesterday: [], older: [] };
+    const today: typeof conversations = [];
+    const yesterday: typeof conversations = [];
+    const older: typeof conversations = [];
+
+    const todayDate = new Date();
+    todayDate.setHours(0,0,0,0);
+
+    const yesterdayDate = new Date();
+    yesterdayDate.setDate(yesterdayDate.getDate() - 1);
+    yesterdayDate.setHours(0,0,0,0);
+
+    conversations.forEach((conv) => {
+      if (!conv.updatedAt && !conv.createdAt) {
+        older.push(conv);
+        return;
+      }
+      const dateVal = conv.updatedAt || conv.createdAt;
+      const convDate = new Date(dateVal);
+      convDate.setHours(0,0,0,0);
+
+      if (convDate.getTime() === todayDate.getTime()) {
+        today.push(conv);
+      } else if (convDate.getTime() === yesterdayDate.getTime()) {
+        yesterday.push(conv);
+      } else {
+        older.push(conv);
+      }
+    });
+
+    return { today, yesterday, older };
+  }, [conversations]);
+
+  // Construct structured stream items including message blocks and tool status cards
+  const renderableItems = useMemo(() => {
+    const items: RenderableItem[] = [];
+    
+    // Create a map to find the result of each tool call by id
+    const toolResponses = new Map<string, ChatMessage>();
+    messages.forEach((msg) => {
+      if (msg.role === "tool" && msg.tool_call_id) {
+        toolResponses.set(msg.tool_call_id, msg);
+      }
+    });
+
+    messages.forEach((msg) => {
+      if (msg.role === "user") {
+        items.push({
+          type: "message",
+          id: msg.id,
+          role: "user",
+          content: msg.content,
+          msgRef: msg,
+        });
+      } else if (msg.role === "assistant" || msg.role === "ai") {
+        // If the message contains text content or pending approvals, add a message block
+        if (msg.content || msg.approvalRequired) {
+          items.push({
+            type: "message",
+            id: msg.id,
+            role: "assistant",
+            content: msg.content,
+            msgRef: msg,
+          });
+        }
+        
+        // If it includes tool calls, add a tool call status card for each call
+        if (Array.isArray(msg.tool_calls)) {
+          msg.tool_calls.forEach((tc: any) => {
+            const response = toolResponses.get(tc.id);
+            
+            let status: "running" | "success" | "error" = "running";
+            let resultSummary = "";
+            
+            if (response) {
+              status = "success";
+              const responseText = response.content || "";
+              const toolName = tc.function?.name || "";
+              
+              if (toolName === "searchEmails") {
+                try {
+                  const parsed = JSON.parse(responseText);
+                  const count = parsed.emails?.length ?? 0;
+                  resultSummary = `Found ${count} matching ${count === 1 ? "email" : "emails"}`;
+                } catch {
+                  resultSummary = "Searched Gmail";
+                }
+              } else if (toolName === "getEvents") {
+                try {
+                  const parsed = JSON.parse(responseText);
+                  const count = parsed.events?.length ?? 0;
+                  resultSummary = `Found ${count} matching calendar ${count === 1 ? "event" : "events"}`;
+                } catch {
+                  resultSummary = "Retrieved calendar events";
+                }
+              } else if (toolName === "sendEmail") {
+                resultSummary = "Email sent successfully";
+              } else if (toolName === "createEvent") {
+                resultSummary = "Event created successfully";
+              } else if (toolName === "generateExecutiveBrief") {
+                resultSummary = "Executive briefing generated";
+              } else {
+                resultSummary = "Completed successfully";
+              }
+            } else {
+              status = "running";
+            }
+            
+            items.push({
+              type: "tool_call",
+              id: tc.id || Math.random().toString(),
+              toolName: tc.function?.name || "tool",
+              toolArgs: (() => {
+                try {
+                  return tc.function?.arguments ? JSON.parse(tc.function.arguments) : {};
+                } catch {
+                  return {};
+                }
+              })(),
+              status,
+              resultSummary,
+            });
+          });
+        }
+      }
+    });
+    
+    return items;
+  }, [messages]);
 
   // Sync database messages to local React state
   useEffect(() => {
@@ -420,184 +597,318 @@ export default function AssistantPage() {
     }
   };
 
+  const renderConvItem = (conv: any) => (
+    <li key={conv.id} className="group relative flex items-center w-full">
+      <button 
+        onClick={() => handleOpenOldChat(conv.id)}
+        className={`w-full flex items-center gap-3 p-2.5 rounded-lg transition-colors text-sm text-left truncate pr-8 ${
+          currentConversationId === conv.id 
+            ? "bg-[#b08d57]/15 text-[#b08d57] font-semibold" 
+            : "hover:bg-accent/50 text-muted-foreground hover:text-foreground"
+        }`}
+      >
+        <MessageSquareIcon className="size-4 shrink-0" />
+        <div className="flex flex-col truncate w-full">
+          <span className="truncate">{conv.title}</span>
+          {conv.lastMessagePreview && (
+            <span className="truncate text-[10px] text-muted-foreground font-normal mt-0.5">
+              {conv.lastMessagePreview}
+            </span>
+          )}
+        </div>
+      </button>
+      <button
+        onClick={(e) => handleDeleteChat(conv.id, e)}
+        className="absolute right-2 opacity-0 group-hover:opacity-100 hover:text-red-500 hover:bg-accent/70 transition-all p-1 rounded-md text-muted-foreground"
+        title="Delete Conversation"
+      >
+        <Trash2Icon className="size-3.5" />
+      </button>
+    </li>
+  );
+
   if (!isMounted) return null;
 
   return (
-    <div className="flex h-screen w-full bg-[#FAFAFA] text-slate-900 overflow-hidden font-sans">
+    <div className="flex h-screen w-full bg-background text-foreground overflow-hidden font-sans">
       
       {/* Sidebar - classic chatgpt style */}
-      <div className="w-[260px] bg-[#202123] text-slate-300 flex flex-col shrink-0">
-        <div className="p-3">
-          <button 
+      <div className="w-[260px] bg-muted/10 border-r border-border flex flex-col shrink-0">
+        <div className="p-4 border-b border-border">
+          <Button 
             onClick={handleNewChat}
-            className="w-full flex items-center gap-3 p-3 rounded-md hover:bg-[#2A2B32] transition-colors text-sm font-medium border border-[#4D4D4F]"
+            variant="outline"
+            className="w-full flex items-center justify-start gap-2.5 h-10 font-mono text-xs uppercase border-border/80"
           >
-            <SparklesIcon className="size-4" />
+            <SparklesIcon className="size-3.5 text-[#b08d57]" />
             New Chat
-          </button>
+          </Button>
         </div>
         
         <div className="flex-1 overflow-y-auto p-3 space-y-4">
-          <div>
-            <h3 className="text-xs font-semibold text-[#8E8EA0] mb-3 px-3">Recent</h3>
-            <ul className="space-y-1">
-              {conversations?.map((conv) => (
-                <li key={conv.id} className="group relative flex items-center w-full">
-                  <button 
-                    onClick={() => handleOpenOldChat(conv.id)}
-                    className={`w-full flex items-center gap-3 p-3 rounded-md transition-colors text-sm text-left truncate pr-10 ${
-                      currentConversationId === conv.id ? "bg-[#2A2B32] text-white" : "hover:bg-[#2A2B32] text-slate-300"
-                    }`}
-                  >
-                    <MessageSquareIcon className="size-4 shrink-0 mt-0.5" />
-                    <div className="flex flex-col truncate w-full">
-                      <span className="truncate font-medium">{conv.title}</span>
-                      {conv.lastMessagePreview && (
-                        <span className="truncate text-xs text-[#8E8EA0] mt-0.5 font-normal">
-                          {conv.lastMessagePreview}
-                        </span>
-                      )}
-                    </div>
-                  </button>
-                  <button
-                    onClick={(e) => handleDeleteChat(conv.id, e)}
-                    className="absolute right-2 opacity-0 group-hover:opacity-100 hover:text-red-500 transition-opacity p-1.5 rounded text-slate-400 hover:bg-[#343541]"
-                    title="Delete Conversation"
-                  >
-                    <Trash2Icon className="size-3.5" />
-                  </button>
-                </li>
-              ))}
-              {conversations && conversations.length === 0 && (
-                <div className="text-xs text-[#8E8EA0] px-3 py-2 italic">No conversations yet</div>
-              )}
-            </ul>
-          </div>
+          {groupedConversations.today.length > 0 && (
+            <div className="space-y-1">
+              <h3 className="text-[10px] font-mono font-bold tracking-widest text-[#b08d57] uppercase px-3 mb-2">Today</h3>
+              <ul className="space-y-0.5">
+                {groupedConversations.today.map((conv: any) => renderConvItem(conv))}
+              </ul>
+            </div>
+          )}
+          {groupedConversations.yesterday.length > 0 && (
+            <div className="space-y-1">
+              <h3 className="text-[10px] font-mono font-bold tracking-widest text-muted-foreground uppercase px-3 mb-2">Yesterday</h3>
+              <ul className="space-y-0.5">
+                {groupedConversations.yesterday.map((conv: any) => renderConvItem(conv))}
+              </ul>
+            </div>
+          )}
+          {groupedConversations.older.length > 0 && (
+            <div className="space-y-1">
+              <h3 className="text-[10px] font-mono font-bold tracking-widest text-muted-foreground/60 uppercase px-3 mb-2">Previous</h3>
+              <ul className="space-y-0.5">
+                {groupedConversations.older.map((conv: any) => renderConvItem(conv))}
+              </ul>
+            </div>
+          )}
+          {conversations && conversations.length === 0 && (
+            <div className="text-xs text-muted-foreground px-3 py-2 italic">No conversations yet</div>
+          )}
         </div>
 
-        <div className="p-4 border-t border-[#4D4D4F] flex flex-col gap-4">
-          <DailyUsageWidget dark />
-          <button onClick={() => router.push("/inbox")} className="flex items-center gap-3 text-sm hover:bg-[#2A2B32] p-2 rounded-md transition-colors w-full text-left">
-             <ArrowLeftIcon className="size-4" />
+        <div className="p-4 border-t border-border flex flex-col gap-3">
+          <DailyUsageWidget />
+          <Button 
+            onClick={() => router.push("/inbox")} 
+            variant="ghost" 
+            className="w-full justify-start gap-2.5 h-10 text-muted-foreground hover:text-foreground font-mono text-xs uppercase"
+          >
+             <ArrowLeftIcon className="size-3.5" />
              Back to Inbox
-          </button>
-          <div className="flex items-center gap-3 text-sm text-white font-medium px-2">
-            <BotIcon className="size-5" />
-            <span>Dobbie AI</span>
+          </Button>
+          <div className="flex items-center gap-2.5 px-3 py-1 text-sm font-serif font-bold text-foreground select-none">
+            <BotIcon className="size-4.5 text-[#b08d57]" />
+            <span>Dobbie Assistant</span>
           </div>
         </div>
       </div>
 
       {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col relative h-full items-center">
+      <div className="flex-1 flex flex-col relative h-full items-center bg-background">
         
+        {/* Minimal Header */}
+        <div className="w-full border-b bg-background/80 backdrop-blur px-8 py-4 flex items-center justify-between z-10 shrink-0 select-none">
+          <div className="flex flex-col">
+            <span className="flex items-center gap-2 font-serif text-base font-bold text-foreground">
+              ✨ Dobbie
+            </span>
+            <span className="text-[10px] font-mono uppercase tracking-widest text-[#b08d57] font-bold">
+              AI Executive Assistant
+            </span>
+          </div>
+          <div className="flex items-center gap-2">
+            <Button 
+              variant="outline" 
+              size="sm" 
+              onClick={handleNewChat}
+              className="font-mono text-[10px] uppercase h-8"
+            >
+              New Chat
+            </Button>
+          </div>
+        </div>
+
         {/* Loading Indicator */}
         {isLoadingMessages && !isNewChat ? (
           <div className="flex-1 flex items-center justify-center">
-            <Loader2Icon className="size-8 animate-spin text-teal-600" />
+            <Loader2Icon className="size-8 animate-spin text-[#b08d57]" />
           </div>
         ) : (
-          /* Messages List */
+          /* Messages and Tool calls list */
           !isNewChat && (
             <div className="w-full flex-1 overflow-y-auto p-4 space-y-6 pb-40">
-              {messages
-                .filter((msg) => {
-                  if (msg.role === "user") return true;
-                  if (msg.role === "ai" || msg.role === "assistant") {
-                    return !!msg.content || !!msg.approvalRequired;
-                  }
-                  return false;
-                })
-                .map((msg) => (
-                  <motion.div 
-                    initial={{ opacity: 0, y: 10 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    key={msg.id} 
-                    className={`w-full max-w-3xl mx-auto flex gap-6 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-                  >
-                    {(msg.role === 'ai' || msg.role === 'assistant') && (
-                      <div className="size-8 rounded-sm bg-[#10A37F] text-white flex items-center justify-center shrink-0 mt-1">
-                        <BotIcon className="size-5" />
-                      </div>
-                    )}
-                    <div className={`text-[15px] leading-relaxed ${
-                      msg.role === 'user' 
-                        ? 'bg-slate-100 px-5 py-3 rounded-3xl max-w-[80%]' 
-                        : 'py-1 text-slate-800 prose prose-slate prose-sm max-w-none'
-                    }`}>
-                      {(msg.role === 'ai' || msg.role === 'assistant') ? (
-                        <ReactMarkdown remarkPlugins={[remarkGfm]}>
-                          {msg.content}
-                        </ReactMarkdown>
-                      ) : (
-                        msg.content
+              {renderableItems.map((item: any) => {
+                if (item.type === "message") {
+                  const msg = item.msgRef!;
+                  return (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 10 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      key={msg.id} 
+                      className={`w-full max-w-3xl mx-auto flex gap-4 ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
+                    >
+                      {msg.role !== 'user' && (
+                        <div className="size-8 rounded-full bg-[#b08d57]/10 text-[#b08d57] flex items-center justify-center shrink-0 mt-1 select-none border border-[#b08d57]/20">
+                          <BotIcon className="size-4.5" />
+                        </div>
                       )}
-                      {msg.approvalRequired && (() => {
-                        const status = msg.approvalRequired.status || "PENDING";
-                        if (status === "EXECUTED" || status === "APPROVED") {
-                          return (
-                            <div className="mt-3 border border-emerald-200 bg-emerald-50 rounded-xl p-4 max-w-sm flex items-start gap-3 text-emerald-800">
-                              <div className="size-5 rounded-full bg-emerald-100 text-emerald-600 flex items-center justify-center shrink-0 mt-0.5">
-                                <CheckIcon className="size-3.5" />
+                      <div className={`${
+                        msg.role === 'user' 
+                          ? 'bg-primary text-primary-foreground rounded-2xl px-4 py-2.5 max-w-[80%] text-[13px] font-sans font-medium shadow-sm' 
+                          : 'bg-muted/40 border border-border/50 rounded-2xl px-5 py-4 w-full text-foreground text-sm leading-relaxed prose prose-sm dark:prose-invert max-w-none'
+                      }`}>
+                        {msg.role === 'user' ? (
+                          msg.content
+                        ) : (
+                          <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                            {msg.content}
+                          </ReactMarkdown>
+                        )}
+                        {msg.approvalRequired && (() => {
+                          const status = msg.approvalRequired.status || "PENDING";
+                          if (status === "EXECUTED" || status === "APPROVED") {
+                            return (
+                              <div className="mt-3 border border-emerald-500/20 bg-emerald-500/5 rounded-xl p-4 max-w-md flex items-start gap-3 text-emerald-800 dark:text-emerald-300">
+                                <div className="size-5 rounded-full bg-emerald-500/10 text-emerald-500 flex items-center justify-center shrink-0 mt-0.5 border border-emerald-500/20">
+                                  <CheckIcon className="size-3" />
+                                </div>
+                                <div>
+                                  <div className="font-serif font-bold text-xs text-emerald-700 dark:text-emerald-400">Action Approved & Executed</div>
+                                  <p className="text-[9px] text-emerald-500 font-mono uppercase tracking-widest mt-0.5">{msg.approvalRequired.toolName}</p>
+                                  <p className="text-xs text-muted-foreground mt-2">{msg.approvalRequired.preview}</p>
+                                </div>
                               </div>
-                              <div>
-                                <div className="font-semibold text-xs text-emerald-700">Action Approved</div>
-                                <p className="text-[10px] text-emerald-500 font-mono mt-0.5">{msg.approvalRequired.toolName}</p>
-                                <p className="text-sm text-slate-700 mt-1">{msg.approvalRequired.preview}</p>
+                            );
+                          }
+                          if (status === "CANCELLED" || status === "REJECTED") {
+                            return (
+                              <div className="mt-3 border border-border bg-muted/30 rounded-xl p-4 max-w-md flex items-start gap-3 text-muted-foreground">
+                                <div className="size-5 rounded-full bg-muted text-muted-foreground flex items-center justify-center shrink-0 mt-0.5 border">
+                                  <XIcon className="size-3" />
+                                </div>
+                                <div>
+                                  <div className="font-serif font-bold text-xs text-foreground/80">Action Rejected</div>
+                                  <p className="text-[9px] text-muted-foreground font-mono uppercase tracking-widest mt-0.5">{msg.approvalRequired.toolName}</p>
+                                  <p className="text-xs text-muted-foreground/60 mt-2">{msg.approvalRequired.preview}</p>
+                                </div>
+                              </div>
+                            );
+                          }
+                          return (
+                            <div className="mt-4 border border-[#b08d57]/30 bg-[#b08d57]/5 rounded-xl p-5 max-w-md shadow-sm">
+                              <div className="flex items-center gap-2 text-[#b08d57] font-serif font-bold text-sm mb-3">
+                                <ShieldAlertIcon className="size-4 animate-pulse" />
+                                Approval Required
+                              </div>
+                              
+                              <div className="bg-background/60 border border-border/40 rounded-lg p-3.5 mb-4 text-xs space-y-2">
+                                <div className="flex items-center justify-between border-b pb-1.5">
+                                  <span className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest">
+                                    Action type
+                                  </span>
+                                  <span className="font-mono font-bold text-foreground">
+                                    {msg.approvalRequired.toolName}
+                                  </span>
+                                </div>
+                                
+                                {msg.approvalRequired.args && (() => {
+                                  const args = msg.approvalRequired.args;
+                                  return (
+                                    <div className="space-y-1.5 pt-1 text-foreground/80 leading-relaxed font-sans">
+                                      {args.to && (
+                                        <div>
+                                          <span className="font-medium text-muted-foreground">To:</span> {String(args.to)}
+                                        </div>
+                                      )}
+                                      {args.subject && (
+                                        <div>
+                                          <span className="font-medium text-muted-foreground">Subject:</span> {String(args.subject)}
+                                        </div>
+                                      )}
+                                      {args.title && (
+                                        <div>
+                                          <span className="font-medium text-muted-foreground">Title:</span> {String(args.title)}
+                                        </div>
+                                      )}
+                                      {args.start && (
+                                        <div>
+                                          <span className="font-medium text-muted-foreground">Start:</span> {new Date(String(args.start)).toLocaleString()}
+                                        </div>
+                                      )}
+                                      {args.end && (
+                                        <div>
+                                          <span className="font-medium text-muted-foreground">End:</span> {new Date(String(args.end)).toLocaleString()}
+                                        </div>
+                                      )}
+                                    </div>
+                                  );
+                                })()}
+
+                                {!msg.approvalRequired.args?.subject && !msg.approvalRequired.args?.title && (
+                                  <p className="text-sm text-foreground pt-1">{msg.approvalRequired.preview}</p>
+                                )}
+                              </div>
+
+                              <div className="flex gap-2">
+                                <Button
+                                  onClick={() => handleApprove(msg)}
+                                  disabled={isLoading}
+                                  className="flex items-center gap-1.5 bg-[#b08d57] text-white text-xs font-semibold rounded-lg hover:bg-[#8c6f37] disabled:opacity-50 transition-colors h-8 px-3.5 font-mono uppercase tracking-wider shadow-sm"
+                                >
+                                  <CheckIcon className="size-3.5" />
+                                  Approve
+                                </Button>
+                                <Button
+                                  variant="outline"
+                                  onClick={() => handleCancel(msg)}
+                                  disabled={isLoading}
+                                  className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground text-xs font-semibold rounded-lg border hover:bg-accent disabled:opacity-50 transition-colors h-8 px-3.5 font-mono uppercase tracking-wider"
+                                >
+                                  <XIcon className="size-3.5" />
+                                  Reject
+                                </Button>
                               </div>
                             </div>
                           );
-                        }
-                        if (status === "CANCELLED") {
-                          return (
-                            <div className="mt-3 border border-slate-200 bg-slate-50 rounded-xl p-4 max-w-sm flex items-start gap-3 text-slate-600">
-                              <div className="size-5 rounded-full bg-slate-100 text-slate-500 flex items-center justify-center shrink-0 mt-0.5">
-                                <XIcon className="size-3.5" />
-                              </div>
-                              <div>
-                                <div className="font-semibold text-xs text-slate-500">Action Cancelled</div>
-                                <p className="text-[10px] text-slate-400 font-mono mt-0.5">{msg.approvalRequired.toolName}</p>
-                                <p className="text-sm text-slate-700 mt-1">{msg.approvalRequired.preview}</p>
-                              </div>
-                            </div>
-                          );
-                        }
-                        return (
-                          <div className="mt-3 border border-amber-200 bg-amber-50 rounded-xl p-4 max-w-sm">
-                            <div className="flex items-center gap-2 text-amber-700 font-semibold text-sm mb-2">
-                              <ShieldAlertIcon className="size-4" />
-                              Approval Required
-                            </div>
-                            <p className="text-xs text-amber-600 mb-1 font-mono">
-                              {msg.approvalRequired.toolName}
-                            </p>
-                            <p className="text-sm text-slate-700 mb-3">
-                              {msg.approvalRequired.preview}
-                            </p>
-                            <div className="flex gap-2">
-                              <button
-                                onClick={() => handleApprove(msg)}
-                                disabled={isLoading}
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-green-600 text-white text-xs font-medium rounded-lg hover:bg-green-700 disabled:opacity-50 transition-colors"
-                              >
-                                <CheckIcon className="size-3.5" />
-                                Approve
-                              </button>
-                              <button
-                                onClick={() => handleCancel(msg)}
-                                disabled={isLoading}
-                                className="flex items-center gap-1.5 px-3 py-1.5 bg-white text-slate-600 text-xs font-medium rounded-lg border border-slate-300 hover:bg-slate-100 disabled:opacity-50 transition-colors"
-                              >
-                                <XIcon className="size-3.5" />
-                                Cancel
-                              </button>
-                            </div>
-                          </div>
-                        );
-                      })()}
-                    </div>
-                  </motion.div>
-                ))}
+                        })()}
+                      </div>
+                    </motion.div>
+                  );
+                } else if (item.type === "tool_call") {
+                  return (
+                    <motion.div 
+                      initial={{ opacity: 0, y: 5 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      key={item.id}
+                      className="w-full max-w-3xl mx-auto flex gap-4 justify-start"
+                    >
+                      <div className="size-8 rounded-full bg-[#b08d57]/10 text-[#b08d57] flex items-center justify-center shrink-0 mt-1 select-none border border-[#b08d57]/20">
+                        <BotIcon className="size-4.5" />
+                      </div>
+                      <div className="bg-muted/40 border border-border/50 rounded-xl p-3.5 text-xs font-mono text-muted-foreground flex items-center gap-2.5 w-full max-w-md shadow-sm">
+                        {item.status === "running" ? (
+                          <>
+                            <Loader2Icon className="size-3.5 animate-spin text-[#b08d57]" />
+                            <span>{getToolRunningText(item.toolName || "")}</span>
+                          </>
+                        ) : item.status === "success" ? (
+                          <>
+                            <CheckIcon className="size-3.5 text-emerald-600" />
+                            <span className="text-foreground">{item.resultSummary || getToolSuccessText(item.toolName || "")}</span>
+                          </>
+                        ) : (
+                          <>
+                            <XIcon className="size-3.5 text-red-600" />
+                            <span className="text-red-500">Failed to execute tool</span>
+                          </>
+                        )}
+                      </div>
+                    </motion.div>
+                  );
+                }
+                return null;
+              })}
+              {isLoading && (
+                <div className="w-full max-w-3xl mx-auto flex gap-4 justify-start">
+                  <div className="size-8 rounded-full bg-[#b08d57]/10 text-[#b08d57] flex items-center justify-center shrink-0 mt-1 select-none border border-[#b08d57]/20">
+                    <BotIcon className="size-4.5" />
+                  </div>
+                  <div className="bg-muted/30 border border-border/40 rounded-2xl px-5 py-4 w-full max-w-md flex items-center gap-3 text-sm text-muted-foreground select-none shadow-sm">
+                    <Loader2Icon className="size-4 animate-spin text-[#b08d57]" />
+                    <span className="font-serif">Dobbie is working...</span>
+                  </div>
+                </div>
+              )}
+              <div ref={messagesEndRef as any} />
             </div>
           )
         )}
@@ -605,7 +916,7 @@ export default function AssistantPage() {
         {/* Prompt Input Container */}
         <motion.div 
           layout
-          className={`absolute w-full max-w-3xl px-4 ${
+          className={`absolute w-full max-w-3xl px-4 z-20 ${
             isNewChat 
               ? "top-1/2 -translate-y-1/2 flex flex-col" 
               : "bottom-8"
@@ -613,42 +924,46 @@ export default function AssistantPage() {
         >
           {isNewChat && (
             <motion.div 
-              initial={{ opacity: 0, y: 20 }}
+              initial={{ opacity: 0, y: 15 }}
               animate={{ opacity: 1, y: 0 }}
-              className="mb-8 text-center"
+              className="mb-8 text-center max-w-lg mx-auto"
             >
-              <div className="size-16 bg-[#10A37F] text-white rounded-full flex items-center justify-center mx-auto mb-6 shadow-md">
-                <BotIcon className="size-8" />
-              </div>
-              <h1 className="text-3xl font-semibold text-slate-800 mb-2">How can I help you today?</h1>
+              <h1 className="text-3xl font-serif font-bold text-foreground mb-3 tracking-tight">
+                {getGreeting()}, {session?.user?.name ? session.user.name.split(" ")[0] : "there"}.
+              </h1>
+              <p className="text-sm text-muted-foreground">
+                What would you like to do today?
+              </p>
             </motion.div>
           )}
 
           <motion.div 
             layoutId="prompt-bar"
-            className="w-full relative shadow-[0_0_15px_rgba(0,0,0,0.1)] rounded-2xl bg-white border border-slate-200 flex flex-col px-4 py-3"
+            className="w-full relative shadow-sm rounded-2xl bg-background border border-border/60 flex flex-col px-4 py-3"
           >
             <input
               type="text"
               value={prompt}
               onChange={(e) => setPrompt(e.target.value)}
               onKeyDown={handleKeyDown}
-              placeholder="Message Dobbie..."
+              placeholder="Ask Dobbie anything..."
               disabled={isLoading}
-              className="w-full bg-transparent border-none outline-none resize-none text-[15px] text-slate-900 placeholder:text-slate-500 py-2 px-1"
+              className="w-full bg-transparent border-none outline-none resize-none text-[14px] text-foreground placeholder:text-muted-foreground/60 py-2 px-1"
             />
-            <div className="flex justify-end mt-2">
+            <div className="flex justify-end mt-1">
               <button
                 onClick={() => handleSend(prompt)}
                 disabled={!prompt.trim() || isLoading}
                 className={`size-8 rounded-lg flex items-center justify-center transition-colors shrink-0 ${
-                  prompt.trim() && !isLoading ? "bg-black text-white hover:bg-slate-800" : "bg-slate-200 text-slate-400 cursor-not-allowed"
+                  prompt.trim() && !isLoading 
+                    ? "bg-[#b08d57] text-white hover:bg-[#8c6f37]" 
+                    : "bg-muted text-muted-foreground cursor-not-allowed"
                 }`}
               >
                 {isLoading ? (
                   <Loader2Icon className="size-4 animate-spin" />
                 ) : (
-                  <SendIcon className="size-4 ml-0.5" />
+                  <SendIcon className="size-3.5 ml-0.5" />
                 )}
               </button>
             </div>
@@ -660,43 +975,36 @@ export default function AssistantPage() {
                initial={{ opacity: 0 }}
                animate={{ opacity: 1 }}
                transition={{ delay: 0.2 }}
-               className="mt-8 grid grid-cols-2 gap-3"
+               className="mt-8 flex flex-wrap justify-center gap-2.5 max-w-2xl mx-auto"
              >
-               <button 
-                 onClick={() => handleSend("Prepare me for today")}
-                 className="col-span-2 text-left p-4 border border-teal-200 bg-gradient-to-r from-teal-50 to-emerald-50 rounded-xl hover:from-teal-100 hover:to-emerald-100 transition-all text-sm font-semibold text-teal-800 flex items-center justify-between shadow-sm"
+               <Button 
+                 variant="outline" 
+                 onClick={() => handleSend("Summarize my unread emails")}
+                 className="text-xs font-mono uppercase border border-border/80 bg-background text-foreground hover:bg-accent/50 rounded-xl h-9 px-4 shrink-0 transition-colors"
                >
-                 <span className="flex items-center gap-2">
-                   <SparklesIcon className="size-4 animate-pulse text-teal-600" />
-                   Prepare me for today
-                 </span>
-                 <span className="text-xs text-teal-600 bg-teal-100/80 px-2 py-0.5 rounded-full font-medium">Quick Action</span>
-               </button>
-
-               <button 
-                 onClick={() => handleSend("Schedule meeting with the marketing team")}
-                 className="text-left p-4 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors text-sm text-slate-600 font-medium"
+                 Summarize unread emails
+               </Button>
+               <Button 
+                 variant="outline" 
+                 onClick={() => handleSend("Schedule a meeting next week")}
+                 className="text-xs font-mono uppercase border border-border/80 bg-background text-foreground hover:bg-accent/50 rounded-xl h-9 px-4 shrink-0 transition-colors"
                >
-                 Schedule meeting with the marketing team
-               </button>
-               <button 
-                 onClick={() => handleSend("Summarize my unread important emails")}
-                 className="text-left p-4 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors text-sm text-slate-600 font-medium"
+                 Schedule a meeting next week
+               </Button>
+               <Button 
+                 variant="outline" 
+                 onClick={() => handleSend("Find emails from investors")}
+                 className="text-xs font-mono uppercase border border-border/80 bg-background text-foreground hover:bg-accent/50 rounded-xl h-9 px-4 shrink-0 transition-colors"
                >
-                 Summarize my unread important emails
-               </button>
-               <button 
-                 onClick={() => handleSend("Reply to investors regarding Q3 report")}
-                 className="text-left p-4 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors text-sm text-slate-600 font-medium"
+                 Find emails from investors
+               </Button>
+               <Button 
+                 variant="outline" 
+                 onClick={() => handleSend("Draft a follow-up email")}
+                 className="text-xs font-mono uppercase border border-border/80 bg-background text-foreground hover:bg-accent/50 rounded-xl h-9 px-4 shrink-0 transition-colors"
                >
-                 Reply to investors regarding Q3 report
-               </button>
-               <button 
-                 onClick={() => handleSend("Find files related to project Alpha")}
-                 className="text-left p-4 border border-slate-200 rounded-xl hover:bg-slate-50 transition-colors text-sm text-slate-600 font-medium"
-               >
-                 Find files related to project Alpha
-               </button>
+                 Draft a follow-up email
+               </Button>
              </motion.div>
           )}
 

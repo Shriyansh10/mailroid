@@ -211,11 +211,8 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
             ? "border-emerald-800 bg-emerald-950/20 text-emerald-300"
             : "border-emerald-200 bg-emerald-50 text-emerald-800"
         }`}>
-          <div className="text-xs font-bold flex items-center justify-center gap-1.5 text-emerald-600 dark:text-emerald-400">
-            🎯 Testing Complete
-          </div>
-          <p className="text-[11px] leading-relaxed">
-            Thank you for helping test Mailroid! You&apos;ve reached today&apos;s limit of 20 actions. Please come back tomorrow.
+          <p className="text-[11px] leading-relaxed font-serif">
+            Thank you for testing out Mailroid! I hope you had a great time, see you tomorrow.
           </p>
         </div>
       )}
