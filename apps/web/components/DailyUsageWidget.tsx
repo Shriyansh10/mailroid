@@ -206,13 +206,19 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
 
       {/* Thank you message at 20/20 limit */}
       {actionCount >= 20 && (
-        <div className={`p-4 rounded-xl border border-dashed text-center flex flex-col gap-1.5 ${
+        <div className={`p-6 rounded-xl border border-dashed text-center flex flex-col gap-3 ${
           dark
             ? "border-emerald-800 bg-emerald-950/20 text-emerald-300"
             : "border-emerald-200 bg-emerald-50 text-emerald-800"
         }`}>
-          <p className="text-[11px] leading-relaxed font-serif">
-            Thank you for testing out Mailroid! I hope you had a great time, see you tomorrow.
+          <div className="text-xs font-bold font-mono tracking-wider uppercase text-emerald-600 dark:text-emerald-400">
+            Beta Version
+          </div>
+          <p className="text-xs leading-relaxed font-serif">
+            Thank you for testing out Mailroid! I hope you had a great time.
+          </p>
+          <p className="text-[11px] text-muted-foreground font-mono leading-relaxed">
+            Please note: This product is currently in beta. Your daily limit of 20 actions resets at 12:00 AM (midnight) local time. See you tomorrow!
           </p>
         </div>
       )}
