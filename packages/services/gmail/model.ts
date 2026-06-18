@@ -46,6 +46,10 @@ export const threadDetailSchema = z.object({
   threadId: z.string(),
   subject: z.string(),
   messages: z.array(messageDetailSchema),
+  priority: z.string().optional(),
+  priorityScore: z.number().nullable().optional(),
+  priorityReason: z.string().nullable().optional(),
+  isActionRequired: z.boolean().optional(),
 });
 
 export type ThreadDetail = z.infer<typeof threadDetailSchema>;

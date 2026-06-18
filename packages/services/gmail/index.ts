@@ -1,6 +1,7 @@
 import { corsair } from "@repo/corsair";
 import { db, eq, sql, and, or, ilike } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
+import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
 import type {
@@ -268,6 +269,26 @@ export async function getThread(
   });
 
   const result = transformThreadDetail(thread as unknown as Record<string, unknown>);
+
+  // Query metadata for priority status and reason
+  const meta = await db
+    .select({
+      priority: messageMetadata.priority,
+      priorityScore: messageMetadata.priorityScore,
+      priorityReason: messageMetadata.priorityReason,
+      isActionRequired: messageMetadata.isActionRequired,
+    })
+    .from(messageMetadata)
+    .where(and(eq(messageMetadata.threadId, threadId), eq(messageMetadata.userId, tenantId)))
+    .limit(1);
+
+  if (meta[0]) {
+    result.priority = meta[0].priority ?? undefined;
+    result.priorityScore = meta[0].priorityScore ?? undefined;
+    result.priorityReason = meta[0].priorityReason ?? undefined;
+    result.isActionRequired = meta[0].isActionRequired ?? undefined;
+  }
+
   logger.info("[SERVICE] getThread completed", {
     tenantId, threadId, messageCount: result.messages?.length ?? 0,
     totalDurationMs: Date.now() - startMs,

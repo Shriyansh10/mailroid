@@ -291,10 +291,6 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
-              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings")}>
-                <SettingsIcon className="mr-2 h-4 w-4" />
-                <span>Settings</span>
-              </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
                 <KeyboardIcon className="mr-2 h-4 w-4" />
                 <span>Keyboard Shortcuts</span>

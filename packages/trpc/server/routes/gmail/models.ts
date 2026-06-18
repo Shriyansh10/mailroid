@@ -38,6 +38,10 @@ export const threadDetailOutputModel = z.object({
   threadId: z.string(),
   subject: z.string(),
   messages: z.array(messageDetailOutputModel),
+  priority: z.string().optional(),
+  priorityScore: z.number().nullable().optional(),
+  priorityReason: z.string().nullable().optional(),
+  isActionRequired: z.boolean().optional(),
 });
 
 // ── Send email output ────────────────────────────────────────────────

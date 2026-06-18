@@ -1,111 +1,457 @@
 "use client";
 
-import React from "react";
-import { useParams } from "next/navigation";
+import React, { useState, useEffect, useMemo } from "react";
+import { useParams, useRouter } from "next/navigation";
 import { useThread } from "@web/hooks/api/gmail";
+import { useCreateEvent } from "@web/hooks/api/calendar";
 import Link from "next/link";
 import DOMPurify from "dompurify";
+import { toast } from "sonner";
+import { Card, CardHeader, CardTitle, CardContent } from "@web/components/ui/card";
+import { Button } from "@web/components/ui/button";
+import { Badge } from "@web/components/ui/badge";
+import { Skeleton } from "@web/components/ui/skeleton";
+import { Alert, AlertTitle, AlertDescription } from "@web/components/ui/alert";
+import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
+import { Input } from "@web/components/ui/input";
+import { 
+  ArrowLeft as ArrowLeftIcon, 
+  Sparkles as SparklesIcon,
+  Reply as ReplyIcon, 
+  ReplyAll as ReplyAllIcon, 
+  Forward as ForwardIcon, 
+  Calendar as CalendarIcon,
+  AlertCircle as AlertCircleIcon
+} from "lucide-react";
+import { cn } from "@web/lib/utils";
+
+function parseSender(from: string) {
+  if (!from) return { name: "Unknown", email: "" };
+  const match = from.match(/^([^<]+)<([^>]+)>/);
+  if (match && match[1] && match[2]) {
+    return {
+      name: match[1].replace(/"/g, "").trim(),
+      email: match[2].trim(),
+    };
+  }
+  return {
+    name: from.split("@")[0] || from,
+    email: from,
+  };
+}
+
+function formatMessageDate(dateString: string): string {
+  if (!dateString) return "";
+  try {
+    const date = new Date(dateString);
+    if (isNaN(date.getTime())) return dateString;
+    return date.toLocaleString(undefined, {
+      weekday: "short",
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+      hour: "numeric",
+      minute: "2-digit",
+    });
+  } catch (e) {
+    return dateString;
+  }
+}
 
 export default function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
   const { data: thread, isLoading, isError, error } = useThread(threadId);
+  const router = useRouter();
+
+  const [mounted, setMounted] = useState(false);
+  const [isScheduling, setIsScheduling] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
+  const [meetingTitle, setMeetingTitle] = useState("");
+  const [meetingDate, setMeetingDate] = useState("");
+  const [meetingTime, setMeetingTime] = useState("");
+  const [meetingDuration, setMeetingDuration] = useState("60");
+  const [submittingMeeting, setSubmittingMeeting] = useState(false);
+
+  const firstMsg = thread?.messages?.[0];
+  const senderEmail = useMemo(() => {
+    if (!firstMsg?.from) return "";
+    const match = firstMsg.from.match(/<([^>]+)>/);
+    return match ? match[1] : firstMsg.from;
+  }, [firstMsg]);
+
+  useEffect(() => {
+    if (thread) {
+      setMeetingTitle(`Discussion: ${thread.subject || "Untitled"}`);
+      const tomorrow = new Date();
+      tomorrow.setDate(tomorrow.getDate() + 1);
+      setMeetingDate(tomorrow.toISOString().split("T")[0] || "");
+      setMeetingTime("10:00");
+      setIsScheduling(false);
+    }
+  }, [thread]);
+
+  const { createEventAsync } = useCreateEvent();
+
+  const handleConfirmMeeting = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setSubmittingMeeting(true);
+    try {
+      const startDateTime = new Date(`${meetingDate}T${meetingTime}`);
+      const endDateTime = new Date(startDateTime.getTime() + parseInt(meetingDuration, 10) * 60 * 1000);
+      
+      await createEventAsync({
+        title: meetingTitle,
+        start: startDateTime.toISOString(),
+        end: endDateTime.toISOString(),
+        description: `Scheduled from Mailroid Dossier: ${thread?.subject || ""}\nSender: ${firstMsg?.from}`,
+        attendees: senderEmail ? [senderEmail] : [],
+      });
+      
+      toast.success("Meeting Scheduled", {
+        description: `Successfully scheduled with ${senderEmail}`,
+      });
+      setIsScheduling(false);
+    } catch (err: any) {
+      console.error(err);
+      toast.error("Failed to schedule meeting", {
+        description: err.message || "An unknown error occurred",
+      });
+    } finally {
+      setSubmittingMeeting(false);
+    }
+  };
+
+  const handleReply = () => {
+    if (!thread || !firstMsg) return;
+    window.dispatchEvent(
+      new CustomEvent("mailroid-compose-email", {
+        detail: {
+          to: senderEmail,
+          subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
+          body: `\n\n--- On Original Thread ---\nFrom: ${firstMsg.from}\nSubject: ${thread.subject}`,
+          threadId: thread.threadId
+        },
+      })
+    );
+    toast.success("Draft Created", { description: `Replying to ${senderEmail}` });
+  };
+
+  const handleReplyAll = () => {
+    if (!thread || !firstMsg) return;
+    const recipientsList = [senderEmail];
+    if (firstMsg.to) {
+      const matchTo = firstMsg.to.match(/<([^>]+)>/);
+      const toEmail = matchTo ? matchTo[1] : firstMsg.to;
+      if (toEmail !== senderEmail) recipientsList.push(toEmail);
+    }
+    const recipients = recipientsList.join(", ");
+
+    window.dispatchEvent(
+      new CustomEvent("mailroid-compose-email", {
+        detail: {
+          to: recipients,
+          subject: thread.subject ? `Re: ${thread.subject}` : "Reply All",
+          body: `\n\n--- On Original Thread ---\nFrom: ${firstMsg.from}\nTo: ${firstMsg.to}\nSubject: ${thread.subject}`,
+          threadId: thread.threadId
+        },
+      })
+    );
+    toast.success("Draft Created", { description: `Replying all to ${recipients}` });
+  };
+
+  const handleForward = () => {
+    if (!thread || !firstMsg) return;
+    window.dispatchEvent(
+      new CustomEvent("mailroid-compose-email", {
+        detail: {
+          to: "",
+          subject: thread.subject ? `Fwd: ${thread.subject}` : "Forward",
+          body: `\n\n---------- Forwarded message ---------\nFrom: ${firstMsg.from}\nDate: ${firstMsg.date}\nSubject: ${thread.subject}\nTo: ${firstMsg.to}\n\n${firstMsg.body || firstMsg.snippet}`,
+          threadId: thread.threadId
+        },
+      })
+    );
+    toast.success("Draft Created", { description: "Forwarding message" });
+  };
 
   if (isLoading) {
     return (
-      <div style={{ padding: "2rem" }}>
-        <p>Loading thread…</p>
+      <div className="max-w-5xl mx-auto px-6 py-8 space-y-6">
+        <Skeleton className="h-4 w-28" />
+        <div className="space-y-2">
+          <Skeleton className="h-10 w-2/3" />
+          <Skeleton className="h-4 w-36" />
+        </div>
+        <Skeleton className="h-24 w-full rounded-xl" />
+        <div className="space-y-4">
+          <Skeleton className="h-48 w-full rounded-xl" />
+          <Skeleton className="h-48 w-full rounded-xl" />
+        </div>
       </div>
     );
   }
 
   if (isError) {
     return (
-      <div style={{ padding: "2rem" }}>
-        <p style={{ color: "red" }}>
-          Error: {error?.message ?? "Failed to load thread"}
-        </p>
-        <Link href="/inbox" style={{ color: "#4da6ff" }}>
-          ← Back to Inbox
-        </Link>
+      <div className="max-w-5xl mx-auto px-6 py-8">
+        <Alert variant="destructive" className="mb-6">
+          <AlertCircleIcon className="h-4 w-4" />
+          <AlertTitle>Error Loading Thread</AlertTitle>
+          <AlertDescription>
+            {error?.message ?? "An unexpected error occurred while retrieving this thread."}
+          </AlertDescription>
+        </Alert>
+        <Button onClick={() => router.push("/inbox")} variant="outline">
+          <ArrowLeftIcon className="mr-2 h-4 w-4" />
+          Back to Inbox
+        </Button>
       </div>
     );
   }
 
   if (!thread) {
     return (
-      <div style={{ padding: "2rem" }}>
-        <p>Thread not found.</p>
-        <Link href="/inbox" style={{ color: "#4da6ff" }}>
-          ← Back to Inbox
-        </Link>
+      <div className="max-w-5xl mx-auto px-6 py-8 text-center space-y-4">
+        <h2 className="text-xl font-semibold">Thread Not Found</h2>
+        <p className="text-muted-foreground">The requested thread does not exist or you do not have permission to view it.</p>
+        <Button onClick={() => router.push("/inbox")} variant="outline">
+          <ArrowLeftIcon className="mr-2 h-4 w-4" />
+          Back to Inbox
+        </Button>
       </div>
     );
   }
 
   return (
-    <div style={{ padding: "2rem", maxWidth: "800px", margin: "0 auto" }}>
-      <Link
-        href="/inbox"
-        style={{
-          color: "#4da6ff",
-          textDecoration: "none",
-          fontSize: "0.9rem",
-        }}
-      >
-        ← Back to Inbox
-      </Link>
+    <div className="max-w-5xl mx-auto px-6 py-8">
+      {/* Back link */}
+      <div className="mb-5">
+        <Link 
+          href="/inbox" 
+          className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors uppercase tracking-wider"
+        >
+          <ArrowLeftIcon className="size-3.5" /> Back to Inbox
+        </Link>
+      </div>
 
-      <h1 style={{ marginTop: "1rem", fontSize: "1.5rem" }}>
-        {thread.subject}
-      </h1>
-
-      <div style={{ marginTop: "2rem" }}>
-        {thread.messages.map((msg) => (
-          <div
-            key={msg.id}
-            style={{
-              border: "1px solid #333",
-              borderRadius: "8px",
-              padding: "1.25rem",
-              marginBottom: "1rem",
-              backgroundColor: "#ffffff",
-            }}
-          >
-            <div
-              style={{
-                display: "flex",
-                justifyContent: "space-between",
-                flexWrap: "wrap",
-                gap: "0.5rem",
-                marginBottom: "0.75rem",
-                fontSize: "0.85rem",
-                color: "#000",
-              }}
+      {/* Subject Line & Meta */}
+      <div className="space-y-2 mb-6 pb-4 border-b">
+        <div className="flex flex-wrap items-center gap-3">
+          <h1 className="text-3xl font-serif font-bold tracking-tight text-foreground leading-tight">
+            {thread.subject || "(No Subject)"}
+          </h1>
+          {thread.priority && (
+            <Badge 
+              variant={thread.priority === "HIGH" ? "destructive" : thread.priority === "LOW" ? "secondary" : "outline"}
+              className={cn(
+                "font-mono text-[9px] font-bold tracking-widest uppercase rounded px-2 py-0.5 select-none shrink-0",
+                thread.priority === "MEDIUM" && "text-amber-600 border-amber-600/30 bg-amber-500/10"
+              )}
             >
-              <span>
-                <strong style={{ color: "#000" }}>From:</strong> {msg.from}
-              </span>
-              <span>
-                <strong style={{ color: "#000" }}>To:</strong> {msg.to}
-              </span>
-              <span>{msg.date}</span>
-            </div>
+              {thread.priority} PRIORITY
+            </Badge>
+          )}
+        </div>
+        <p className="text-xs font-mono text-muted-foreground select-none">
+          {thread.messages.length} {thread.messages.length === 1 ? "message" : "messages"} on file
+        </p>
+      </div>
 
-            <div
-              style={{
-                lineHeight: "1.6",
-                color: "#000",
-                borderTop: "1px solid #222",
-                paddingTop: "0.75rem",
-              }}
-              dangerouslySetInnerHTML={{
-                __html: msg.htmlBody
-                  ? DOMPurify.sanitize(msg.htmlBody)
-                  : DOMPurify.sanitize(msg.body || msg.snippet),
-              }}
-            />
+      {/* Grid Layout (Main Area vs Sidebar) */}
+      <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 items-start">
+        {/* Main Content Pane */}
+        <div className="lg:col-span-9 space-y-6">
+          
+          {/* AI Summary Card (Full Width) */}
+          <div className="bg-[#b08d57]/5 border border-[#b08d57]/15 rounded-xl p-5 relative overflow-hidden shadow-sm">
+            <div className="absolute right-4 top-4 select-none opacity-10">
+              <SparklesIcon className="size-6 text-[#b08d57]" />
+            </div>
+            <div className="flex items-center gap-2 mb-2 select-none">
+              <SparklesIcon className="size-4 text-[#b08d57] animate-pulse" />
+              <span className="text-xs font-mono uppercase tracking-widest text-[#b08d57] font-bold">
+                AI Executive Summary
+              </span>
+            </div>
+            <p className="font-serif text-sm text-foreground/90 leading-relaxed">
+              {thread.priorityReason || thread.messages[0]?.snippet}
+            </p>
           </div>
-        ))}
+
+          {/* Email Messages Timeline */}
+          <div className="space-y-6">
+            {thread.messages.map((msg) => {
+              const { name, email } = parseSender(msg.from);
+              const initials = name.slice(0, 2).toUpperCase();
+
+              return (
+                <div key={msg.id} className="bg-card border rounded-xl shadow-sm overflow-hidden">
+                  
+                  {/* Message Header */}
+                  <div className="bg-muted/10 border-b px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+                    <div className="flex items-center gap-3">
+                      <Avatar className="size-9 border border-border">
+                        <AvatarFallback className="bg-muted text-muted-foreground text-xs font-mono font-bold">
+                          {initials}
+                        </AvatarFallback>
+                      </Avatar>
+                      <div>
+                        <div className="text-sm font-semibold text-foreground leading-none">{name}</div>
+                        <div className="text-xs text-muted-foreground font-mono mt-1 leading-none">{email}</div>
+                      </div>
+                    </div>
+                    <div className="text-xs font-mono text-muted-foreground">
+                      {mounted ? formatMessageDate(msg.date) : msg.date}
+                    </div>
+                  </div>
+
+                  {/* Message Body */}
+                  <div className="p-6">
+                    <div className="overflow-x-auto max-w-full">
+                      {msg.htmlBody ? (
+                        <div
+                          className="max-w-full break-words text-foreground text-sm"
+                          dangerouslySetInnerHTML={{
+                            __html: DOMPurify.sanitize(msg.htmlBody),
+                          }}
+                        />
+                      ) : (
+                        <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
+                          {msg.body || msg.snippet}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        {/* Sidebar Actions Column */}
+        <div className="lg:col-span-3">
+          <div className="sticky top-4 space-y-4">
+            <div className="bg-card border rounded-xl p-4 shadow-sm space-y-3">
+              <div className="text-[10px] font-mono uppercase tracking-widest text-muted-foreground/80 font-bold mb-2 select-none">
+                Correspondence Tools
+              </div>
+              
+              <Button 
+                variant="outline" 
+                className="w-full justify-start gap-2.5 font-mono text-xs uppercase h-9 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 cursor-pointer text-left truncate"
+                onClick={handleReply}
+              >
+                <ReplyIcon className="size-3.5 text-[#b08d57] shrink-0" />
+                <span className="truncate">Reply</span>
+              </Button>
+              
+              <Button 
+                variant="outline" 
+                className="w-full justify-start gap-2.5 font-mono text-xs uppercase h-9 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 cursor-pointer text-left truncate"
+                onClick={handleReplyAll}
+              >
+                <ReplyAllIcon className="size-3.5 text-[#b08d57] shrink-0" />
+                <span className="truncate">Reply All</span>
+              </Button>
+              
+              <Button 
+                variant="outline" 
+                className="w-full justify-start gap-2.5 font-mono text-xs uppercase h-9 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 cursor-pointer text-left truncate"
+                onClick={handleForward}
+              >
+                <ForwardIcon className="size-3.5 text-[#b08d57] shrink-0" />
+                <span className="truncate">Forward</span>
+              </Button>
+
+              <div className="border-t border-border my-2" />
+
+              {/* Schedule Meeting form / button */}
+              {isScheduling ? (
+                <form onSubmit={handleConfirmMeeting} className="space-y-3 pt-2">
+                  <div className="text-[9px] font-mono uppercase tracking-wider text-[#b08d57] font-bold">
+                    Calendar Dispatch
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] text-muted-foreground uppercase font-mono">Title</label>
+                    <Input
+                      type="text"
+                      value={meetingTitle}
+                      onChange={(e) => setMeetingTitle(e.target.value)}
+                      className="h-8 text-xs font-serif bg-transparent"
+                      required
+                    />
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-muted-foreground uppercase font-mono">Date</label>
+                      <Input
+                        type="date"
+                        value={meetingDate}
+                        onChange={(e) => setMeetingDate(e.target.value)}
+                        className="h-8 text-xs font-mono px-2 bg-transparent"
+                        required
+                      />
+                    </div>
+                    <div className="space-y-1">
+                      <label className="text-[9px] text-muted-foreground uppercase font-mono">Time</label>
+                      <Input
+                        type="time"
+                        value={meetingTime}
+                        onChange={(e) => setMeetingTime(e.target.value)}
+                        className="h-8 text-xs font-mono px-2 bg-transparent"
+                        required
+                      />
+                    </div>
+                  </div>
+                  <div className="space-y-1">
+                    <label className="text-[9px] text-muted-foreground uppercase font-mono">Duration</label>
+                    <select
+                      value={meetingDuration}
+                      onChange={(e) => setMeetingDuration(e.target.value)}
+                      className="w-full h-8 bg-transparent border border-input rounded px-2 text-xs font-mono outline-none"
+                    >
+                      <option value="30">30m</option>
+                      <option value="60">1h</option>
+                      <option value="90">1.5h</option>
+                      <option value="120">2h</option>
+                    </select>
+                  </div>
+                  <div className="flex gap-2 justify-end pt-1">
+                    <Button
+                      size="sm"
+                      variant="ghost"
+                      type="button"
+                      className="h-7 text-[10px] font-mono uppercase px-2"
+                      onClick={() => setIsScheduling(false)}
+                    >
+                      Cancel
+                    </Button>
+                    <Button
+                      size="sm"
+                      type="submit"
+                      disabled={submittingMeeting}
+                      className="h-7 text-[10px] font-mono uppercase bg-[#b08d57] text-black hover:bg-[#8c6f37] hover:text-white"
+                    >
+                      {submittingMeeting ? "Saving..." : "Confirm"}
+                    </Button>
+                  </div>
+                </form>
+              ) : (
+                <Button 
+                  variant="outline" 
+                  className="w-full justify-start gap-2.5 font-mono text-xs uppercase h-9 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 cursor-pointer text-left truncate"
+                  onClick={() => setIsScheduling(true)}
+                >
+                  <CalendarIcon className="size-4 text-[#b08d57] shrink-0" />
+                  <span className="truncate">Schedule Meeting</span>
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   );
