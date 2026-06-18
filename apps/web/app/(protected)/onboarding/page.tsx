@@ -1,9 +1,15 @@
 "use client";
 
 import { useGetGmailOAuthUrl, useGetCalendarOAuthUrl, useGetAccountsExist } from "@web/hooks/api/tentant";
-import { useSession } from "@web/lib/auth-client";
+import { useSession, authClient } from "@web/lib/auth-client";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, useRef, useCallback } from "react";
+import Image from "next/image";
+import { Mail, Calendar, LogOut } from "lucide-react";
+import { Progress } from "@web/components/ui/progress";
+import { Button } from "@web/components/ui/button";
+import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+
 
 // ── types ────────────────────────────────────────────────────────────
 type PluginName = "gmail" | "googlecalendar";
@@ -125,100 +131,110 @@ export default function OnboardingPage() {
   const calConnected   = connectedPlugins.includes("googlecalendar");
   const bothConnected  = gmailConnected && calConnected;
 
+  const progress = ((gmailConnected ? 1 : 0) + (calConnected ? 1 : 0)) * 50;
+
   return (
-    <div className="flex min-h-screen items-center justify-center bg-background px-4">
-      <div className="flex flex-col items-center gap-6 rounded-xl border p-8 shadow-sm w-full max-w-sm">
-        <h1 className="text-2xl font-semibold">Welcome to Mailroid</h1>
+    <div className="min-h-screen bg-background">
+      <header className="fixed top-0 left-0 right-0 border-b bg-background/80 backdrop-blur z-50">
+        <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
+          <div className="flex items-center gap-3">
+            <Image src={logoImg} alt="Mailroid" className="h-8 w-8 object-contain" />
+            <span className="font-semibold tracking-tight text-lg">Mailroid</span>
+          </div>
 
-        {/* ── Logged-in account ─────────────────────────────────── */}
-        {session?.user?.email && (
-          <p className="text-xs text-muted-foreground text-center -mt-2">
-            Logged in as{" "}
-            <span className="font-medium text-foreground">
-              {session.user.email}
-            </span>
+          <div className="flex items-center gap-6">
+            <div className="text-sm text-muted-foreground hidden sm:block font-medium">
+              {session?.user?.email}
+            </div>
+            <button onClick={() => authClient.signOut().then(() => router.push("/sign-in"))} className="text-sm font-medium text-muted-foreground hover:text-foreground flex items-center gap-2 transition-colors">
+              Sign Out <LogOut className="h-4 w-4" />
+            </button>
+          </div>
+        </div>
+      </header>
+
+      <main className="flex min-h-screen flex-col items-center justify-center px-4 pt-24 pb-12">
+        <div className="flex flex-col items-center text-center">
+          <div className="mb-8 flex h-24 w-24 items-center justify-center overflow-hidden rounded-3xl border bg-muted/10 shadow-sm p-4">
+            <Image src={logoImg} alt="Mailroid" priority className="h-full w-full object-contain" />
+          </div>
+
+          <h1 className="text-4xl font-bold tracking-tight text-foreground">Connect Your Workspace</h1>
+          <p className="mt-4 max-w-lg text-center text-muted-foreground leading-relaxed">
+            Connect Gmail and Google Calendar to unlock Priority Inbox, Daily Briefings, AI Assistant, Semantic Search and Realtime Sync.
           </p>
-        )}
+        </div>
 
-        <p className="text-muted-foreground text-sm text-center">
-          Connect your Google accounts to get started.
-        </p>
+        <div className="mt-12 w-full max-w-3xl rounded-3xl border bg-card/50 p-6 sm:p-8 backdrop-blur shadow-sm">
+          <div className="grid gap-4 md:grid-cols-2">
+            {/* Gmail Card */}
+            <div className="rounded-2xl border bg-card p-6 flex flex-col justify-between shadow-sm transition-shadow hover:shadow-md">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="font-semibold text-foreground/90">Gmail</h3>
+                  <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+                    Sync emails, drafts, search and AI actions.
+                  </p>
+                </div>
+                <Mail className="h-5 w-5 text-muted-foreground shrink-0" />
+              </div>
 
-        <p className="text-sm text-center text-red-700">
-          Recommended: Connect the same Google account for Gmail and Calendar. Different accounts may cause confusion.
-        </p>
+              <Button
+                className="mt-6 w-full font-medium"
+                variant={gmailConnected ? "secondary" : "default"}
+                disabled={gmailConnected || gmailLoading || calLoading || checkingServer}
+                onClick={handleConnectGmail}
+              >
+                {checkingServer ? "Checking..." : gmailLoading ? "Connecting..." : gmailConnected ? "Connected ✓" : "Connect Gmail"}
+              </Button>
+            </div>
 
-        {/* ── Gmail button ───────────────────────────────────────── */}
-        <button
-          onClick={handleConnectGmail}
-          disabled={gmailConnected || gmailLoading || calLoading || checkingServer}
-          className={`inline-flex flex-col items-center gap-1 rounded-lg border px-6 py-3 text-sm font-medium transition-all w-full ${
-            gmailConnected
-              ? "border-green-500 bg-green-50 text-green-700 cursor-default dark:bg-green-950 dark:text-green-300"
-              : checkingServer
-                ? "bg-muted text-muted-foreground cursor-wait opacity-60"
-                : "hover:bg-muted disabled:opacity-50"
-          }`}
-        >
-          {checkingServer ? (
-            <span className="inline-flex items-center gap-1">
-              <span className="animate-spin">⏳</span> Checking…
-            </span>
-          ) : gmailLoading ? (
-            <span className="animate-spin">⏳</span>
-          ) : gmailConnected ? (
-            <span>✅ Gmail Connected</span>
-          ) : (
-            <span>📧 Connect Gmail</span>
+            {/* Calendar Card */}
+            <div className="rounded-2xl border bg-card p-6 flex flex-col justify-between shadow-sm transition-shadow hover:shadow-md">
+              <div className="flex items-start justify-between">
+                <div>
+                  <h3 className="font-semibold text-foreground/90">Google Calendar</h3>
+                  <p className="mt-2 text-sm text-muted-foreground leading-relaxed">
+                    Events, scheduling, reminders.
+                  </p>
+                </div>
+                <Calendar className="h-5 w-5 text-muted-foreground shrink-0" />
+              </div>
+
+              <Button
+                className="mt-6 w-full font-medium"
+                variant={calConnected ? "secondary" : "default"}
+                disabled={calConnected || gmailLoading || calLoading || checkingServer}
+                onClick={handleConnectCalendar}
+              >
+                {checkingServer ? "Checking..." : calLoading ? "Connecting..." : calConnected ? "Connected ✓" : "Connect Calendar"}
+              </Button>
+            </div>
+          </div>
+
+          {errorMsg && (
+            <p className="mt-6 text-sm text-red-500 text-center font-medium">{errorMsg}</p>
           )}
-        </button>
 
-        {/* ── Calendar button ────────────────────────────────────── */}
-        <button
-          onClick={handleConnectCalendar}
-          disabled={calConnected || gmailLoading || calLoading || checkingServer}
-          className={`inline-flex flex-col items-center gap-1 rounded-lg border px-6 py-3 text-sm font-medium transition-all w-full ${
-            calConnected
-              ? "border-green-500 bg-green-50 text-green-700 cursor-default dark:bg-green-950 dark:text-green-300"
-              : checkingServer
-                ? "bg-muted text-muted-foreground cursor-wait opacity-60"
-                : "hover:bg-muted disabled:opacity-50"
-          }`}
-        >
-          {checkingServer ? (
-            <span className="inline-flex items-center gap-1">
-              <span className="animate-spin">⏳</span> Checking…
-            </span>
-          ) : calLoading ? (
-            <span className="animate-spin">⏳</span>
-          ) : calConnected ? (
-            <span>✅ Calendar Connected</span>
-          ) : (
-            <span>📅 Connect Calendar</span>
-          )}
-        </button>
+          <div className="mt-10 w-full pt-6 border-t">
+            <div className="mb-3 flex justify-between text-sm font-medium text-foreground/80">
+              <span>Setup Progress</span>
+              <span>{(gmailConnected ? 1 : 0) + (calConnected ? 1 : 0)} / 2 Connected</span>
+            </div>
 
-        {/* ── Proceed button ─────────────────────────────────────── */}
-        <button
-          onClick={handleProceed}
-          disabled={!bothConnected || proceeding || checkingServer}
-          className={`inline-flex items-center justify-center gap-2 rounded-lg px-6 py-3 text-sm font-semibold transition-all w-full ${
-            bothConnected
-              ? "bg-primary text-primary-foreground hover:opacity-90"
-              : "bg-muted text-muted-foreground cursor-not-allowed opacity-50"
-          }`}
-        >
-          {proceeding
-            ? "⏳ Redirecting…"
-            : bothConnected
-              ? "Proceed to Inbox 🚀"
-              : "Proceed to Inbox 🔒"}
-        </button>
+            <Progress value={progress} className="h-2" />
 
-        {errorMsg && (
-          <p className="text-sm text-red-500 text-center">{errorMsg}</p>
-        )}
-      </div>
+            <Button
+              size="lg"
+              onClick={handleProceed}
+              disabled={!bothConnected || proceeding || checkingServer}
+              className="mt-8 w-full h-12 text-base font-semibold shadow-sm transition-transform hover:scale-[1.01]"
+            >
+              {proceeding ? "Redirecting..." : "Continue to Mailroid"}
+            </Button>
+          </div>
+        </div>
+      </main>
     </div>
   );
 }

@@ -13,8 +13,8 @@ const geistMono = localFont({
 });
 
 export const metadata: Metadata = {
-  title: "Streamyst",
-  description: "Media Forwarding",
+  title: "Mailroid | Landing Page",
+  description: "Mailroid turns Gmail and Google Calendar into a productivity command center with AI-powered prioritization, executive briefings, lightning-fast search, and agent-driven workflows.",
 };
 
 export default function RootLayout({
