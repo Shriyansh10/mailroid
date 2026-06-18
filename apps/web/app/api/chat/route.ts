@@ -16,6 +16,7 @@ import {
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
+import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
 
 export const runtime = "nodejs";
 
@@ -166,6 +167,15 @@ export async function POST(request: Request) {
 
     const userTimeZone = request.headers.get("x-user-timezone") || undefined;
 
+    // ── Check Daily Action Limit ───────────────────────────────────
+    const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
+    if (!limitCheck.allowed) {
+      return NextResponse.json(
+        { error: limitCheck.message },
+        { status: 429 }
+      );
+    }
+
     // ── Run agent loop (DeepSeek + tool calling) ───────────────────
     const { response, newMessages } = await runAgentLoop({
       messages: parsed.data.messages,
@@ -217,6 +227,41 @@ export async function POST(request: Request) {
       responseLen: response.content.length,
       approvalRequired: "approvalRequired" in response ? response.approvalRequired.toolName : undefined,
     });
+
+    // ── Increment Daily Limit (charge successful action only) ──────
+    let shouldCharge = !("approvalRequired" in response);
+    if (shouldCharge) {
+      // If any tool call returned a tool_error, we do not charge
+      const hasToolError = newMessages.some(
+        (m) => m.role === "tool" && m.content && m.content.includes("<tool_error")
+      );
+      if (hasToolError) {
+        shouldCharge = false;
+      }
+
+      // Check if response is a cognitive refusal for sender identity / organizer rules
+      if (response.content) {
+        const lowerContent = response.content.toLowerCase();
+        if (
+          lowerContent.includes("only authorized to send") ||
+          lowerContent.includes("only authorized to schedule") ||
+          lowerContent.includes("cannot impersonate") ||
+          lowerContent.includes("only authorized to create")
+        ) {
+          shouldCharge = false;
+        }
+      }
+    }
+
+    if (shouldCharge) {
+      const incrementSuccess = await incrementDailyLimit(userId, session.user.email, userTimeZone);
+      if (!incrementSuccess) {
+        return NextResponse.json(
+          { error: "Daily limit reached during concurrent processing." },
+          { status: 429 }
+        );
+      }
+    }
 
     return NextResponse.json({
       ...response,

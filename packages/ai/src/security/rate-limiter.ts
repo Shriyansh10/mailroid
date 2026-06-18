@@ -36,7 +36,15 @@ export interface RateCheckResult {
 export class RateLimiter {
   private counters = new Map<string, Map<string, ToolCounter>>();
 
-  check(userId: string, toolName: string): RateCheckResult {
+  check(userId: string, toolName: string, userEmail?: string): RateCheckResult {
+    if (userEmail) {
+      const whitelistStr = process.env.WHITELISTED_EMAILS || "";
+      const whitelistedEmails = whitelistStr.split(",").map((e) => e.trim().toLowerCase());
+      if (whitelistedEmails.includes(userEmail.toLowerCase())) {
+        return { allowed: true, remaining: 9999, resetAt: Date.now() + 3600000, currentCount: 0 };
+      }
+    }
+
     const config = LIMITS[toolName] ?? DEFAULT_LIMIT;
     const now = Date.now();
 

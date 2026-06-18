@@ -240,7 +240,7 @@ export class ToolOrchestrator {
     }
 
     // ── 5. Rate Limiter — check BEFORE execution (counts ALL attempts) ──
-    const rateResult = rateLimiter.check(userId, toolName);
+    const rateResult = rateLimiter.check(userId, toolName, ctx.userEmail);
     if (!rateResult.allowed) {
       const result = makeResult(
         toolName,

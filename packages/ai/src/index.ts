@@ -87,3 +87,5 @@ export type {
 // ── Prompts ────────────────────────────────────────────────────────────
 export { classifyEmailPriority } from "./prompts/priority.ts";
 export type { PriorityClassificationResult } from "./prompts/priority.ts";
+export { evaluateFeedback } from "./prompts/feedback-evaluator.ts";
+export type { FeedbackEvaluationResult } from "./prompts/feedback-evaluator.ts";

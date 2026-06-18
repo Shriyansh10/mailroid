@@ -10,5 +10,5 @@ export * from './models/calendar-tenant-mappings';
 export * from './models/calendar-events';
 export * from './models/daily-briefs';
 export * from './models/assistant-chats';
-
-
+export * from './models/feedbacks';
+export * from './models/user-usage';

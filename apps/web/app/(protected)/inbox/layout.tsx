@@ -10,6 +10,7 @@ import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
 import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts } from "@web/hooks/api/gmail";
 import { frontendLogger } from "@web/lib/frontend-logger";
+import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 
 const DEBOUNCE_MS = 300;
 
@@ -149,6 +150,12 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           <span className="flex-1 text-left">Sent</span>
           <span className="text-xs text-muted-foreground tabular-nums">{count("SENT")}</span>
         </button>
+
+        <div className="flex-grow" />
+
+        <div className="mt-auto pt-4 border-t border-slate-200">
+          <DailyUsageWidget />
+        </div>
       </div>
 
       {/* ── Main area ───────────────────────────────────────── */}

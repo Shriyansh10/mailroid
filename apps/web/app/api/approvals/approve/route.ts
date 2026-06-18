@@ -14,6 +14,7 @@ import {
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
+import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
 import crypto from "node:crypto";
 
 export const runtime = "nodejs";
@@ -40,6 +41,15 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     const userId = session.user.id;
+
+    // ── Check Daily Action Limit ───────────────────────────────────
+    const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
+    if (!limitCheck.allowed) {
+      return NextResponse.json(
+        { error: limitCheck.message },
+        { status: 429 }
+      );
+    }
 
     // ── Parse body ─────────────────────────────────────────────────
     let body: {
@@ -322,6 +332,46 @@ export async function POST(request: Request) {
       status: "EXECUTED",
       executedAt: new Date(),
     });
+
+    // ── Increment Daily Limit (charge successful action only) ──────
+    let shouldCharge = result.status === "success";
+    if (shouldCharge) {
+      for (const m of newMessagesToInsert) {
+        if (m.role === "tool" && m.content) {
+          try {
+            const parsed = JSON.parse(m.content);
+            if (parsed && typeof parsed === "object" && "error" in parsed) {
+              shouldCharge = false;
+              break;
+            }
+          } catch {
+            // Ignore JSON parse errors
+          }
+        }
+      }
+
+      if (shouldCharge && finalContent) {
+        const lowerContent = finalContent.toLowerCase();
+        if (
+          lowerContent.includes("only authorized to send") ||
+          lowerContent.includes("only authorized to schedule") ||
+          lowerContent.includes("cannot impersonate") ||
+          lowerContent.includes("only authorized to create")
+        ) {
+          shouldCharge = false;
+        }
+      }
+    }
+
+    if (shouldCharge) {
+      const incrementSuccess = await incrementDailyLimit(userId, session.user.email, userTimeZone);
+      if (!incrementSuccess) {
+        return NextResponse.json(
+          { error: "Daily limit reached during concurrent processing." },
+          { status: 429 }
+        );
+      }
+    }
 
     return NextResponse.json({
       role: "assistant",

@@ -19,6 +19,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useConversations, useConversationMessages, useDeleteConversation } from "@web/hooks/api/assistant";
 import { useSession } from "@web/lib/auth-client";
+import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 
 interface ChatMessage {
   id: string;
@@ -223,6 +224,7 @@ export default function AssistantPage() {
       }
 
       const data = await res.json();
+      window.dispatchEvent(new Event("assistant-action-completed"));
 
       if (data.conversationId && data.conversationId !== currentConversationId) {
         setCurrentConversationId(data.conversationId);
@@ -312,6 +314,7 @@ export default function AssistantPage() {
       }
 
       const data = await res.json();
+      window.dispatchEvent(new Event("assistant-action-completed"));
 
       setMessages((prev) => {
         const updated = prev.map((m) =>
@@ -473,6 +476,7 @@ export default function AssistantPage() {
         </div>
 
         <div className="p-4 border-t border-[#4D4D4F] flex flex-col gap-4">
+          <DailyUsageWidget dark />
           <button onClick={() => router.push("/inbox")} className="flex items-center gap-3 text-sm hover:bg-[#2A2B32] p-2 rounded-md transition-colors w-full text-left">
              <ArrowLeftIcon className="size-4" />
              Back to Inbox
