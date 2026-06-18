@@ -67,6 +67,49 @@ export async function handleCorsairWebhook(req: {
     }
   }
 
+  // ── Handle Direct Google Calendar Webhook Push Notifications ────────
+  const resourceState = req.headers["x-goog-resource-state"];
+  if (typeof channelId === "string") {
+    console.log(`[webhook] Received Google Calendar push notification: channelId=${channelId}, resourceState=${resourceState}`);
+    
+    if (calendarTenantId) {
+      if (resourceState === "sync") {
+        console.log(`[webhook] Channel sync handshake for channelId "${channelId}". Returning 200.`);
+        return {
+          plugin: "googlecalendar",
+          action: "sync",
+          response: {
+            statusCode: 200,
+            responseHeaders: {},
+            data: { message: "Sync channel verified" }
+          }
+        };
+      }
+
+      console.log(`[webhook] Triggering syncCalendarEvents in the background for tenant "${calendarTenantId}"...`);
+      void (async () => {
+        try {
+          await syncCalendarEvents(calendarTenantId);
+          console.log(`[webhook] Successfully completed background calendar sync for tenant "${calendarTenantId}"`);
+        } catch (err) {
+          console.error(`[webhook] Background calendar sync failed for tenant "${calendarTenantId}":`, err);
+        }
+      })();
+
+      return {
+        plugin: "googlecalendar",
+        action: "onEventChanged",
+        response: {
+          statusCode: 200,
+          responseHeaders: {},
+          data: { success: true }
+        }
+      };
+    } else {
+      console.warn(`[webhook] Calendar push notification received but no tenant mapping found for channelId: "${channelId}"`);
+    }
+  }
+
   let incomingHistoryId: string | undefined = undefined;
 
   // Resolve tenantId and extract historyId from Gmail Pub/Sub webhook body

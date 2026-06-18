@@ -1,8 +1,23 @@
 import type { ToolExecutor } from "@repo/ai";
 import { ToolExecutionError } from "@repo/ai";
 import { searchEmails as corsairSearchEmails, sendEmail as corsairSendEmail } from "@repo/services/gmail/index";
+import { db, eq } from "@repo/database";
+import { user } from "@repo/database/schema";
 
 const MAX_EMAIL_RESULTS = 20;
+
+async function getAuthenticatedEmail(userId: string): Promise<string> {
+  const [dbUser] = await db
+    .select({ email: user.email })
+    .from(user)
+    .where(eq(user.id, userId))
+    .limit(1);
+
+  if (!dbUser) {
+    throw new Error(`User ${userId} not found`);
+  }
+  return dbUser.email;
+}
 
 export interface SearchEmailsInput {
   query: string;
@@ -63,6 +78,7 @@ export interface SendEmailInput {
   to: string;
   subject: string;
   body: string;
+  from?: string;
 }
 
 export interface SendEmailOutput {
@@ -85,8 +101,17 @@ export class CorsairSendEmailExecutor
     args: SendEmailInput,
     ctx: { userId: string; requestId: string },
   ): Promise<SendEmailOutput> {
-    console.log("[executor:sendEmail] START", { userId: ctx.userId, to: args.to, subject: args.subject });
+    console.log("[executor:sendEmail] START", { userId: ctx.userId, to: args.to, subject: args.subject, from: args.from });
     try {
+      if (args.from) {
+        const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
+        if (args.from.toLowerCase() !== authenticatedEmail.toLowerCase()) {
+          throw new Error(
+            `Cannot send email from ${args.from}. Authenticated account is ${authenticatedEmail}.`
+          );
+        }
+      }
+
       const result = await corsairSendEmail(ctx.userId, {
         to: args.to,
         subject: args.subject,

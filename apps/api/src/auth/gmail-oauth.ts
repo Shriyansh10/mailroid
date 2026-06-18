@@ -3,11 +3,13 @@ import { processOAuthCallbackForPlugin, storeGmailConnectedEmail } from "@repo/t
 import { syncMailbox } from "@repo/services/gmail/sync-metadata";
 import { startGmailWatch } from "@repo/services/gmail/watch.ts";
 
+import { env } from "../env.js";
+
 const GMAIL_CALLBACK_URL =
   process.env.GMAIL_OAUTH_CALLBACK_URL ??
-  "http://localhost:8000/api/auth/gmail-callback";
+  `${env.BASE_URL}/api/auth/gmail-callback`;
 
-const DASHBOARD_URL = "http://localhost:3000/onboarding";
+const DASHBOARD_URL = `${env.FRONTEND_URL}/onboarding`;
 
 export const gmailOAuthRouter = Router();
 

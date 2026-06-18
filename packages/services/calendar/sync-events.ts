@@ -1,5 +1,5 @@
 import { corsair } from "@repo/corsair";
-import { db, sql } from "@repo/database";
+import { db, sql, and, eq, gte, lte, inArray } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 
 export async function syncCalendarEvents(tenantId: string): Promise<void> {
@@ -22,8 +22,39 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
     const items = response.items ?? [];
     console.log(`[sync-calendar-events] Fetched ${items.length} events from Google Calendar API for tenant ${tenantId}`);
 
+    // Reconcile deletions: Find all events in the local DB for this tenant within this range
+    const timeMinDate = new Date(timeMin);
+    const timeMaxDate = new Date(timeMax);
+
+    const dbEvents = await db
+      .select({ eventId: calendarEvents.eventId })
+      .from(calendarEvents)
+      .where(
+        and(
+          eq(calendarEvents.userId, tenantId),
+          gte(calendarEvents.startTime, timeMinDate),
+          lte(calendarEvents.startTime, timeMaxDate)
+        )
+      );
+
+    const dbEventIds = dbEvents.map((e) => e.eventId);
+    const fetchedEventIds = new Set(items.map((item: any) => item.id).filter(Boolean));
+
+    const deletedEventIds = dbEventIds.filter((id) => !fetchedEventIds.has(id));
+    if (deletedEventIds.length > 0) {
+      console.log(`[sync-calendar-events] Deleting ${deletedEventIds.length} obsolete events from DB for tenant ${tenantId}:`, deletedEventIds);
+      await db
+        .delete(calendarEvents)
+        .where(
+          and(
+            eq(calendarEvents.userId, tenantId),
+            inArray(calendarEvents.eventId, deletedEventIds)
+          )
+        );
+    }
+
     if (items.length === 0) {
-      console.log(`[sync-calendar-events] No events to sync for tenant ${tenantId}`);
+      console.log(`[sync-calendar-events] No events to sync/upsert for tenant ${tenantId}`);
       return;
     }
 

@@ -109,6 +109,7 @@ export class ToolRegistry {
         to: z.string().email(),
         subject: z.string().min(1),
         body: z.string().min(1),
+        from: z.string().email().optional(),
       }),
       outputSchema: z.object({
         draft: z.boolean(),
@@ -131,6 +132,7 @@ export class ToolRegistry {
         end: z.string().min(1),
         attendees: z.array(z.string().email()).optional(),
         description: z.string().optional(),
+        organizer: z.string().email().optional(),
       }),
       outputSchema: z.object({
         draft: z.boolean(),

@@ -35,7 +35,7 @@ export default function Page() {
   const handleGoogleLogin = async () => {
     await authClient.signIn.social({
       provider: "google",
-      callbackURL: "http://localhost:3000/onboarding",
+      callbackURL: typeof window !== "undefined" ? `${window.location.origin}/onboarding` : "/onboarding",
     });
   };
 

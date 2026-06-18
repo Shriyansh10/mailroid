@@ -19,6 +19,7 @@ export const approvalRequiredModel = z.object({
   args: z.record(z.string(), z.any()),
   preview: z.string(),
   reasoningContent: z.string().nullable(),
+  status: z.string().optional(),
 });
 
 export const assistantMessageModel = z.object({

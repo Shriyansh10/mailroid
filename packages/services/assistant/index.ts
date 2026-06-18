@@ -1,4 +1,4 @@
-import { db, eq, and, isNull, desc, asc } from "@repo/database";
+import { db, eq, and, isNull, desc, asc, inArray } from "@repo/database";
 import { conversations, assistantMessages, pendingApprovals } from "@repo/database/schema";
 
 export async function listConversations(userId: string) {
@@ -39,16 +39,26 @@ export async function getMessages(userId: string, conversationId: string) {
     .where(eq(assistantMessages.conversationId, conversationId))
     .orderBy(asc(assistantMessages.createdAt));
 
-  // 3. Fetch pending approvals
-  const approvals = await db
-    .select()
-    .from(pendingApprovals)
-    .where(
-      and(
-        eq(pendingApprovals.userId, userId),
-        eq(pendingApprovals.status, "PENDING")
-      )
+  // 3. Extract all toolCallIds from the messages
+  const toolCallIds = messagesResult
+    .flatMap((msg) =>
+      Array.isArray(msg.toolCalls)
+        ? msg.toolCalls.map((tc: any) => tc.id as string).filter(Boolean)
+        : []
     );
+
+  let approvals: any[] = [];
+  if (toolCallIds.length > 0) {
+    approvals = await db
+      .select()
+      .from(pendingApprovals)
+      .where(
+        and(
+          eq(pendingApprovals.userId, userId),
+          inArray(pendingApprovals.toolCallId, toolCallIds)
+        )
+      );
+  }
 
   const approvalMap = new Map(approvals.map((app) => [app.toolCallId, app]));
 
@@ -57,15 +67,16 @@ export async function getMessages(userId: string, conversationId: string) {
     let approvalRequired: any = undefined;
     if (msg.role === "assistant" && Array.isArray(msg.toolCalls)) {
       for (const tc of msg.toolCalls) {
-        const pendingApp = approvalMap.get(tc.id);
-        if (pendingApp) {
+        const app = approvalMap.get(tc.id);
+        if (app) {
           approvalRequired = {
-            approvalId: pendingApp.id,
-            toolName: pendingApp.toolName,
-            toolCallId: pendingApp.toolCallId,
-            args: pendingApp.args || {},
-            preview: pendingApp.preview || `Run ${pendingApp.toolName}`,
+            approvalId: app.id,
+            toolName: app.toolName,
+            toolCallId: app.toolCallId,
+            args: app.args || {},
+            preview: app.preview || `Run ${app.toolName}`,
             reasoningContent: null,
+            status: app.status,
           };
           break;
         }

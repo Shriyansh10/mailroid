@@ -459,6 +459,23 @@ export async function ingestMessage(
     threadId,
   });
 
+  // Trigger priority classification for unread emails (commit success before emitting event)
+  if (flags.isUnread) {
+    const { inngest } = await import("@repo/inngest");
+    void inngest
+      .send({
+        name: "email.received",
+        data: { userId: tenantId, entityId: messageId },
+      })
+      .catch((err) => {
+        logger.error("[SERVICE] failed to send email.received event in ingestMessage", {
+          tenantId,
+          messageId,
+          error: String(err),
+        });
+      });
+  }
+
   // 3. Trigger embeddings asynchronously (fire-and-forget)
   if (triggerEmbeddings) {
     void generateMissingEmbeddings(tenantId).catch((err) => {
@@ -468,6 +485,7 @@ export async function ingestMessage(
 
   logger.info("[SERVICE] ingestMessage completed", { tenantId, messageId, durationMs: Date.now() - startMs });
 }
+
 
 /**
  * Sync the first 100 Gmail messages into local Postgres.

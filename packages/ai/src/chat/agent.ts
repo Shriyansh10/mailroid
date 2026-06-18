@@ -29,6 +29,51 @@ interface AgentToolCall {
   function: { name: string; arguments: string };
 }
 
+/**
+ * Heal any unresponded tool calls in history to comply with OpenAI's strict protocol.
+ * If an assistant message requested tool calls but they were never approved/executed,
+ * this function inserts inline dummy tool cancellations so the API request does not fail.
+ */
+export function healConversation<T extends { role: string; tool_calls?: any[]; toolCalls?: any[]; tool_call_id?: string; toolCallId?: string; content?: string | null }>(
+  messages: T[]
+): T[] {
+  const healed: T[] = [];
+  for (let i = 0; i < messages.length; i++) {
+    const msg = messages[i]!;
+    healed.push(msg);
+
+    if (msg.role === "assistant" && (msg.tool_calls || msg.toolCalls)) {
+      const tcList = msg.tool_calls || msg.toolCalls;
+      if (Array.isArray(tcList) && tcList.length > 0) {
+        const nextToolResponses = new Set<string>();
+        let j = i + 1;
+        while (j < messages.length && messages[j]?.role === "tool") {
+          const toolMsg = messages[j] as any;
+          const toolCallId = toolMsg.tool_call_id || toolMsg.toolCallId;
+          if (toolCallId) {
+            nextToolResponses.add(toolCallId);
+          }
+          j++;
+        }
+
+        for (const tc of tcList) {
+          if (!nextToolResponses.has(tc.id)) {
+            console.log(`[agent:heal] inserting dummy tool response for unresponded toolCallId: ${tc.id}`);
+            healed.push({
+              role: "tool",
+              tool_call_id: tc.id,
+              toolCallId: tc.id,
+              content: JSON.stringify({ error: "Action cancelled or ignored by user" }),
+            } as unknown as T);
+          }
+        }
+      }
+    }
+  }
+  return healed;
+}
+
+
 // ── Options ────────────────────────────────────────────────────────────
 
 export interface RunAgentLoopOptions {
@@ -111,7 +156,7 @@ export async function runAgentLoop(
   const newMessages: AgentLoopNewMessage[] = [];
 
   // Convert public ChatMessage[] → internal AgentMessage[]
-  const conversation: AgentMessage[] = messages.map((m) => {
+  const rawConversation: AgentMessage[] = messages.map((m) => {
     if (m.role === "assistant") {
       return {
         role: "assistant",
@@ -131,6 +176,8 @@ export async function runAgentLoop(
       content: m.content || "",
     };
   });
+
+  const conversation = healConversation(rawConversation);
 
   // ── Security: sanitize user messages before DeepSeek sees them ────
   for (const msg of conversation) {

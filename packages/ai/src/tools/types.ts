@@ -68,6 +68,8 @@ export type RiskLevel = (typeof RiskLevel)[keyof typeof RiskLevel];
 export interface ToolExecutionContext {
   userId: string;
   requestId: string;
+  userTimeZone?: string;
+  userEmail?: string;
 }
 
 // ── Tool definition ──────────────────────────────────────────────────

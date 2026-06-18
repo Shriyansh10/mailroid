@@ -1,8 +1,23 @@
 import type { ToolExecutor } from "@repo/ai";
 import { ToolExecutionError } from "@repo/ai";
 import { getEvents as corsairGetEvents, createEvent as corsairCreateEvent } from "@repo/services/calendar/index";
+import { db, eq } from "@repo/database";
+import { user } from "@repo/database/schema";
 
 const MAX_EVENT_RESULTS = 20;
+
+async function getAuthenticatedEmail(userId: string): Promise<string> {
+  const [dbUser] = await db
+    .select({ email: user.email })
+    .from(user)
+    .where(eq(user.id, userId))
+    .limit(1);
+
+  if (!dbUser) {
+    throw new Error(`User ${userId} not found`);
+  }
+  return dbUser.email;
+}
 
 export interface GetEventsInput {
   timeMin?: string;
@@ -67,6 +82,7 @@ export interface CreateEventInput {
   end: string;
   attendees?: string[];
   description?: string;
+  organizer?: string;
 }
 
 export interface CreateEventOutput {
@@ -95,8 +111,18 @@ export class CorsairCreateEventExecutor
       start: args.start,
       end: args.end,
       attendees: args.attendees,
+      organizer: args.organizer,
     });
     try {
+      if (args.organizer) {
+        const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
+        if (args.organizer.toLowerCase() !== authenticatedEmail.toLowerCase()) {
+          throw new Error(
+            `Cannot create events on behalf of another account.`
+          );
+        }
+      }
+
       const result = await corsairCreateEvent(ctx.userId, {
         title: args.title,
         start: args.start,
@@ -104,7 +130,7 @@ export class CorsairCreateEventExecutor
         allDay: false,
         attendees: args.attendees,
         description: args.description,
-      });
+      }, (ctx as any).userTimeZone);
 
       console.log("[executor:createEvent] SUCCESS", { id: result.id, title: result.title });
       return { draft: false, id: result.id };

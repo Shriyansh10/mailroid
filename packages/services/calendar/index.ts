@@ -65,9 +65,10 @@ function normalizeEvent(raw: RawEvent): CalendarEvent {
  *
  * If the input has no offset, we add timeZone: "UTC" as a safe default.
  */
-function buildEventTime(
+export function buildEventTime(
   isoString: string,
-  allDay: boolean
+  allDay: boolean,
+  userTimeZone?: string
 ): { date?: string; dateTime?: string; timeZone?: string } {
   if (allDay) {
     // All-day events use YYYY-MM-DD format
@@ -80,8 +81,33 @@ function buildEventTime(
     return { dateTime: isoString };
   }
 
-  // No offset — append timeZone so Google Calendar accepts it
-  return { dateTime: isoString, timeZone: "UTC" };
+  // No offset — append resolved timezone
+  return { dateTime: isoString, timeZone: userTimeZone || "UTC" };
+}
+
+/**
+ * Resolve the timezone to use for calendar events.
+ * Priority: Google Calendar Canonical settings -> Fallback user browser timezone -> Fallback UTC.
+ */
+export async function resolveTimezone(tenantId: string, userTimeZone?: string): Promise<string> {
+  const tenant = corsair.withTenant(tenantId);
+  try {
+    const res = await tenant.googlecalendar.api.events.getMany({ maxResults: 1 });
+    if ((res as any).timeZone) {
+      console.log(`[calendar-service] Inferred canonical calendar timezone for tenant ${tenantId}: "${(res as any).timeZone}"`);
+      return (res as any).timeZone;
+    }
+  } catch (err) {
+    console.warn(`[calendar-service] Failed to query primary calendar timezone, trying fallback:`, err);
+  }
+
+  if (userTimeZone) {
+    console.log(`[calendar-service] Falling back to browser timezone for tenant ${tenantId}: "${userTimeZone}"`);
+    return userTimeZone;
+  }
+
+  console.log(`[calendar-service] Timezone fallback to UTC for tenant ${tenantId}`);
+  return "UTC";
 }
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -126,15 +152,17 @@ export async function getEvent(
  */
 export async function createEvent(
   tenantId: string,
-  input: CreateEventInput
+  input: CreateEventInput,
+  userTimeZone?: string
 ): Promise<CalendarEvent> {
   const tenant = corsair.withTenant(tenantId);
   const allDay = input.allDay ?? false;
+  const timeZone = await resolveTimezone(tenantId, userTimeZone);
 
   const event: Record<string, unknown> = {
     summary: input.title,
-    start: buildEventTime(input.start, allDay),
-    end: buildEventTime(input.end, allDay),
+    start: buildEventTime(input.start, allDay, timeZone),
+    end: buildEventTime(input.end, allDay, timeZone),
   };
 
   if (input.description) event.description = input.description;
@@ -157,18 +185,20 @@ export async function createEvent(
 export async function updateEvent(
   tenantId: string,
   eventId: string,
-  input: Omit<UpdateEventInput, "id">
+  input: Omit<UpdateEventInput, "id">,
+  userTimeZone?: string
 ): Promise<CalendarEvent> {
   const tenant = corsair.withTenant(tenantId);
   const allDay = input.allDay ?? false;
+  const timeZone = await resolveTimezone(tenantId, userTimeZone);
 
   const eventPayload: Record<string, unknown> = {};
 
   if (input.title !== undefined) eventPayload.summary = input.title;
   if (input.description !== undefined) eventPayload.description = input.description;
   if (input.location !== undefined) eventPayload.location = input.location;
-  if (input.start !== undefined) eventPayload.start = buildEventTime(input.start, allDay);
-  if (input.end !== undefined) eventPayload.end = buildEventTime(input.end, allDay);
+  if (input.start !== undefined) eventPayload.start = buildEventTime(input.start, allDay, timeZone);
+  if (input.end !== undefined) eventPayload.end = buildEventTime(input.end, allDay, timeZone);
   if (input.attendees !== undefined) {
     eventPayload.attendees = input.attendees.map((email) => ({ email }));
   }

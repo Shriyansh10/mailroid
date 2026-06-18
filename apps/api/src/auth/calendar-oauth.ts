@@ -2,11 +2,13 @@ import { Router } from "express";
 import { processOAuthCallbackForPlugin, storeCalendarConnectedEmail } from "@repo/trpc/services";
 import { startCalendarWatch } from "@repo/services/calendar/watch.ts";
 
+import { env } from "../env.js";
+
 const CALENDAR_CALLBACK_URL =
   process.env.CALENDAR_OAUTH_CALLBACK_URL ??
-  "http://localhost:8000/api/auth/calendar-callback";
+  `${env.BASE_URL}/api/auth/calendar-callback`;
 
-const DASHBOARD_URL = "http://localhost:3000/onboarding";
+const DASHBOARD_URL = `${env.FRONTEND_URL}/onboarding`;
 
 export const calendarOAuthRouter = Router();
 

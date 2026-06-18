@@ -31,7 +31,7 @@ export async function authorizePlugins({
   // ── 3. Generate Gmail OAuth URL via SDK (local OAuth flow) ─────────
   // Tokens are stored encrypted in the local database on callback.
   const callbackUrl = process.env.GMAIL_OAUTH_CALLBACK_URL ??
-    "http://localhost:8000/api/auth/gmail-callback";
+    (process.env.BASE_URL ? `${process.env.BASE_URL}/api/auth/gmail-callback` : "http://localhost:8000/api/auth/gmail-callback");
 
   const { url } = await generateOAuthUrl(corsair, "gmail", {
     tenantId: parsedUserId,
@@ -57,7 +57,7 @@ export async function authorizePlugins({
  */
 export async function getGmailOAuthUrl(userId: string): Promise<GetGmailOAuthUrlOutput> {
   const callbackUrl = process.env.GMAIL_OAUTH_CALLBACK_URL ?? 
-    "http://localhost:8000/api/auth/gmail-callback";
+    (process.env.BASE_URL ? `${process.env.BASE_URL}/api/auth/gmail-callback` : "http://localhost:8000/api/auth/gmail-callback");
 
   const { url, state } = await generateOAuthUrl(corsair, "gmail", {
     tenantId: userId,
@@ -76,7 +76,7 @@ export async function getGmailOAuthUrl(userId: string): Promise<GetGmailOAuthUrl
 export async function getCalendarOAuthUrl(userId: string): Promise<GetCalendarOAuthUrlOutput> {
   const callbackUrl =
     process.env.CALENDAR_OAUTH_CALLBACK_URL ??
-    "http://localhost:8000/api/auth/calendar-callback";
+    (process.env.BASE_URL ? `${process.env.BASE_URL}/api/auth/calendar-callback` : "http://localhost:8000/api/auth/calendar-callback");
 
   const { url, state } = await generateOAuthUrl(corsair, "googlecalendar", {
     tenantId: userId,

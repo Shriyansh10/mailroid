@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db } from "@repo/database";
+import { db, eq, and, sql } from "@repo/database";
+import { conversations, assistantMessages } from "@repo/database/schema";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 
 export const runtime = "nodejs";
@@ -57,6 +58,41 @@ export async function POST(request: Request) {
       status: "CANCELLED",
       cancelledAt: new Date(),
     });
+
+    // ── Write terminal cancellation tool response to database ──────
+    try {
+      const userMessages = await db
+        .select({ 
+          conversationId: assistantMessages.conversationId, 
+          toolCalls: assistantMessages.toolCalls 
+        })
+        .from(assistantMessages)
+        .innerJoin(conversations, eq(assistantMessages.conversationId, conversations.id))
+        .where(
+          and(
+            eq(conversations.userId, userId),
+            sql`${assistantMessages.toolCalls} IS NOT NULL`
+          )
+        );
+
+      const matchingMsg = userMessages.find(msg => 
+        Array.isArray(msg.toolCalls) && msg.toolCalls.some((tc: any) => tc.id === approval.toolCallId)
+      );
+
+      if (matchingMsg) {
+        const convId = matchingMsg.conversationId;
+        await db.insert(assistantMessages).values({
+          conversationId: convId,
+          role: "tool",
+          toolCallId: approval.toolCallId,
+          content: JSON.stringify({ error: "Action cancelled or ignored by user" }),
+          metadata: { status: "cancelled" },
+        });
+        console.log(`[api:approvals:cancel] Persisted terminal tool response for cancelled approval: ${approval.id}`);
+      }
+    } catch (err) {
+      console.warn("[api:approvals:cancel] Failed to persist cancellation tool response:", err);
+    }
 
     return NextResponse.json({ cancelled: true });
   } catch (error) {

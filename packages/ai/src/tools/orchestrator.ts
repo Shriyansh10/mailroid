@@ -48,8 +48,10 @@ export class ToolOrchestrator {
     userId: string,
     requestId: string,
     skipPermissionCheck?: boolean,
+    userTimeZone?: string,
+    userEmail?: string,
   ): Promise<ToolResult> {
-    const ctx: ToolExecutionContext = { userId, requestId };
+    const ctx: ToolExecutionContext = { userId, requestId, userTimeZone, userEmail };
 
     // ── 1. Validate tool exists ────────────────────────────────────
     const tool = this.registry.get(toolName);
@@ -118,7 +120,7 @@ export class ToolOrchestrator {
           }
 
           const approvalId = crypto.randomUUID();
-          const preview = generatePreview(toolName, rawArgs);
+          const preview = generatePreview(toolName, rawArgs, ctx.userTimeZone, ctx.userEmail);
 
           await this.approvalStore.create({
             id: approvalId,
@@ -317,17 +319,24 @@ export class ToolOrchestrator {
 /**
  * Build a human-readable preview of the pending action from raw args.
  */
-function generatePreview(toolName: string, args: Record<string, unknown>): string {
+function generatePreview(
+  toolName: string,
+  args: Record<string, unknown>,
+  userTimeZone?: string,
+  userEmail?: string,
+): string {
   switch (toolName) {
     case "sendEmail": {
-      const to = args.to as string | undefined ?? "unknown";
-      const subject = args.subject as string | undefined ?? "";
-      return `Send email to ${to}${subject ? `: "${subject}"` : ""}`;
+      const from = (args.from as string) || userEmail || "unknown";
+      const to = (args.to as string) || "unknown";
+      const subject = (args.subject as string) || "(no subject)";
+      return `From: ${from}\nTo: ${to}\nSubject: ${subject}`;
     }
     case "createEvent": {
-      const title = args.title as string | undefined ?? "Untitled";
-      const start = args.start as string | undefined ?? "";
-      return `Create calendar event "${title}"${start ? ` at ${start}` : ""}`;
+      const organizer = (args.organizer as string) || userEmail || "unknown";
+      const title = (args.title as string) || "Untitled";
+      const start = (args.start as string) || "";
+      return `Organizer: ${organizer}\nEvent: "${title}" at ${start}${userTimeZone ? ` (${userTimeZone})` : ""}`;
     }
     default:
       return `Run ${toolName}`;

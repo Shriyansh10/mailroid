@@ -1,7 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db, eq } from "@repo/database";
-import { conversations, assistantMessages } from "@repo/database/schema";
+import { db, eq, and, sql } from "@repo/database";
+import { conversations, assistantMessages, pendingApprovals } from "@repo/database/schema";
 import {
   ChatRequestSchema,
   ToolRegistry,
@@ -97,6 +97,64 @@ export async function POST(request: Request) {
       conversationId = newConv.id;
     }
 
+    // ── Auto-resolve abandoned pending approvals in this conversation ──
+    if (conversationId) {
+      // 1. Fetch pending approvals for the active user
+      const pending = await db
+        .select()
+        .from(pendingApprovals)
+        .where(
+          and(
+            eq(pendingApprovals.userId, userId),
+            eq(pendingApprovals.status, "PENDING")
+          )
+        );
+
+      if (pending.length > 0) {
+        // 2. Fetch all assistant messages in the active conversation that have toolCalls
+        const convMessages = await db
+          .select({ toolCalls: assistantMessages.toolCalls })
+          .from(assistantMessages)
+          .where(
+            and(
+              eq(assistantMessages.conversationId, conversationId),
+              sql`${assistantMessages.toolCalls} IS NOT NULL`
+            )
+          );
+
+        const convToolCallIds = new Set(
+          convMessages.flatMap((msg) =>
+            Array.isArray(msg.toolCalls)
+              ? msg.toolCalls.map((tc: any) => tc.id as string).filter(Boolean)
+              : []
+          )
+        );
+
+        // 3. Cancel matching pending approvals and write terminal messages
+        for (const p of pending) {
+          if (convToolCallIds.has(p.toolCallId)) {
+            console.log(`[api:chat] Abandoned approval found: ${p.id}. Cancelling and writing terminal tool message.`);
+            
+            await db
+              .update(pendingApprovals)
+              .set({
+                status: "CANCELLED",
+                cancelledAt: new Date(),
+              })
+              .where(eq(pendingApprovals.id, p.id));
+
+            await db.insert(assistantMessages).values({
+              conversationId,
+              role: "tool",
+              toolCallId: p.toolCallId,
+              content: JSON.stringify({ error: "Action cancelled or ignored by user" }),
+              metadata: { status: "cancelled" },
+            });
+          }
+        }
+      }
+    }
+
     // ── Persist incoming user prompt ──────────────────────────────
     if (lastUserMessage) {
       await db.insert(assistantMessages).values({
@@ -106,12 +164,14 @@ export async function POST(request: Request) {
       });
     }
 
+    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+
     // ── Run agent loop (DeepSeek + tool calling) ───────────────────
     const { response, newMessages } = await runAgentLoop({
       messages: parsed.data.messages,
       registry,
       execute: (name, args) =>
-        orchestrator.executeTool(name, args, userId, crypto.randomUUID()),
+        orchestrator.executeTool(name, args, userId, crypto.randomUUID(), false, userTimeZone, session.user.email),
       userId,
     });
 

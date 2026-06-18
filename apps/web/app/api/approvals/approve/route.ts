@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db, eq } from "@repo/database";
+import { db, eq, asc } from "@repo/database";
 import { conversations, assistantMessages } from "@repo/database/schema";
 import {
   ToolRegistry,
@@ -10,6 +10,7 @@ import {
   deepseek,
   DEEPSEEK_CHAT_MODEL,
   toOpenAiToolDefs,
+  healConversation,
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
@@ -31,6 +32,8 @@ const orchestrator = new ToolOrchestrator(registry, permissions, audit, approval
  */
 export async function POST(request: Request) {
   try {
+    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+
     // ── Auth ───────────────────────────────────────────────────────
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session?.user?.id) {
@@ -90,14 +93,16 @@ export async function POST(request: Request) {
       userId,
       requestId,
       true, // skipPermissionCheck — approval already granted
+      userTimeZone,
+      session.user.email,
     );
 
     const conversationId = body.conversationId;
     const newMessagesToInsert: any[] = [];
 
-    // Persist the executed tool's result to assistant_messages
+    // Persist the executed tool's result to assistant_messages immediately
     if (conversationId) {
-      newMessagesToInsert.push({
+      await db.insert(assistantMessages).values({
         conversationId,
         role: "tool",
         toolCallId: approval.toolCallId,
@@ -107,44 +112,66 @@ export async function POST(request: Request) {
       });
     }
 
-    // ── Resume conversation if messages provided ────────────────────
+    // ── Resume conversation if conversationId is valid ──────────────────
     let finalContent = `Tool "${approval.toolName}" executed: ${result.status}`;
 
-    if (body.messages && body.messages.length > 0) {
+    if (conversationId) {
       try {
-        // Rebuild conversation history. Messages from the frontend are
-        // ChatMessage[] (role + content only). We append the original
-        // tool_call (so DeepSeek sees the proper tool-calling context)
-        // and the tool result.
-        const conversation: unknown[] = [
-          ...body.messages.map((m) => ({
-            role: m.role as "system" | "user" | "assistant",
-            content: m.content,
-          })),
+        // Fetch complete message history from the database
+        const dbMsgs = await db
+          .select()
+          .from(assistantMessages)
+          .where(eq(assistantMessages.conversationId, conversationId))
+          .orderBy(asc(assistantMessages.createdAt));
+
+        // Resolve system prompt from frontend body if present, or use default fallback
+        let systemPrompt = [
+          `You are Dobbie, an AI executive assistant for email, calendar, and productivity workflows.`,
+          `Be concise, professional, accurate, and action-oriented.`,
+          `Never invent emails, events, people, dates, or tool results.`,
+          ``,
+          `SENDER IDENTITY RULES (CRITICAL):`,
+          `- You may ONLY send email from the currently authenticated Gmail account: ${session?.user?.email || "unknown"}.`,
+          `- You may ONLY create calendar events from the currently authenticated Google Calendar account: ${session?.user?.email || "unknown"}.`,
+          `- If the user explicitly requests to send an email, schedule a meeting, or perform an action "from X", "as X", or "on behalf of X" (where X is not the authenticated email "${session?.user?.email || "unknown"}"):`,
+          `  1. Do NOT call any tool under any circumstances.`,
+          `  2. Explain that you cannot impersonate another account. You MUST include this exact message or a clear variation: "I am only authorized to send/schedule on your behalf." (or for email: "I am only authorized to send a mail on your behalf.")`,
+          `  3. Ask whether they want to perform the action from their connected account instead.`,
+          `- Do NOT refuse standard requests where the user doesn't specify a different sender/organizer (e.g. "Send email to bob@example.com" or "Schedule a meeting with Bob"). These are normal actions, and you should perform them from the authenticated account.`,
+        ].join("\n");
+        if (body.messages && body.messages[0]?.role === "system") {
+          systemPrompt = body.messages[0].content;
+        }
+
+        // Map database messages to OpenAI message format
+        const rawConversation: any[] = [
           {
-            role: "assistant" as const,
-            content: null,
-            reasoning_content: body.reasoningContent ?? "",
-            tool_calls: [
-              {
-                id: approval.toolCallId,
-                type: "function" as const,
-                function: {
-                  name: approval.toolName,
-                  arguments: JSON.stringify(approval.args as Record<string, unknown>),
-                },
-              },
-            ],
+            role: "system" as const,
+            content: systemPrompt,
           },
-          {
-            role: "tool" as const,
-            tool_call_id: approval.toolCallId,
-            content:
-              result.status === "success"
-                ? JSON.stringify(result.data)
-                : JSON.stringify({ error: result.error ?? "Tool execution failed" }),
-          },
+          ...dbMsgs.map((m) => {
+            if (m.role === "assistant") {
+              return {
+                role: "assistant" as const,
+                content: m.content || null,
+                tool_calls: m.toolCalls as any[] | undefined,
+              };
+            }
+            if (m.role === "tool") {
+              return {
+                role: "tool" as const,
+                tool_call_id: m.toolCallId!,
+                content: m.content || "",
+              };
+            }
+            return {
+              role: m.role as "user",
+              content: m.content || "",
+            };
+          }),
         ];
+
+        const conversation = healConversation(rawConversation);
 
         // Include tools so DeepSeek can call remaining tools (e.g. sendEmail
         // after createEvent was approved)
@@ -192,6 +219,8 @@ export async function POST(request: Request) {
               userId,
               crypto.randomUUID(),
               true, // skip permission — user approved the overall action
+              userTimeZone,
+              session.user.email,
             );
 
             if (toolResult.status === "success") {

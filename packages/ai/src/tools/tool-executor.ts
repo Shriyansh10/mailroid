@@ -64,6 +64,7 @@ export interface SendEmailInput {
   to: string;
   subject: string;
   body: string;
+  from?: string;
 }
 
 export interface SendEmailOutput {
@@ -90,6 +91,7 @@ export interface CreateEventInput {
   end: string;
   attendees?: string[];
   description?: string;
+  organizer?: string;
 }
 
 export interface CreateEventOutput {

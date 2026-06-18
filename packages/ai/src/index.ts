@@ -17,7 +17,7 @@ export type {
 } from "./chat/types.ts";
 
 export { sendChat, streamChat } from "./chat/service.ts";
-export { runAgentLoop } from "./chat/agent.ts";
+export { runAgentLoop, healConversation } from "./chat/agent.ts";
 export type { RunAgentLoopOptions, AgentLoopResult, AgentLoopNewMessage } from "./chat/agent.ts";
 
 export type { AgentResponse, ApprovalRequiredResponse } from "./chat/types.ts";
