@@ -1,5 +1,6 @@
 import { Router } from "express";
 import { processOAuthCallbackForPlugin, storeCalendarConnectedEmail } from "@repo/trpc/services";
+import { startCalendarWatch } from "@repo/services/calendar/watch.ts";
 
 const CALENDAR_CALLBACK_URL =
   process.env.CALENDAR_OAUTH_CALLBACK_URL ??
@@ -24,8 +25,11 @@ calendarOAuthRouter.get("/", async (req, res) => {
   try {
     const result = await processOAuthCallbackForPlugin(code, state, CALENDAR_CALLBACK_URL);
 
-    // Fetch and persist the connected Calendar account email
-    //await storeCalendarConnectedEmail(result.tenantId);
+    // Fetch and persist the connected Calendar account email and trigger automatic watch setup
+    const email = await storeCalendarConnectedEmail(result.tenantId);
+    if (email) {
+      await startCalendarWatch(result.tenantId);
+    }
 
     return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);
   } catch (err) {

@@ -7,6 +7,7 @@ import {
   GetEventsExecutor,
   SendEmailExecutor,
   CreateEventExecutor,
+  GenerateExecutiveBriefExecutor,
 } from "./tool-executor.ts";
 import type {
   SearchEmailsInput,
@@ -17,6 +18,8 @@ import type {
   SendEmailOutput,
   CreateEventInput,
   CreateEventOutput,
+  GenerateExecutiveBriefInput,
+  GenerateExecutiveBriefOutput,
 } from "./tool-executor.ts";
 
 // ── Tool registry ────────────────────────────────────────────────────
@@ -135,6 +138,22 @@ export class ToolRegistry {
       }),
       execute: (args, ctx) =>
         createEventExec.execute(args as CreateEventInput, ctx),
+    });
+
+    // ── generateExecutiveBrief ───────────────────────────────────────
+    const generateExecutiveBriefExec = new GenerateExecutiveBriefExecutor();
+    this.register({
+      name: "generateExecutiveBrief",
+      description: "Generate or retrieve the executive briefing for today containing a synthesized plan of calendar events and priority emails.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({}),
+      outputSchema: z.object({
+        briefing: z.string().describe("The markdown formatted briefing context."),
+      }),
+      execute: (args, ctx) =>
+        generateExecutiveBriefExec.execute(args as GenerateExecutiveBriefInput, ctx),
     });
   }
 }

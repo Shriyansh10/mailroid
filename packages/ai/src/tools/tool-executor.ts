@@ -107,3 +107,23 @@ export class CreateEventExecutor
     return { draft: true };
   }
 }
+
+// ── generateExecutiveBrief ───────────────────────────────────────────
+
+export interface GenerateExecutiveBriefInput {}
+
+export interface GenerateExecutiveBriefOutput {
+  briefing: string;
+}
+
+export class GenerateExecutiveBriefExecutor
+  implements ToolExecutor<GenerateExecutiveBriefInput, GenerateExecutiveBriefOutput>
+{
+  async execute(
+    _args: GenerateExecutiveBriefInput,
+    _ctx: ToolExecutionContext,
+  ): Promise<GenerateExecutiveBriefOutput> {
+    return { briefing: "Mock briefing: No production executor registered." };
+  }
+}
+

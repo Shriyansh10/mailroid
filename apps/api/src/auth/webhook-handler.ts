@@ -2,7 +2,10 @@ import { corsair } from "@repo/corsair";
 import { processWebhook } from "corsair";
 import { db, eq, and } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
+import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
+import { calendarEvents } from "@repo/database/models/calendar-events";
 import { ingestMessage } from "@repo/services/gmail/index.js";
+import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 
 async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | undefined> {
   const targetEmailLower = targetEmail.toLowerCase();
@@ -45,6 +48,25 @@ export async function handleCorsairWebhook(req: {
   const parsedUrl = new URL(req.url, "http://localhost");
   let tenantId = parsedUrl.searchParams.get("tenantId") ?? undefined;
 
+  // Resolve calendar tenantId from the x-goog-channel-id header
+  let calendarTenantId: string | undefined = undefined;
+  const channelId = req.headers["x-goog-channel-id"];
+  if (typeof channelId === "string") {
+    try {
+      const [mapping] = await db
+        .select({ tenantId: calendarTenantMappings.tenantId })
+        .from(calendarTenantMappings)
+        .where(eq(calendarTenantMappings.channelId, channelId))
+        .limit(1);
+      if (mapping) {
+        calendarTenantId = mapping.tenantId;
+        console.log(`[webhook] Resolved calendar tenantId "${calendarTenantId}" for channelId "${channelId}"`);
+      }
+    } catch (err) {
+      console.error("[webhook] Error looking up calendar tenant mapping by channelId:", err);
+    }
+  }
+
   let incomingHistoryId: string | undefined = undefined;
 
   // Resolve tenantId and extract historyId from Gmail Pub/Sub webhook body
@@ -80,7 +102,7 @@ export async function handleCorsairWebhook(req: {
 
   console.log("[webhook] incoming", {
     tenantId,
-    bodyPreview: JSON.stringify(req.body).slice(0, 200),
+    bodyPreview: req.body ? JSON.stringify(req.body).slice(0, 200) : "",
   });
 
   const result = await processWebhook(
@@ -92,7 +114,7 @@ export async function handleCorsairWebhook(req: {
     ),
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     req.body as any,
-    { tenantId },
+    { tenantId: tenantId ?? calendarTenantId },
   );
   console.log(
     "[WEBHOOK FULL RESULT]",
@@ -269,6 +291,74 @@ export async function handleCorsairWebhook(req: {
         console.error("[webhook] Async sync process failed:", err);
       }
     })();
+  }
+
+  // Google Calendar webhook sync logic
+  if (result.plugin === "googlecalendar") {
+    console.log("[CALENDAR WEBHOOK]", JSON.stringify(result, null, 2));
+
+    const activeTenantId = tenantId ?? calendarTenantId;
+    const resultAny = result as any;
+    if (activeTenantId && resultAny.action === "onEventChanged") {
+      const data = resultAny.data;
+      if (data) {
+        void (async () => {
+          try {
+            if (data.type === "eventCreated" || data.type === "eventUpdated") {
+              const event = data.event;
+              if (event && event.id) {
+                const start = event.start?.dateTime ?? event.start?.date;
+                const end = event.end?.dateTime ?? event.end?.date;
+                await db
+                  .insert(calendarEvents)
+                  .values({
+                    userId: activeTenantId,
+                    eventId: event.id,
+                    title: event.summary ?? "(No title)",
+                    startTime: start ? new Date(start) : new Date(),
+                    endTime: end ? new Date(end) : new Date(),
+                    description: event.description ?? null,
+                    location: event.location ?? null,
+                    organizerEmail: event.organizer?.email ?? null,
+                    attendees: event.attendees ?? null,
+                    status: event.status ?? null,
+                    htmlLink: event.htmlLink ?? null,
+                    updatedAtGoogle: event.updated ? new Date(event.updated) : null,
+                  })
+                  .onConflictDoUpdate({
+                    target: calendarEvents.eventId,
+                    set: {
+                      title: event.summary ?? "(No title)",
+                      startTime: start ? new Date(start) : new Date(),
+                      endTime: end ? new Date(end) : new Date(),
+                      description: event.description ?? null,
+                      location: event.location ?? null,
+                      organizerEmail: event.organizer?.email ?? null,
+                      attendees: event.attendees ?? null,
+                      status: event.status ?? null,
+                      htmlLink: event.htmlLink ?? null,
+                      updatedAtGoogle: event.updated ? new Date(event.updated) : null,
+                      updatedAt: new Date(),
+                    },
+                  });
+                console.log(`[webhook] Synced calendar event "${event.id}" in DB for tenant "${activeTenantId}"`);
+              }
+            } else if (data.type === "eventDeleted" && data.eventId) {
+              await db
+                .delete(calendarEvents)
+                .where(eq(calendarEvents.eventId, data.eventId));
+              console.log(`[webhook] Deleted calendar event "${data.eventId}" from DB for tenant "${activeTenantId}"`);
+            }
+
+            // Recovery/fallback path to make sure no updates are missed
+            console.log(`[webhook] Triggering syncCalendarEvents fallback for tenant "${activeTenantId}"...`);
+            await syncCalendarEvents(activeTenantId);
+          } catch (err) {
+            console.error("[webhook] Error syncing calendar event webhook data:", err);
+          }
+        })();
+      }
+    }
   }
 
   return result;

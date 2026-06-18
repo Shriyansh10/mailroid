@@ -76,8 +76,8 @@ export const useSendEmail = () => {
   }, [result.error]);
 
   return {
-    mutateAsync: result.mutateAsync,
-    mutate: result.mutate,
+    sendEmailAsync: result.mutateAsync,
+    sendEmail: result.mutate,
     error: result.error,
     isError: result.isError,
     isIdle: result.isIdle,
@@ -200,6 +200,66 @@ export const usePendingEmbeddingsCount = () => {
     trpc.gmail.pendingEmbeddingsCount.useQuery();
 
   return { data, isLoading, isError, error, refetch };
+};
+
+export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number; unreadOnly?: boolean; maxResults?: number; page?: number }) => {
+  frontendLogger.info("[INBOX_HOOK]", "usePriorityEmails called", { opts: opts ?? {} });
+  const startMs = Date.now();
+
+  const result = trpc.gmail.listPriority.useQuery(opts ?? undefined, {
+    refetchOnMount: true,
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (result.data && !result.isLoading) {
+      frontendLogger.info("[INBOX_HOOK]", "usePriorityEmails result", {
+        threadCount: result.data.threads?.length ?? 0,
+        durationMs: Date.now() - startMs,
+      });
+    }
+  }, [result.data, result.isLoading]);
+
+  useEffect(() => {
+    if (result.error) {
+      frontendLogger.error("[INBOX_HOOK]", "usePriorityEmails error", {
+        error: result.error.message,
+        durationMs: Date.now() - startMs,
+      });
+    }
+  }, [result.error]);
+
+  return result;
+};
+
+export const usePriorityCounts = (opts?: { days?: number }) => {
+  frontendLogger.info("[INBOX_HOOK]", "usePriorityCounts called", { opts: opts ?? {} });
+  const startMs = Date.now();
+
+  const result = trpc.gmail.priorityCounts.useQuery(opts ?? undefined, {
+    refetchOnMount: true,
+    staleTime: 30_000,
+  });
+
+  useEffect(() => {
+    if (result.data && !result.isLoading) {
+      frontendLogger.info("[INBOX_HOOK]", "usePriorityCounts result", {
+        counts: result.data,
+        durationMs: Date.now() - startMs,
+      });
+    }
+  }, [result.data, result.isLoading]);
+
+  useEffect(() => {
+    if (result.error) {
+      frontendLogger.error("[INBOX_HOOK]", "usePriorityCounts error", {
+        error: result.error.message,
+        durationMs: Date.now() - startMs,
+      });
+    }
+  }, [result.error]);
+
+  return result;
 };
 
 export const useCategoryEmails = (category: string, opts?: { maxResults?: number; page?: number }) => {

@@ -156,6 +156,15 @@ snippet,
     receivedAt,
     threadId,
   });
+
+  // Trigger priority classification
+  if (flags.isUnread) {
+    const { inngest } = await import("@repo/inngest");
+    await inngest.send({
+      name: "email.received",
+      data: { userId, entityId },
+    });
+  }
 }
 
 export async function processMessages(

@@ -791,3 +791,6 @@ export async function getPendingEmbeddingsCount(
   logger.debug("[DB] getPendingEmbeddingsCount", { userId, pending, durationMs: Date.now() - startMs });
   return { pending };
 }
+
+export { getOrGenerateBrief, formatBriefingMarkdown } from "./daily-briefing.ts";
+

@@ -83,9 +83,21 @@ function getFunction(tc: {
  *      feed result back into messages, loop
  *   5. Safety limit prevents infinite loops
  */
+export interface AgentLoopNewMessage {
+  role: "assistant" | "tool";
+  content: string | null;
+  toolCalls?: any;
+  toolCallId?: string;
+}
+
+export interface AgentLoopResult {
+  response: AgentResponse;
+  newMessages: AgentLoopNewMessage[];
+}
+
 export async function runAgentLoop(
   options: RunAgentLoopOptions,
-): Promise<AgentResponse> {
+): Promise<AgentLoopResult> {
   console.log("RUN_AGENT_LOOP_STARTED");
   const {
     messages,
@@ -96,12 +108,29 @@ export async function runAgentLoop(
   } = options;
 
   const toolDefs = toOpenAiToolDefs(registry);
+  const newMessages: AgentLoopNewMessage[] = [];
 
   // Convert public ChatMessage[] → internal AgentMessage[]
-  const conversation: AgentMessage[] = messages.map((m) => ({
-    role: m.role as "system" | "user",
-    content: m.content,
-  }));
+  const conversation: AgentMessage[] = messages.map((m) => {
+    if (m.role === "assistant") {
+      return {
+        role: "assistant",
+        content: m.content || null,
+        tool_calls: m.tool_calls as AgentToolCall[] | undefined,
+      };
+    }
+    if (m.role === "tool") {
+      return {
+        role: "tool",
+        tool_call_id: m.tool_call_id!,
+        content: m.content || "",
+      };
+    }
+    return {
+      role: m.role as "system" | "user",
+      content: m.content || "",
+    };
+  });
 
   // ── Security: sanitize user messages before DeepSeek sees them ────
   for (const msg of conversation) {
@@ -154,7 +183,8 @@ export async function runAgentLoop(
     // ── Terminal: model returned text content, no tool calls ──────────
     if (msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
       console.log("[agent:done]", { iteration, durationMs: Date.now() - start, contentLength: msg.content.length });
-      return { role: "assistant", content: msg.content };
+      newMessages.push({ role: "assistant", content: msg.content });
+      return { response: { role: "assistant", content: msg.content }, newMessages };
     }
 
     // ── Tool calls: model wants to execute tools ──────────────────────
@@ -164,6 +194,19 @@ export async function runAgentLoop(
           getFunction(tc).name,
       );
       console.log("[agent:tool-calls]", { iteration, count: msg.tool_calls.length, names: toolNames });
+
+      const assistantMsg: AgentLoopNewMessage = {
+        role: "assistant",
+        content: msg.content ?? null,
+        toolCalls: msg.tool_calls.map(
+          (tc: { id: string; type: string; function?: { name: string; arguments: string } }) => ({
+            id: tc.id,
+            type: "function" as const,
+            function: getFunction(tc),
+          }),
+        ),
+      };
+      newMessages.push(assistantMsg);
 
       // Push the assistant message that requested the tools
       conversation.push({
@@ -208,16 +251,19 @@ export async function runAgentLoop(
             toolCallId: tc.id,
           });
           return {
-            role: "assistant",
-            content: msg.content ?? `I'd like to ${toolName}. Please approve this action.`,
-            approvalRequired: {
-              approvalId: result.approvalId!,
-              toolName,
-              toolCallId: tc.id,
-              args,
-              preview: result.preview ?? `Run ${toolName}`,
-              reasoningContent: (msg as { reasoning_content?: string | null }).reasoning_content ?? null,
+            response: {
+              role: "assistant",
+              content: msg.content ?? `I'd like to ${toolName}. Please approve this action.`,
+              approvalRequired: {
+                approvalId: result.approvalId!,
+                toolName,
+                toolCallId: tc.id,
+                args,
+                preview: result.preview ?? `Run ${toolName}`,
+                reasoningContent: (msg as { reasoning_content?: string | null }).reasoning_content ?? null,
+              },
             },
+            newMessages,
           };
         }
 
@@ -227,6 +273,12 @@ export async function runAgentLoop(
           safeResult.status === "success"
             ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
             : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: safeResult.error ?? `Tool execution failed: ${safeResult.status}` })}\n</tool_error>`;
+
+        newMessages.push({
+          role: "tool",
+          toolCallId: tc.id,
+          content: framedContent,
+        });
 
         // Push the framed tool result back into the conversation
         conversation.push({
@@ -242,7 +294,15 @@ export async function runAgentLoop(
 
     // ── Degenerate: no content and no tool calls ──────────────────────
     console.warn("[agent:warn]", { iteration, reason: "No content, no tool calls — returning empty" });
-    return { role: "assistant", content: msg.content ?? "" };
+    const emptyMsg: AgentLoopNewMessage = {
+      role: "assistant",
+      content: msg.content ?? "",
+    };
+    newMessages.push(emptyMsg);
+    return {
+      response: { role: "assistant", content: msg.content ?? "" },
+      newMessages,
+    };
   }
 
   // ── Safety limit reached ────────────────────────────────────────────
@@ -253,9 +313,17 @@ export async function runAgentLoop(
     `iterations=${maxIterations} | ` +
     `maxIterations=${maxIterations}`,
   );
-  return {
+  const limitMsg: AgentLoopNewMessage = {
     role: "assistant",
     content: "I've completed the maximum number of steps (5). Please try a more specific request.",
+  };
+  newMessages.push(limitMsg);
+  return {
+    response: {
+      role: "assistant",
+      content: "I've completed the maximum number of steps (5). Please try a more specific request.",
+    },
+    newMessages,
   };
 }
 

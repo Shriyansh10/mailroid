@@ -18,7 +18,7 @@ export type {
 
 export { sendChat, streamChat } from "./chat/service.ts";
 export { runAgentLoop } from "./chat/agent.ts";
-export type { RunAgentLoopOptions } from "./chat/agent.ts";
+export type { RunAgentLoopOptions, AgentLoopResult, AgentLoopNewMessage } from "./chat/agent.ts";
 
 export type { AgentResponse, ApprovalRequiredResponse } from "./chat/types.ts";
 
@@ -40,6 +40,7 @@ export {
   GetEventsExecutor,
   SendEmailExecutor,
   CreateEventExecutor,
+  GenerateExecutiveBriefExecutor,
 } from "./tools/index.ts";
 export type {
   ToolDefinition,
@@ -57,6 +58,8 @@ export type {
   SendEmailOutput,
   CreateEventInput,
   CreateEventOutput,
+  GenerateExecutiveBriefInput,
+  GenerateExecutiveBriefOutput,
 } from "./tools/index.ts";
 
 export { toOpenAiToolDefs } from "./tools/convert.ts";
@@ -80,3 +83,7 @@ export type {
   WriteGuardResult,
   RateCheckResult,
 } from "./security/index.ts";
+
+// ── Prompts ────────────────────────────────────────────────────────────
+export { classifyEmailPriority } from "./prompts/priority.ts";
+export type { PriorityClassificationResult } from "./prompts/priority.ts";

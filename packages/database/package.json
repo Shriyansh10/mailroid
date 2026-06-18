@@ -12,7 +12,9 @@
     "./models/corsair": "./models/corsair.ts",
     "./models/emails": "./models/emails.ts",
     "./models/message-metadata": "./models/message-metadata.ts",
-    "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts"
+    "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts",
+    "./models/calendar-tenant-mappings": "./models/calendar-tenant-mappings.ts",
+    "./models/calendar-events": "./models/calendar-events.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

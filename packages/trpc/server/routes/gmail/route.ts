@@ -4,7 +4,7 @@ import { generatePath } from "../../utils/path-generator.js";
 import { logger } from "@repo/logger";
 
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
-import { getEmailsByCategory, getCategoryCounts } from "@repo/services/gmail/metadata.js";
+import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts } from "@repo/services/gmail/metadata.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -281,6 +281,83 @@ export const gmailRouter = router({
       logger.info("[TRPC] gmail.categoryCounts called", { userId: ctx.user!.id });
       const result = await getCategoryCounts(ctx.user!.id);
       logger.info("[TRPC] gmail.categoryCounts result", {
+        userId: ctx.user!.id, counts: result, durationMs: Date.now() - startMs,
+      });
+      return result;
+    }),
+
+  listPriority: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/list-priority"),
+        tags: TAGS,
+      },
+    })
+    .input(
+      z
+        .object({
+          priorities: z.array(z.string()).optional(),
+          days: z.number().optional(),
+          unreadOnly: z.boolean().optional(),
+          maxResults: z.number().optional(),
+          page: z.number().optional(),
+        })
+        .optional()
+    )
+    .output(
+      z.object({
+        threads: threadListOutputModel.shape.threads,
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const startMs = Date.now();
+      logger.info("[TRPC] gmail.listPriority called", {
+        userId: ctx.user!.id, input: input ?? {}
+      });
+      const result = await getPriorityEmails(ctx.user!.id, {
+        priorities: input?.priorities,
+        days: input?.days,
+        unreadOnly: input?.unreadOnly,
+        maxResults: input?.maxResults,
+        page: input?.page,
+      });
+      logger.info("[TRPC] gmail.listPriority result", {
+        userId: ctx.user!.id,
+        threadCount: result.threads?.length ?? 0,
+        durationMs: Date.now() - startMs,
+      });
+      return result;
+    }),
+
+  priorityCounts: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/priority-counts"),
+        tags: TAGS,
+      },
+    })
+    .input(
+      z
+        .object({
+          days: z.number().optional(),
+        })
+        .optional()
+    )
+    .output(
+      z.object({
+        HIGH: z.number(),
+        MEDIUM: z.number(),
+        LOW: z.number(),
+        ALL: z.number(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const startMs = Date.now();
+      logger.info("[TRPC] gmail.priorityCounts called", { userId: ctx.user!.id, input: input ?? {} });
+      const result = await getPriorityCounts(ctx.user!.id, input?.days ?? undefined);
+      logger.info("[TRPC] gmail.priorityCounts result", {
         userId: ctx.user!.id, counts: result, durationMs: Date.now() - startMs,
       });
       return result;

@@ -8,6 +8,12 @@ export const threadSummaryOutputModel = z.object({
   subject: z.string(),
   date: z.string(),
   snippet: z.string(),
+  priority: z.string().optional(),
+  priorityScore: z.number().nullable().optional(),
+  priorityReason: z.string().nullable().optional(),
+  isActionRequired: z.boolean().optional(),
+  isReplyNeeded: z.boolean().optional(),
+  isUnread: z.boolean().optional(),
 });
 
 export const threadListOutputModel = z.object({

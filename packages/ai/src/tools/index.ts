@@ -30,6 +30,7 @@ export {
   GetEventsExecutor,
   SendEmailExecutor,
   CreateEventExecutor,
+  GenerateExecutiveBriefExecutor,
 } from "./tool-executor.ts";
 export type {
   SearchEmailsInput,
@@ -40,4 +41,7 @@ export type {
   SendEmailOutput,
   CreateEventInput,
   CreateEventOutput,
+  GenerateExecutiveBriefInput,
+  GenerateExecutiveBriefOutput,
 } from "./tool-executor.ts";
+

@@ -21,7 +21,26 @@ export async function sendChat(
   try {
     const completion = await deepseek.chat.completions.create({
       model: DEEPSEEK_CHAT_MODEL,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: messages.map((m) => {
+        if (m.role === "assistant") {
+          return {
+            role: "assistant" as const,
+            content: m.content || null,
+            tool_calls: m.tool_calls,
+          };
+        }
+        if (m.role === "tool") {
+          return {
+            role: "tool" as const,
+            tool_call_id: m.tool_call_id!,
+            content: m.content || "",
+          };
+        }
+        return {
+          role: m.role as "system" | "user",
+          content: m.content || "",
+        };
+      }) as any,
       stream: false,
     });
 
@@ -53,7 +72,26 @@ export async function* streamChat(
   try {
     const stream = await deepseek.chat.completions.create({
       model: DEEPSEEK_CHAT_MODEL,
-      messages: messages.map((m) => ({ role: m.role, content: m.content })),
+      messages: messages.map((m) => {
+        if (m.role === "assistant") {
+          return {
+            role: "assistant" as const,
+            content: m.content || null,
+            tool_calls: m.tool_calls,
+          };
+        }
+        if (m.role === "tool") {
+          return {
+            role: "tool" as const,
+            tool_call_id: m.tool_call_id!,
+            content: m.content || "",
+          };
+        }
+        return {
+          role: m.role as "system" | "user",
+          content: m.content || "",
+        };
+      }) as any,
       stream: true,
     });
 

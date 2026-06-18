@@ -3,6 +3,8 @@ import { CorsairSearchEmailsExecutor, CorsairSendEmailExecutor } from "./gmail";
 import type { SearchEmailsInput, SendEmailInput } from "./gmail";
 import { CorsairGetEventsExecutor, CorsairCreateEventExecutor } from "./calendar";
 import type { GetEventsInput, CreateEventInput } from "./calendar";
+import { CorsairGenerateBriefExecutor } from "./brief";
+import type { GenerateExecutiveBriefInput } from "./brief";
 
 /**
  * Register production (Corsair-backed) executors into the ToolRegistry.
@@ -12,17 +14,19 @@ import type { GetEventsInput, CreateEventInput } from "./calendar";
  *
  * Call once at module load time in the API route.
  *
- * All 4 tools are wired to Corsair:
+ * All 5 tools are wired to Corsair:
  * - searchEmails → CorsairSearchEmailsExecutor
  * - sendEmail    → CorsairSendEmailExecutor
  * - getEvents    → CorsairGetEventsExecutor
  * - createEvent  → CorsairCreateEventExecutor
+ * - generateExecutiveBrief → CorsairGenerateBriefExecutor
  */
 export function registerProductionExecutors(registry: ToolRegistry): void {
   const searchExec = new CorsairSearchEmailsExecutor();
   const sendExec = new CorsairSendEmailExecutor();
   const eventsExec = new CorsairGetEventsExecutor();
   const createExec = new CorsairCreateEventExecutor();
+  const briefExec = new CorsairGenerateBriefExecutor();
 
   // Replace searchEmails with Corsair-backed executor
   const searchDef = registry.get("searchEmails");
@@ -75,4 +79,18 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
   } else {
     console.warn("[registerProductionExecutors] ⚠️ createEvent NOT found in registry — mock still active");
   }
+
+  // Replace generateExecutiveBrief with Corsair-backed executor
+  const briefDef = registry.get("generateExecutiveBrief");
+  if (briefDef) {
+    registry.register({
+      ...briefDef,
+      execute: (args, ctx) =>
+        briefExec.execute(args as GenerateExecutiveBriefInput, ctx as ToolExecutionContext),
+    });
+    console.log("[registerProductionExecutors] ✅ generateExecutiveBrief replaced with Corsair executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ generateExecutiveBrief NOT found in registry — mock still active");
+  }
 }
+

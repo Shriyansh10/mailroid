@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db } from "@repo/database";
+import { db, eq } from "@repo/database";
+import { conversations, assistantMessages } from "@repo/database/schema";
 import {
   ChatRequestSchema,
   ToolRegistry,
@@ -29,17 +30,6 @@ const orchestrator = new ToolOrchestrator(registry, permissions, audit, approval
 
 /**
  * POST /api/chat
- *
- * Accepts a JSON body with { messages: [{ role, content }] } and returns
- * the DeepSeek assistant response.
- *
- * Tool calling is enabled: the agent loop runs DeepSeek with the full tool
- * registry, executes tool calls through the orchestrator (permission checks,
- * audit logging), and feeds results back until DeepSeek produces a final
- * text response.
- *
- * Auth: reads the Better Auth session cookie from the incoming request.
- * Returns 401 if no valid session is found.
  */
 export async function POST(request: Request) {
   const start = Date.now();
@@ -77,7 +67,7 @@ export async function POST(request: Request) {
       .reverse()
       .find((m) => m.role === "user");
     if (lastUserMessage) {
-      const injectionMatches = detectPromptInjection(lastUserMessage.content);
+      const injectionMatches = detectPromptInjection(lastUserMessage.content || "");
       if (injectionMatches.length > 0) {
         console.log(
           `[SECURITY] ${AuditEventType.POLICY_BYPASS_ATTEMPT} | ` +
@@ -88,8 +78,36 @@ export async function POST(request: Request) {
       }
     }
 
+    // ── Ensure conversation exists ─────────────────────────────────
+    let conversationId = parsed.data.conversationId;
+    if (!conversationId) {
+      const userText = lastUserMessage?.content || "New Chat";
+      const title = userText.length > 60 ? userText.slice(0, 57) + "..." : userText;
+
+      const [newConv] = await db
+        .insert(conversations)
+        .values({
+          userId,
+          title,
+        })
+        .returning({ id: conversations.id });
+      if (!newConv) {
+        throw new Error("Failed to create conversation");
+      }
+      conversationId = newConv.id;
+    }
+
+    // ── Persist incoming user prompt ──────────────────────────────
+    if (lastUserMessage) {
+      await db.insert(assistantMessages).values({
+        conversationId,
+        role: "user",
+        content: lastUserMessage.content || "",
+      });
+    }
+
     // ── Run agent loop (DeepSeek + tool calling) ───────────────────
-    const response = await runAgentLoop({
+    const { response, newMessages } = await runAgentLoop({
       messages: parsed.data.messages,
       registry,
       execute: (name, args) =>
@@ -102,6 +120,37 @@ export async function POST(request: Request) {
       response.content = await beautifyResponse(response.content);
     }
 
+    // Update the content of the assistant message in newMessages if it was beautified
+    const finalAssistantMsg = [...newMessages].reverse().find((m) => m.role === "assistant");
+    if (finalAssistantMsg && !("approvalRequired" in response)) {
+      finalAssistantMsg.content = response.content;
+    }
+
+    // ── Persist all generated loop messages in bulk ────────────────
+    if (newMessages.length > 0) {
+      await db.insert(assistantMessages).values(
+        newMessages.map((m) => ({
+          conversationId,
+          role: m.role,
+          content: m.content,
+          toolCalls: m.toolCalls,
+          toolCallId: m.toolCallId,
+        }))
+      );
+    }
+
+    // ── Update conversation preview and updatedAt ──────────────────
+    const previewContent = response.content || "";
+    const lastMessagePreview = previewContent.length > 100 ? previewContent.slice(0, 97) + "..." : previewContent;
+
+    await db
+      .update(conversations)
+      .set({
+        lastMessagePreview,
+        updatedAt: new Date(),
+      })
+      .where(eq(conversations.id, conversationId));
+
     console.log("[api:chat:success]", {
       durationMs: Date.now() - start,
       messageCount: parsed.data.messages.length,
@@ -109,7 +158,11 @@ export async function POST(request: Request) {
       approvalRequired: "approvalRequired" in response ? response.approvalRequired.toolName : undefined,
     });
 
-    return NextResponse.json(response);
+    return NextResponse.json({
+      ...response,
+      conversationId,
+      newMessages,
+    });
   } catch (error) {
     console.error("[api:chat:error]", {
       durationMs: Date.now() - start,

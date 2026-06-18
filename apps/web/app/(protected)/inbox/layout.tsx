@@ -127,6 +127,16 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           </button>
         ))}
 
+        <button
+          onClick={() => navigateTo({ category: "PRIORITY", q: undefined })}
+          className={`flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-semibold transition-colors mt-1 ${
+            category === "PRIORITY" ? "bg-accent text-foreground" : "hover:bg-accent/50 text-muted-foreground"
+          }`}
+        >
+          <SparklesIcon className="size-4 text-indigo-500" />
+          <span className="flex-1 text-left">Priority</span>
+        </button>
+
         <div className="mt-3 mb-1 border-t" />
 
         <button

@@ -3,8 +3,10 @@ import { z } from "zod";
 // ── Chat message ─────────────────────────────────────────────────────
 
 export const ChatMessageSchema = z.object({
-  role: z.enum(["system", "user", "assistant"]),
-  content: z.string().min(1),
+  role: z.enum(["system", "user", "assistant", "tool"]),
+  content: z.string().nullable().optional(),
+  tool_calls: z.array(z.any()).optional(),
+  tool_call_id: z.string().optional(),
 });
 
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
@@ -13,6 +15,7 @@ export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 
 export const ChatRequestSchema = z.object({
   messages: z.array(ChatMessageSchema).min(1),
+  conversationId: z.string().optional().nullable(),
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;

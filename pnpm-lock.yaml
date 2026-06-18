@@ -488,6 +488,9 @@ importers:
 
   packages/inngest:
     dependencies:
+      '@repo/ai':
+        specifier: workspace:*
+        version: link:../ai
       '@repo/database':
         specifier: workspace:*
         version: link:../database

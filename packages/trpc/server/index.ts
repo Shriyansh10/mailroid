@@ -5,12 +5,14 @@ import { healthRouter } from "./routes/health/route.js";
 import { authRouter } from "./routes/tenant/route.js";
 import { gmailRouter } from "./routes/gmail/route.js";
 import { calendarRouter } from "./routes/calendar/route.js";
+import { assistantRouter } from "./routes/assistant/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
   auth: authRouter,
   gmail: gmailRouter,
   calendar: calendarRouter,
+  assistant: assistantRouter,
 });
 
 export { createContext } from "./context.js";

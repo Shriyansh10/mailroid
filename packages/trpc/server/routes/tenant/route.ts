@@ -25,17 +25,8 @@ export const authRouter = router({
     .output(z.any())
     .query(async ({ ctx }) => {
         const tenant = corsair.withTenant(ctx.user.id);
-        const messages = await tenant.gmail.db.messages.list();
-        console.log("GMAIL MESSAGES:", messages[10]);
-        if (messages.messages?.[1]?.threadId) {
-          const message = await tenant.gmail.db.messages.get({
-            userId: "me",
-            id: messages.messages[1].threadId,
-            format: "full",
-          });
-          console.log(message);
-        }
-        return messages;
+        const result = await tenant.gmail.api.messages.list({ maxResults: 10 });
+        return result;
     }),
 
     createTenant: protectedProcedure

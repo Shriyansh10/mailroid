@@ -6,6 +6,7 @@ import { db, eq } from "@repo/database";
 import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
 import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
+import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
     const { userId: parseduserId } = await ensureTenantInput.parseAsync({ userId });
@@ -182,13 +183,34 @@ export async function storeCalendarConnectedEmail(userId: string): Promise<strin
   console.log("[storeCalendarConnectedEmail] START userId:", userId);
   try {
     const tenant = corsair.withTenant(userId);
-    const calendarList = await (tenant.googlecalendar.api as any).calendarList.list();
-    console.log("[storeCalendarConnectedEmail] list:", JSON.stringify(calendarList));
 
-    const primaryCalendar = calendarList.items?.find(
-      (c: { primary?: boolean; id?: string }) => c.primary,
-    );
-    const email = primaryCalendar?.id ?? null;
+    // Call a dummy method first to trigger token refresh if needed
+    try {
+      await tenant.googlecalendar.api.events.getMany({ maxResults: 1 });
+    } catch (e) {
+      console.warn("[storeCalendarConnectedEmail] Token refresh dummy call warning:", e);
+    }
+
+    const accessToken = await tenant.googlecalendar.keys.get_access_token();
+    if (!accessToken) {
+      console.error("[storeCalendarConnectedEmail] ❌ No access token available");
+      return null;
+    }
+
+    const response = await fetch("https://www.googleapis.com/calendar/v3/calendars/primary", {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      console.error("[storeCalendarConnectedEmail] ❌ Failed to fetch primary calendar:", errorText);
+      return null;
+    }
+
+    const primaryCalendar = await response.json() as { id?: string };
+    const email = primaryCalendar.id ?? null;
 
     if (!email) {
       console.log("[storeCalendarConnectedEmail] ❌ no primary calendar found");
@@ -201,6 +223,14 @@ export async function storeCalendarConnectedEmail(userId: string): Promise<strin
       .onConflictDoUpdate({
         target: corsairConnectionEmails.userId,
         set: { calendarEmail: email, updatedAt: new Date() },
+      });
+
+    await db
+      .insert(calendarTenantMappings)
+      .values({ emailAddress: email, tenantId: userId })
+      .onConflictDoUpdate({
+        target: calendarTenantMappings.emailAddress,
+        set: { tenantId: userId, updatedAt: new Date() },
       });
 
     console.log("[storeCalendarConnectedEmail] ✅ stored:", email);

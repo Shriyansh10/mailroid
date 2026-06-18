@@ -9,6 +9,7 @@
     ".": "./src/index.ts"
   },
   "dependencies": {
+    "@repo/ai": "workspace:*",
     "@repo/database": "workspace:*",
     "inngest": "^3.22.12",
     "dotenv": "^17.2.3",

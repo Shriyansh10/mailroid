@@ -196,10 +196,17 @@ newMessages += messageIds.length;
   const sq = db
   .select({
     entityId: messageMetadata.entityId,
+    threadId: messageMetadata.threadId,
     receivedAt: messageMetadata.receivedAt,
     sender: messageMetadata.sender,
     subject: messageMetadata.subject,
     snippet: messageMetadata.snippet,
+    priority: messageMetadata.priority,
+    priorityScore: messageMetadata.priorityScore,
+    priorityReason: messageMetadata.priorityReason,
+    isActionRequired: messageMetadata.isActionRequired,
+    isReplyNeeded: messageMetadata.isReplyNeeded,
+    isUnread: messageMetadata.isUnread,
     rn: sql<number>`
       ROW_NUMBER() OVER(
         PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -219,10 +226,17 @@ newMessages += messageIds.length;
   const rows = await db
   .select({
     entityId: sq.entityId,
+    threadId: sq.threadId,
     receivedAt: sq.receivedAt,
     sender: sq.sender,
     subject: sq.subject,
     snippet: sq.snippet,
+    priority: sq.priority,
+    priorityScore: sq.priorityScore,
+    priorityReason: sq.priorityReason,
+    isActionRequired: sq.isActionRequired,
+    isReplyNeeded: sq.isReplyNeeded,
+    isUnread: sq.isUnread,
   })
   .from(sq)
   .where(eq(sq.rn, 1))
@@ -233,11 +247,17 @@ newMessages += messageIds.length;
   console.log("🤦DB PAGE QUERY DONE", Date.now());
 
   const validResults: ThreadSummary[] = rows.map((row) => ({
-  threadId: row.entityId,
+  threadId: row.threadId || row.entityId,
   sender: row.sender ?? "",
   subject: row.subject ?? "(no subject)",
   date: row.receivedAt?.toISOString() ?? "",
   snippet: row.snippet ?? "",
+  priority: row.priority ?? "MEDIUM",
+  priorityScore: row.priorityScore,
+  priorityReason: row.priorityReason,
+  isActionRequired: row.isActionRequired,
+  isReplyNeeded: row.isReplyNeeded,
+  isUnread: row.isUnread,
 }));
 
 logger.info("[SERVICE]", "getEmailsByCategory completed", {
@@ -306,5 +326,133 @@ export async function getCategoryCounts(
     durationMs: Date.now() - start,
   });
 
+  return counts;
+}
+
+export async function getPriorityEmails(
+  userId: string,
+  opts?: {
+    priorities?: string[];
+    days?: number;
+    unreadOnly?: boolean;
+    maxResults?: number;
+    page?: number;
+  }
+): Promise<{ threads: ThreadSummary[] }> {
+  const priorities = opts?.priorities ?? ["HIGH"];
+  const days = opts?.days ?? 7;
+  const unreadOnly = opts?.unreadOnly ?? false;
+  const limit = opts?.maxResults ?? 50;
+  const page = opts?.page ?? 0;
+  const offset = page * limit;
+
+  const thresholdDate = new Date();
+  thresholdDate.setDate(thresholdDate.getDate() - days);
+
+  const filters = [
+    eq(messageMetadata.userId, userId),
+    inArray(messageMetadata.priority, priorities as any[]),
+    sql`${messageMetadata.receivedAt} >= ${thresholdDate}`,
+  ];
+
+  if (unreadOnly) {
+    filters.push(eq(messageMetadata.isUnread, true));
+  }
+
+  const sq = db
+    .select({
+      entityId: messageMetadata.entityId,
+      threadId: messageMetadata.threadId,
+      receivedAt: messageMetadata.receivedAt,
+      sender: messageMetadata.sender,
+      subject: messageMetadata.subject,
+      snippet: messageMetadata.snippet,
+      priority: messageMetadata.priority,
+      priorityScore: messageMetadata.priorityScore,
+      priorityReason: messageMetadata.priorityReason,
+      isActionRequired: messageMetadata.isActionRequired,
+      isReplyNeeded: messageMetadata.isReplyNeeded,
+      isUnread: messageMetadata.isUnread,
+      rn: sql<number>`
+        ROW_NUMBER() OVER(
+          PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
+          ORDER BY ${messageMetadata.receivedAt} DESC
+        )
+      `.as("rn"),
+    })
+    .from(messageMetadata)
+    .where(and(...filters))
+    .as("sq");
+
+  const rows = await db
+    .select({
+      entityId: sq.entityId,
+      threadId: sq.threadId,
+      receivedAt: sq.receivedAt,
+      sender: sq.sender,
+      subject: sq.subject,
+      snippet: sq.snippet,
+      priority: sq.priority,
+      priorityScore: sq.priorityScore,
+      priorityReason: sq.priorityReason,
+      isActionRequired: sq.isActionRequired,
+      isReplyNeeded: sq.isReplyNeeded,
+      isUnread: sq.isUnread,
+    })
+    .from(sq)
+    .where(eq(sq.rn, 1))
+    .orderBy(
+      desc(sq.isUnread),
+      sql`${sq.priorityScore} DESC NULLS LAST`,
+      desc(sq.receivedAt)
+    )
+    .offset(offset)
+    .limit(limit);
+
+  const threads: ThreadSummary[] = rows.map((row) => ({
+    threadId: row.threadId || row.entityId,
+    sender: row.sender ?? "",
+    subject: row.subject ?? "(no subject)",
+    date: row.receivedAt?.toISOString() ?? "",
+    snippet: row.snippet ?? "",
+    priority: row.priority ?? "MEDIUM",
+    priorityScore: row.priorityScore,
+    priorityReason: row.priorityReason,
+    isActionRequired: row.isActionRequired,
+    isReplyNeeded: row.isReplyNeeded,
+    isUnread: row.isUnread,
+  }));
+
+  return { threads };
+}
+
+export async function getPriorityCounts(
+  userId: string,
+  days: number = 7
+): Promise<{ HIGH: number; MEDIUM: number; LOW: number; ALL: number }> {
+  const thresholdDate = new Date();
+  thresholdDate.setDate(thresholdDate.getDate() - days);
+
+  const rows = await db
+    .select({
+      priority: messageMetadata.priority,
+      count: sql<number>`count(distinct coalesce(${messageMetadata.threadId}, ${messageMetadata.entityId}))`,
+    })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        sql`${messageMetadata.receivedAt} >= ${thresholdDate}`
+      )
+    )
+    .groupBy(messageMetadata.priority);
+
+  const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, ALL: 0 };
+  for (const row of rows) {
+    if (row.priority === "HIGH") counts.HIGH = Number(row.count);
+    else if (row.priority === "MEDIUM") counts.MEDIUM = Number(row.count);
+    else if (row.priority === "LOW") counts.LOW = Number(row.count);
+  }
+  counts.ALL = counts.HIGH + counts.MEDIUM + counts.LOW;
   return counts;
 }

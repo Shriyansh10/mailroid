@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db } from "@repo/database";
+import { db, eq } from "@repo/database";
+import { conversations, assistantMessages } from "@repo/database/schema";
 import {
   ToolRegistry,
   PermissionService,
@@ -27,16 +28,6 @@ const orchestrator = new ToolOrchestrator(registry, permissions, audit, approval
 
 /**
  * POST /api/approvals/approve
- *
- * Body: { approvalId: string, messages?: ChatMessage[] }
- *
- * Flow:
- *   1. Load pending approval from DB
- *   2. Mark APPROVED
- *   3. Execute tool via orchestrator
- *   4. Mark EXECUTED
- *   5. Resume conversation: push tool_call + tool_result → DeepSeek final
- *   6. Return ChatResponse
  */
 export async function POST(request: Request) {
   try {
@@ -52,6 +43,7 @@ export async function POST(request: Request) {
       approvalId: string;
       messages?: { role: string; content: string }[];
       reasoningContent?: string | null;
+      conversationId?: string | null;
     };
     try {
       body = await request.json();
@@ -99,6 +91,21 @@ export async function POST(request: Request) {
       requestId,
       true, // skipPermissionCheck — approval already granted
     );
+
+    const conversationId = body.conversationId;
+    const newMessagesToInsert: any[] = [];
+
+    // Persist the executed tool's result to assistant_messages
+    if (conversationId) {
+      newMessagesToInsert.push({
+        conversationId,
+        role: "tool",
+        toolCallId: approval.toolCallId,
+        content: result.status === "success"
+          ? JSON.stringify(result.data)
+          : JSON.stringify({ error: result.error ?? "Tool execution failed" }),
+      });
+    }
 
     // ── Resume conversation if messages provided ────────────────────
     let finalContent = `Tool "${approval.toolName}" executed: ${result.status}`;
@@ -155,6 +162,19 @@ export async function POST(request: Request) {
 
         // If DeepSeek wants to call another tool (e.g. sendEmail), execute it
         if (msg?.tool_calls?.length > 0) {
+          if (conversationId) {
+            newMessagesToInsert.push({
+              conversationId,
+              role: "assistant",
+              content: msg.content ?? null,
+              toolCalls: msg.tool_calls.map((tc: any) => ({
+                id: tc.id,
+                type: "function",
+                function: tc.function,
+              })),
+            });
+          }
+
           const results: string[] = [];
 
           for (const tc of msg.tool_calls) {
@@ -178,6 +198,17 @@ export async function POST(request: Request) {
               results.push(`✅ ${fn.name} completed successfully.`);
             } else {
               results.push(`❌ ${fn.name} failed: ${toolResult.error ?? "unknown error"}`);
+            }
+
+            if (conversationId) {
+              newMessagesToInsert.push({
+                conversationId,
+                role: "tool",
+                toolCallId: tc.id,
+                content: toolResult.status === "success"
+                  ? JSON.stringify(toolResult.data)
+                  : JSON.stringify({ error: toolResult.error }),
+              });
             }
 
             // Push tool result into conversation for final DeepSeek summary
@@ -205,18 +236,56 @@ export async function POST(request: Request) {
 
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             finalContent = (summary as any).choices[0]?.message?.content ?? results.join("\n");
+            
+            if (conversationId) {
+              newMessagesToInsert.push({
+                conversationId,
+                role: "assistant",
+                content: finalContent,
+              });
+            }
           } catch {
             finalContent = results.join("\n");
+            if (conversationId) {
+              newMessagesToInsert.push({
+                conversationId,
+                role: "assistant",
+                content: finalContent,
+              });
+            }
           }
         } else {
           finalContent = msg?.content ?? finalContent;
+          if (conversationId && msg) {
+            newMessagesToInsert.push({
+              conversationId,
+              role: "assistant",
+              content: msg.content ?? null,
+              toolCalls: msg.tool_calls || null,
+            });
+          }
         }
       } catch (err) {
         console.warn("[api:approvals:approve:resume-failed]", {
           error: err instanceof Error ? err.message : String(err),
         });
-        // Tool already executed — don't fail the request, just use the summary
       }
+    }
+
+    // ── Bulk insert newMessagesToInsert ──────────────────────────────
+    if (conversationId && newMessagesToInsert.length > 0) {
+      await db.insert(assistantMessages).values(newMessagesToInsert);
+
+      const previewText = finalContent || "";
+      const lastMessagePreview = previewText.length > 100 ? previewText.slice(0, 97) + "..." : previewText;
+
+      await db
+        .update(conversations)
+        .set({
+          lastMessagePreview,
+          updatedAt: new Date(),
+        })
+        .where(eq(conversations.id, conversationId));
     }
 
     // ── Mark EXECUTED (after DeepSeek call to avoid losing state on error) ──
@@ -225,7 +294,11 @@ export async function POST(request: Request) {
       executedAt: new Date(),
     });
 
-    return NextResponse.json({ role: "assistant", content: finalContent });
+    return NextResponse.json({
+      role: "assistant",
+      content: finalContent,
+      newMessages: newMessagesToInsert,
+    });
   } catch (error) {
     console.error("[api:approvals:approve:error]", {
       error: error instanceof Error ? error.message : String(error),
