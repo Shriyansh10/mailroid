@@ -1,0 +1,60 @@
+# Build context is the repo ROOT (docker build -f Dockerfile.web .), not apps/web,
+# because turbo prune needs to see the whole workspace to compute the subset
+# web actually depends on.
+
+FROM node:24-alpine AS base
+RUN corepack enable
+# pnpm's global bin dir isn't on PATH by default in this image, which breaks
+# `pnpm add -g turbo` below with "configured global bin directory is not in PATH"
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+# ---- pruner: cut the monorepo down to just what web needs ----
+FROM base AS pruner
+WORKDIR /app
+# turbo isn't a repo dependency yet at this point, so install it globally just
+# to run the prune command
+RUN pnpm add -g turbo
+COPY . .
+# --docker splits the output into out/json (manifests + lockfile only) and
+# out/full (pruned source), so the next stage can install deps in a layer
+# that's cached independently of source code changes
+RUN turbo prune web --docker
+
+# ---- installer: pnpm install against the pruned workspace, then build ----
+FROM base AS installer
+WORKDIR /app
+COPY --from=pruner /app/out/json/ .
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+
+# NEXT_PUBLIC_* vars are inlined into the client bundle at build time, unlike
+# the API's env vars which are read at runtime — so they must be passed as
+# build args (docker build --build-arg NEXT_PUBLIC_API_URL=... -f Dockerfile.web .)
+ARG NEXT_PUBLIC_API_URL
+ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
+# server-side env vars are only used for schema validation at build time here,
+# not for real values, so skip strict validation rather than requiring secrets
+# in the build context
+ENV SKIP_ENV_VALIDATION=1
+
+# builds packages/* first (turbo's ^build dependency graph), then web
+RUN pnpm turbo build --filter=web
+
+# ---- runner: slim final image using Next's standalone output ----
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 webuser
+
+# next.config.js has output: "standalone", so .next/standalone already
+# contains a minimal node_modules + server.js with no need for the full
+# workspace install
+COPY --from=installer /app/apps/web/.next/standalone ./
+COPY --from=installer /app/apps/web/.next/static ./apps/web/.next/static
+COPY --from=installer /app/apps/web/public ./apps/web/public
+
+USER webuser
+WORKDIR /app/apps/web
+EXPOSE 3000
+CMD ["node", "server.js"]

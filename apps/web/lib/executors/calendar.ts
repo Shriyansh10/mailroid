@@ -51,10 +51,14 @@ export class CorsairGetEventsExecutor
         Date.now() + 30 * 24 * 60 * 60 * 1000,
       ).toISOString();
 
-      const result = await corsairGetEvents(ctx.userId, {
-        timeMin: args.timeMin ?? now,
-        timeMax: args.timeMax ?? thirtyDaysLater,
-      });
+      const result = await corsairGetEvents(
+        ctx.userId,
+        {
+          timeMin: args.timeMin ?? now,
+          timeMax: args.timeMax ?? thirtyDaysLater,
+        },
+        (ctx as any).userTimeZone,
+      );
 
       const events = result.slice(0, MAX_EVENT_RESULTS).map((ev) => ({
         id: ev.id,

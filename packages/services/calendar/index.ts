@@ -86,6 +86,49 @@ export function buildEventTime(
 }
 
 /**
+ * Google Calendar's events.list requires timeMin/timeMax as full RFC3339
+ * timestamps with a timezone offset. The AI assistant sometimes generates
+ * offset-less local times (e.g. "2026-07-07T00:00:00"), which Google
+ * rejects with a 400 Bad Request. Treat any offset-less string as wall-clock
+ * time in the given IANA timezone and convert it to a proper UTC instant.
+ */
+export function normalizeToUtcTimestamp(isoString: string, timeZone?: string): string {
+  const hasOffset = /(?:Z|[+-]\d{2}:\d{2})$/.test(isoString);
+  if (hasOffset) return isoString;
+  if (!timeZone) return `${isoString}Z`;
+
+  const asIfUtc = new Date(`${isoString}Z`);
+  if (Number.isNaN(asIfUtc.getTime())) return `${isoString}Z`;
+
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  });
+  const parts = dtf.formatToParts(asIfUtc).reduce<Record<string, string>>((acc, p) => {
+    acc[p.type] = p.value;
+    return acc;
+  }, {});
+
+  const asZonedWallClock = Date.UTC(
+    Number(parts.year),
+    Number(parts.month) - 1,
+    Number(parts.day),
+    Number(parts.hour),
+    Number(parts.minute),
+    Number(parts.second),
+  );
+  const offsetMs = asZonedWallClock - asIfUtc.getTime();
+
+  return new Date(asIfUtc.getTime() - offsetMs).toISOString();
+}
+
+/**
  * Resolve the timezone to use for calendar events.
  * Priority: Google Calendar Canonical settings -> Fallback user browser timezone -> Fallback UTC.
  */
@@ -118,13 +161,14 @@ export async function resolveTimezone(tenantId: string, userTimeZone?: string): 
  */
 export async function getEvents(
   tenantId: string,
-  input: GetEventsInput
+  input: GetEventsInput,
+  userTimeZone?: string
 ): Promise<CalendarEvent[]> {
   const tenant = corsair.withTenant(tenantId);
 
   const result = await tenant.googlecalendar.api.events.getMany({
-    timeMin: input.timeMin,
-    timeMax: input.timeMax,
+    timeMin: normalizeToUtcTimestamp(input.timeMin, userTimeZone),
+    timeMax: normalizeToUtcTimestamp(input.timeMax, userTimeZone),
     singleEvents: true,
     orderBy: "startTime",
     maxResults: 250,

@@ -1,0 +1,51 @@
+# Build context is the repo ROOT (docker build -f Dockerfile.api .), not apps/api,
+# because turbo prune needs to see the whole workspace to compute the subset
+# apps/api actually depends on.
+
+FROM node:24-alpine AS base
+RUN corepack enable
+# pnpm's global bin dir isn't on PATH by default in this image, which breaks
+# `pnpm add -g turbo` below with "configured global bin directory is not in PATH"
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+# ---- pruner: cut the monorepo down to just what @repo/api needs ----
+FROM base AS pruner
+WORKDIR /app
+# turbo isn't a repo dependency yet at this point, so install it globally just
+# to run the prune command
+RUN pnpm add -g turbo
+COPY . .
+# --docker splits the output into out/json (manifests + lockfile only) and
+# out/full (pruned source), so the next stage can install deps in a layer
+# that's cached independently of source code changes
+RUN turbo prune @repo/api --docker
+
+# ---- installer: pnpm install against the pruned workspace, then build ----
+FROM base AS installer
+WORKDIR /app
+COPY --from=pruner /app/out/json/ .
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+# builds packages/* first (turbo's ^build dependency graph), then @repo/api,
+# same order as running it locally
+RUN pnpm turbo build --filter=@repo/api
+
+# ---- runner: slim final image ----
+FROM base AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 apiuser
+
+# apps/api/tsup.config.ts bundles all @repo/* workspace packages directly into
+# dist/index.cjs (noExternal: [/^@repo\//]), so only third-party deps in
+# node_modules need to exist here — packages/* is not required at runtime
+COPY --from=installer /app/node_modules ./node_modules
+COPY --from=installer /app/apps/api/dist ./apps/api/dist
+COPY --from=installer /app/apps/api/package.json ./apps/api/package.json
+COPY --from=installer /app/apps/api/node_modules ./apps/api/node_modules
+
+USER apiuser
+WORKDIR /app/apps/api
+EXPOSE 8000
+CMD ["node", "dist/index.cjs"]

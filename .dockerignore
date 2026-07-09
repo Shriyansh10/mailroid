@@ -1,0 +1,51 @@
+# Dependencies
+node_modules
+**/node_modules
+
+# Local env files
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Testing
+coverage
+
+# Turbo
+.turbo
+**/.turbo
+
+# Build outputs
+.next/
+out/
+build
+dist
+**/.next/
+**/out/
+**/build
+**/dist
+
+# Git
+.git
+.gitignore
+
+# Docker
+Dockerfile.*
+.dockerignore
+
+# CI/CD
+.github
+
+# Editor/OS
+.vscode
+.DS_Store
+
+# Debug logs
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Misc
+*.zip
+*.txt
+graphify-out

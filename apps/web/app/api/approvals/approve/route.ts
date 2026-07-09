@@ -197,22 +197,16 @@ export async function POST(request: Request) {
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const msg = (completion as any).choices[0]?.message;
 
-        // If DeepSeek wants to call another tool (e.g. sendEmail), execute it
+        // If DeepSeek wants to call another tool (e.g. sendEmail), execute it.
+        // Only tool calls actually attempted are persisted below — if one of
+        // them needs its own approval (e.g. createEvent is DANGEROUS), we
+        // stop there rather than force-executing it, so a second approval
+        // card can be surfaced instead of silently bypassing consent.
         if (msg?.tool_calls?.length > 0) {
-          if (conversationId) {
-            newMessagesToInsert.push({
-              conversationId,
-              role: "assistant",
-              content: msg.content ?? null,
-              toolCalls: msg.tool_calls.map((tc: any) => ({
-                id: tc.id,
-                type: "function",
-                function: tc.function,
-              })),
-            });
-          }
-
+          const attemptedToolCalls: any[] = [];
+          const toolResultInserts: any[] = [];
           const results: string[] = [];
+          let approvalNeeded = false;
 
           for (const tc of msg.tool_calls) {
             const fn = tc.function;
@@ -221,6 +215,9 @@ export async function POST(request: Request) {
             let args: Record<string, unknown>;
             try { args = JSON.parse(fn.arguments); } catch { args = {}; }
 
+            // Attach the tool call ID so the orchestrator can store it for approval
+            args._toolCallId = tc.id;
+
             console.log("[api:approvals:resume-tool]", { toolName: fn.name, args });
 
             const toolResult = await orchestrator.executeTool(
@@ -228,10 +225,22 @@ export async function POST(request: Request) {
               args,
               userId,
               crypto.randomUUID(),
-              true, // skip permission — user approved the overall action
+              false, // do NOT skip permission checks — this may be a new dangerous tool needing its own approval
               userTimeZone,
               session.user.email,
             );
+
+            attemptedToolCalls.push({ id: tc.id, type: "function", function: fn });
+
+            if (toolResult.status === "approval_required") {
+              console.log("[api:approvals:resume-tool] approval required for chained call", {
+                toolName: fn.name,
+                approvalId: toolResult.approvalId,
+                toolCallId: tc.id,
+              });
+              approvalNeeded = true;
+              break;
+            }
 
             if (toolResult.status === "success") {
               results.push(`✅ ${fn.name} completed successfully.`);
@@ -240,7 +249,7 @@ export async function POST(request: Request) {
             }
 
             if (conversationId) {
-              newMessagesToInsert.push({
+              toolResultInserts.push({
                 conversationId,
                 role: "tool",
                 toolCallId: tc.id,
@@ -265,32 +274,48 @@ export async function POST(request: Request) {
             });
           }
 
-          // One more DeepSeek call for a final summary (no tools this time)
-          try {
-            const summary = await deepseek.chat.completions.create({
-              model: DEEPSEEK_CHAT_MODEL,
-              messages: conversation,
-              stream: false as const,
-            } as Parameters<typeof deepseek.chat.completions.create>[0]);
+          if (conversationId) {
+            newMessagesToInsert.push({
+              conversationId,
+              role: "assistant",
+              content: msg.content ?? null,
+              toolCalls: attemptedToolCalls,
+            });
+            newMessagesToInsert.push(...toolResultInserts);
+          }
 
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
-            finalContent = (summary as any).choices[0]?.message?.content ?? results.join("\n");
-            
-            if (conversationId) {
-              newMessagesToInsert.push({
-                conversationId,
-                role: "assistant",
-                content: finalContent,
-              });
-            }
-          } catch {
-            finalContent = results.join("\n");
-            if (conversationId) {
-              newMessagesToInsert.push({
-                conversationId,
-                role: "assistant",
-                content: finalContent,
-              });
+          if (approvalNeeded) {
+            // A chained tool call needs its own approval — surface that
+            // instead of summarizing, and stop here (no forced execution).
+            finalContent = msg.content ?? "I'd like to perform another action. Please approve it.";
+          } else {
+            // One more DeepSeek call for a final summary (no tools this time)
+            try {
+              const summary = await deepseek.chat.completions.create({
+                model: DEEPSEEK_CHAT_MODEL,
+                messages: conversation,
+                stream: false as const,
+              } as Parameters<typeof deepseek.chat.completions.create>[0]);
+
+              // eslint-disable-next-line @typescript-eslint/no-explicit-any
+              finalContent = (summary as any).choices[0]?.message?.content ?? results.join("\n");
+
+              if (conversationId) {
+                newMessagesToInsert.push({
+                  conversationId,
+                  role: "assistant",
+                  content: finalContent,
+                });
+              }
+            } catch {
+              finalContent = results.join("\n");
+              if (conversationId) {
+                newMessagesToInsert.push({
+                  conversationId,
+                  role: "assistant",
+                  content: finalContent,
+                });
+              }
             }
           }
         } else {

@@ -1,0 +1,80 @@
+name: Deploy Mailroid
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          # NEXT_PUBLIC_API_URL is inlined into the client bundle at build time,
+          # so it must be your real public API URL here, not localhost
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    needs: build-and-push
+    runs-on: ubuntu-latest
+    steps:
+      - name: Deploy to VPS over SSH
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          script: |
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+
+            docker stop mailroid-api || true
+            docker rm mailroid-api || true
+            docker run -d --restart unless-stopped \
+              -p 8000:8000 \
+              --env-file ~/mailroid/.env \
+              --name mailroid-api \
+              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
+
+            docker stop mailroid-web || true
+            docker rm mailroid-web || true
+            docker run -d --restart unless-stopped \
+              -p 3000:3000 \
+              --env-file ~/mailroid/.env \
+              --name mailroid-web \
+              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+
+            docker image prune -af

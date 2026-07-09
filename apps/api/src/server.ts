@@ -32,14 +32,25 @@ const openApiDocument = generateOpenApiDocument(serverRouter, {
 // if (env.NODE_ENV !== "prod") {
   app.use(
     cors({
+      // FRONTEND_URL covers the actual web app; localhost:PORT is included so
+      // the /docs "Try it" panel (which calls BASE_URL, not FRONTEND_URL) works
+      // when viewed directly against the API's own local origin
       origin: [
         env.FRONTEND_URL,
+        `http://localhost:${env.PORT ?? 8000}`,
       ],
       credentials: true,
     }),
-    
   );
 // }
+
+// better-auth's toNodeHandler needs the raw, unconsumed request stream to
+// build its own Fetch API Request — it must be mounted before express.json()
+// or the body gets drained first, corrupting OAuth state/session handling
+// (this was causing state_mismatch errors on the Google OAuth callback)
+app.use("/api/auth/gmail-callback", gmailOAuthRouter);
+app.use("/api/auth/calendar-callback", calendarOAuthRouter);
+app.use("/api/auth", authHandler);
 
 app.use(express.json());
 
@@ -74,9 +85,6 @@ app.get("/health", (req, res) => {
   return res.json({ message: "Streamyst server is healthy", healthy: true });
 });
 
-app.use("/api/auth/gmail-callback", gmailOAuthRouter);
-app.use("/api/auth/calendar-callback", calendarOAuthRouter);
-app.use("/api/auth", authHandler);
 app.use("/api/calendar", calendarWatchRouter);
 
 // Inngest serve endpoint

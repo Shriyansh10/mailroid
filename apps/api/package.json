@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "start": "node dist/index.js",
+    "start": "node dist/index.cjs",
     "dev": "dotenv -- node --import tsx --watch ./src/index.ts",
     "build": "tsup",
     "lint": "eslint src/*"
@@ -32,7 +32,7 @@
     "@trpc/server": "^11.8.1",
     "better-auth": "^1.6.16",
     "cors": "^2.8.5",
-    "corsair": "0.1.76",
+    "corsair": "0.1.74",
     "express": "^5.2.1",
     "inngest": "^3.22.12",
     "trpc-to-openapi": "^3.1.0",

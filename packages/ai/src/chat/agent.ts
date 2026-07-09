@@ -242,33 +242,16 @@ export async function runAgentLoop(
       );
       console.log("[agent:tool-calls]", { iteration, count: msg.tool_calls.length, names: toolNames });
 
-      const assistantMsg: AgentLoopNewMessage = {
-        role: "assistant",
-        content: msg.content ?? null,
-        toolCalls: msg.tool_calls.map(
-          (tc: { id: string; type: string; function?: { name: string; arguments: string } }) => ({
-            id: tc.id,
-            type: "function" as const,
-            function: getFunction(tc),
-          }),
-        ),
-      };
-      newMessages.push(assistantMsg);
+      // Execute tool calls one at a time, stopping at the first one that
+      // requires approval. Only calls actually attempted (executed, or the
+      // one pending approval) are recorded below — any calls after that
+      // point are never attempted and never persisted, so no toolCallId is
+      // ever left dangling without a result. The model naturally re-requests
+      // any dropped calls on its next turn once the pending one is resolved.
+      const attemptedToolCalls: AgentToolCall[] = [];
+      const resultMessages: { toolCallId: string; content: string }[] = [];
+      let approvalResponse: Extract<AgentResponse, { approvalRequired: unknown }> | null = null;
 
-      // Push the assistant message that requested the tools
-      conversation.push({
-        role: "assistant",
-        content: msg.content ?? null,
-        tool_calls: msg.tool_calls.map(
-          (tc: { id: string; type: string; function?: { name: string; arguments: string } }) => ({
-            id: tc.id,
-            type: "function" as const,
-            function: getFunction(tc),
-          }),
-        ),
-      });
-
-      // Execute each tool call in sequence (order may matter)
       for (const tc of msg.tool_calls) {
         const fn = getFunction(tc);
         const toolName = fn.name;
@@ -284,35 +267,35 @@ export async function runAgentLoop(
 
         const result = await execute(toolName, args);
 
-        // ── Security: sanitize tool output before DeepSeek sees it ──
-        const safeResult = {
-          ...result,
-          data: firewall.sanitizeToolOutput(toolName, result.data),
-        };
+        attemptedToolCalls.push({ id: tc.id, type: "function", function: fn });
 
-        // ── Approval required: stop and return to UI ──────────────────
+        // ── Approval required: stop attempting further calls in this batch ──
         if (result.status === "approval_required") {
           console.log("[agent:approval-required]", {
             toolName,
             approvalId: result.approvalId,
             toolCallId: tc.id,
           });
-          return {
-            response: {
-              role: "assistant",
-              content: msg.content ?? `I'd like to ${toolName}. Please approve this action.`,
-              approvalRequired: {
-                approvalId: result.approvalId!,
-                toolName,
-                toolCallId: tc.id,
-                args,
-                preview: result.preview ?? `Run ${toolName}`,
-                reasoningContent: (msg as { reasoning_content?: string | null }).reasoning_content ?? null,
-              },
+          approvalResponse = {
+            role: "assistant",
+            content: msg.content ?? `I'd like to ${toolName}. Please approve this action.`,
+            approvalRequired: {
+              approvalId: result.approvalId!,
+              toolName,
+              toolCallId: tc.id,
+              args,
+              preview: result.preview ?? `Run ${toolName}`,
+              reasoningContent: (msg as { reasoning_content?: string | null }).reasoning_content ?? null,
             },
-            newMessages,
           };
+          break;
         }
+
+        // ── Security: sanitize tool output before DeepSeek sees it ──
+        const safeResult = {
+          ...result,
+          data: firewall.sanitizeToolOutput(toolName, result.data),
+        };
 
         // ── XML framing: separate tool data from conversation ──
         // Prevents email/event content from being interpreted as instructions
@@ -321,18 +304,30 @@ export async function runAgentLoop(
             ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
             : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: safeResult.error ?? `Tool execution failed: ${safeResult.status}` })}\n</tool_error>`;
 
-        newMessages.push({
-          role: "tool",
-          toolCallId: tc.id,
-          content: framedContent,
-        });
+        resultMessages.push({ toolCallId: tc.id, content: framedContent });
+      }
 
-        // Push the framed tool result back into the conversation
-        conversation.push({
-          role: "tool",
-          tool_call_id: tc.id,
-          content: framedContent,
-        });
+      // Push the assistant message with ONLY the tool calls actually attempted
+      const assistantMsg: AgentLoopNewMessage = {
+        role: "assistant",
+        content: msg.content ?? null,
+        toolCalls: attemptedToolCalls,
+      };
+      newMessages.push(assistantMsg);
+      conversation.push({
+        role: "assistant",
+        content: msg.content ?? null,
+        tool_calls: attemptedToolCalls,
+      });
+
+      // Push results for every call that actually completed (in order)
+      for (const r of resultMessages) {
+        newMessages.push({ role: "tool", toolCallId: r.toolCallId, content: r.content });
+        conversation.push({ role: "tool", tool_call_id: r.toolCallId, content: r.content });
+      }
+
+      if (approvalResponse) {
+        return { response: approvalResponse, newMessages };
       }
 
       // Loop again — DeepSeek will process the tool results

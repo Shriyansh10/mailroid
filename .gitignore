@@ -40,3 +40,5 @@ yarn-error.log*
 *.zip
 chatgpt*
 *.txt
+
+graphify*
