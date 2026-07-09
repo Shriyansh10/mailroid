@@ -33,10 +33,20 @@ COPY --from=pruner /app/out/full/ .
 # build args (docker build --build-arg NEXT_PUBLIC_API_URL=... -f Dockerfile.web .)
 ARG NEXT_PUBLIC_API_URL
 ENV NEXT_PUBLIC_API_URL=$NEXT_PUBLIC_API_URL
-# server-side env vars are only used for schema validation at build time here,
-# not for real values, so skip strict validation rather than requiring secrets
-# in the build context
+# apps/web/env.js's own t3-env schema is skipped via SKIP_ENV_VALIDATION, but
+# @repo/database and @web/lib/auth.ts eagerly construct a pg Pool and a
+# betterAuth() instance at module *import* time (not lazily) — and Next's
+# "Collecting page data" build step imports every route module to inspect it,
+# even ones that are fully dynamic at runtime. So these need placeholder
+# values just to satisfy Zod/URL validation during the build; they're never
+# actually used, since the standalone server re-reads real values from
+# process.env fresh at container startup via `docker run --env-file`
 ENV SKIP_ENV_VALIDATION=1
+ENV DATABASE_URL="postgresql://build:build@localhost:5432/build"
+ENV BETTER_AUTH_SECRET="build-time-placeholder-secret"
+ENV BETTER_AUTH_URL="http://localhost:8000"
+ENV GOOGLE_CLIENT_ID="build-time-placeholder"
+ENV GOOGLE_CLIENT_SECRET="build-time-placeholder"
 
 # builds packages/* first (turbo's ^build dependency graph), then web
 RUN pnpm turbo build --filter=web
