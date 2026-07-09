@@ -1,6 +1,6 @@
 import { Router } from "express";
 import { processOAuthCallbackForPlugin, storeGmailConnectedEmail } from "@repo/trpc/services";
-import { syncMailbox } from "@repo/services/gmail/sync-metadata";
+import { triggerGmailSync } from "@repo/services/gmail/sync-metadata";
 import { startGmailWatch } from "@repo/services/gmail/watch.ts";
 
 import { env } from "../env.js";
@@ -33,9 +33,10 @@ gmailOAuthRouter.get("/", async (req, res) => {
     await storeGmailConnectedEmail(result.tenantId);
     await startGmailWatch(result.tenantId);
 
-    // Sync mailbox metadata for all categories so the inbox is immediately populated
-    void syncMailbox(result.tenantId).catch((err) =>
-      console.error("[gmail-oauth] syncMailbox failed:", err),
+    // Kick off the full mailbox sync (durable Inngest job when configured,
+    // in-process fallback otherwise). Fire-and-forget so the redirect is instant.
+    void triggerGmailSync(result.tenantId).catch((err) =>
+      console.error("[gmail-oauth] triggerGmailSync failed:", err),
     );
 
     return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);

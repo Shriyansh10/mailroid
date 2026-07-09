@@ -5,6 +5,7 @@ import { logger } from "@repo/logger";
 
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts } from "@repo/services/gmail/metadata.js";
+import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -143,6 +144,24 @@ export const gmailRouter = router({
         userId: ctx.user!.id, synced: result.synced, durationMs: Date.now() - startMs,
       });
       return result;
+    }),
+
+  // Full, durable re-sync of the CURRENT user's entire mailbox. Enqueues the
+  // resumable Inngest job (or runs in-process if Inngest isn't configured).
+  // Use this to backfill an account that only partially synced.
+  resync: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/resync"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ queued: z.boolean() }))
+    .mutation(async ({ ctx }) => {
+      logger.info("[TRPC] gmail.resync called", { userId: ctx.user!.id });
+      await triggerGmailSync(ctx.user!.id);
+      return { queued: true };
     }),
 
   storedCount: protectedProcedure

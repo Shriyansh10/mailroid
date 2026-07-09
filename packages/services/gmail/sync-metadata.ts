@@ -218,66 +218,102 @@ export async function mapWithConcurrency<T, R>(
   return results;
 }
 
+/**
+ * Syncs a SINGLE page of one category and returns the next page token.
+ *
+ * This is the atomic unit of work for the durable Inngest sync — each call
+ * is wrapped in its own `step.run`, so Inngest checkpoints after every page
+ * and a redeploy resumes from the exact page it left off (via the returned
+ * nextPageToken), rather than restarting the whole mailbox.
+ */
+export async function syncCategoryPage(
+  userId: string,
+  category: string,
+  pageToken?: string,
+): Promise<{ processed: number; nextPageToken?: string }> {
+  const tenant = corsair.withTenant(userId);
+  const gmailQueryTerm = CATEGORY_TO_GMAIL_QUERY[category];
+  const isSent = category === "SENT";
+
+  const result = await withGmailRetry<{
+    threads?: Array<{ id?: string }>;
+    nextPageToken?: string | null;
+  }>(`threads.list ${category}`, () =>
+    tenant.gmail.api.threads.list({
+      maxResults: 100,
+      ...(isSent
+        ? { labelIds: ["SENT"] }
+        : gmailQueryTerm
+          ? { q: `category:${gmailQueryTerm}` }
+          : { labelIds: ["INBOX"] }),
+      pageToken,
+    }),
+  );
+
+  const detailed = await mapWithConcurrency(
+    result.threads ?? [],
+    10,
+    (t: any) =>
+      withGmailRetry(`threads.get ${t.id}`, () =>
+        tenant.gmail.api.threads.get({
+          id: t.id,
+          format: "metadata",
+        }),
+      ),
+  );
+
+  const messageIds = detailed
+    .filter((t): t is NonNullable<typeof t> => Boolean(t))
+    .flatMap((t: any) =>
+      (t.messages ?? [])
+        .map((m: any) => m.id)
+        .filter(Boolean),
+    );
+
+  await processMessages(userId, messageIds);
+
+  return {
+    processed: messageIds.length,
+    nextPageToken: result.nextPageToken ?? undefined,
+  };
+}
+
 export async function syncAllEmails(
   userId: string,
   category: string,
 ): Promise<void> {
-  const tenant = corsair.withTenant(userId);
-
-  const gmailQueryTerm = CATEGORY_TO_GMAIL_QUERY[category];
-  const isSent = category === "SENT";
-
   let pageToken: string | undefined;
 
   do {
-    const result = await withGmailRetry<{
-      threads?: Array<{ id?: string }>;
-      nextPageToken?: string | null;
-    }>(`threads.list ${category}`, () =>
-      tenant.gmail.api.threads.list({
-        maxResults: 100,
-        ...(isSent
-          ? { labelIds: ["SENT"] }
-          : gmailQueryTerm
-            ? { q: `category:${gmailQueryTerm}` }
-            : { labelIds: ["INBOX"] }),
-        pageToken,
-      }),
-    );
-
-    const detailed = await mapWithConcurrency(
-      result.threads ?? [],
-      10,
-      (t: any) =>
-        withGmailRetry(`threads.get ${t.id}`, () =>
-          tenant.gmail.api.threads.get({
-            id: t.id,
-            format: "metadata",
-          }),
-        ),
-    );
-
-    const messageIds = detailed
-      .filter((t): t is NonNullable<typeof t> => Boolean(t))
-      .flatMap((t: any) =>
-        (t.messages ?? [])
-          .map((m: any) => m.id)
-          .filter(Boolean),
-      );
-
-    await processMessages(userId, messageIds);
-
-    pageToken = result.nextPageToken ?? undefined;
-
-    console.log(
-      "SYNC",
+    const { processed, nextPageToken } = await syncCategoryPage(
+      userId,
       category,
-      "processed",
-      messageIds.length,
-      "next",
       pageToken,
     );
+    pageToken = nextPageToken;
+    console.log("SYNC", category, "processed", processed, "next", pageToken);
   } while (pageToken);
+}
+
+/**
+ * Trigger a full-mailbox sync for a user. Prefers the durable, resumable
+ * Inngest job (`gmail/sync.requested`) when Inngest is configured; falls back
+ * to an in-process syncMailbox so the flow still works in dev or before the
+ * INNGEST_* keys are set. This is the single entry point used by the OAuth
+ * callback, the gmail.resync tRPC mutation, and the resync CLI.
+ */
+export async function triggerGmailSync(userId: string): Promise<void> {
+  if (process.env.INNGEST_EVENT_KEY) {
+    const { inngest } = await import("@repo/inngest");
+    await inngest.send({ name: "gmail/sync.requested", data: { userId } });
+    logger.info("[SYNC] enqueued durable gmail sync", { userId });
+    return;
+  }
+  logger.warn(
+    "[SYNC] INNGEST_EVENT_KEY not set — running in-process sync (not durable/resumable)",
+    { userId },
+  );
+  await syncMailbox(userId);
 }
 
 export async function syncMailbox(userId: string) {
