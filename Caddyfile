@@ -1,4 +1,4 @@
-mailroid.shriyansh.xyz {
+mailroid.in {
 	handle /api/* {
 		reverse_proxy mailroid-api:8000
 	}
