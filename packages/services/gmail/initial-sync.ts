@@ -1,6 +1,6 @@
-import { inngest } from "../client.ts";
-import { syncCategoryPage } from "@repo/services/gmail/sync-metadata";
-import { ALL_CATEGORIES } from "@repo/services/gmail/metadata";
+import { inngest } from "@repo/inngest";
+import { syncCategoryPage } from "./sync-metadata.js";
+import { ALL_CATEGORIES } from "./metadata.js";
 
 // Hand off to a fresh function run after this many pages so the memoized
 // step state of a single run stays bounded on very large mailboxes (25k+
@@ -18,6 +18,12 @@ const MAX_PAGES_PER_RUN = 15;
  * current category index + page token, keeping any single run bounded.
  *
  * Re-syncing any account = send `gmail/sync.requested` with that userId.
+ *
+ * NOTE: this lives in @repo/services (not @repo/inngest) because it needs
+ * syncCategoryPage/ALL_CATEGORIES from this package, and @repo/services
+ * already depends on @repo/inngest — defining it here keeps that dependency
+ * one-directional (turbo rejects a @repo/inngest <-> @repo/services cycle).
+ * Same pattern as gmailWatchCron in ./watch-cron.ts.
  */
 export const gmailInitialSync = inngest.createFunction(
   {

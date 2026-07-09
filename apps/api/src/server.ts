@@ -16,8 +16,9 @@ import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 import { handleCorsairWebhook } from "./auth/webhook-handler.js";
 import { serve } from "inngest/express";
-import { inngest, emailPriority, gmailInitialSync } from "@repo/inngest";
+import { inngest, emailPriority } from "@repo/inngest";
 import { gmailWatchCron } from "@repo/services/gmail/watch-cron.js";
+import { gmailInitialSync } from "@repo/services/gmail/initial-sync.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
 

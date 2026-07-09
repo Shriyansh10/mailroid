@@ -10,6 +10,8 @@
     "./gmail/metadata.js": "./gmail/metadata.ts",
     "./gmail/sync-metadata": "./gmail/sync-metadata.ts",
     "./gmail/sync-metadata.js": "./gmail/sync-metadata.ts",
+    "./gmail/initial-sync": "./gmail/initial-sync.ts",
+    "./gmail/initial-sync.js": "./gmail/initial-sync.ts",
     "./gmail/watch.ts": "./gmail/watch.ts",
     "./gmail/watch-cron": "./gmail/watch-cron.ts",
     "./gmail/watch-cron.js": "./gmail/watch-cron.ts",
