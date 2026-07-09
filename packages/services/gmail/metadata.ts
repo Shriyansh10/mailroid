@@ -3,7 +3,8 @@ import { db, eq, and, sql, desc, inArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import type { ThreadSummary } from "./model.ts";
-import { processMessages } from "./sync-metadata.ts";
+import { processMessages, mapWithConcurrency } from "./sync-metadata.ts";
+import { withGmailRetry } from "./retry.ts";
 
 export const ALL_CATEGORIES = [
   "PRIMARY", "PROMOTIONS", "SOCIAL", "UPDATES", "FORUMS", "SENT",
@@ -124,35 +125,46 @@ export async function getEmailsByCategory(
       logger.info("[GMAIL] threads.list call (backfill)", {
         requestId, category, q: q ?? "(labelIds)", batchSize, pageToken: pageToken ?? null,
       });
-      const listResult = await tenant.gmail.api.threads.list({
-        maxResults: batchSize,
-        ...(isSent
-          ? { labelIds: ["SENT"] }
-          : q
-            ? { q }
-            : { labelIds: ["INBOX"] }),
-        pageToken: pageToken ?? undefined,
-      });
-
-      const threadStubs = (listResult.threads ?? []) as Array<{ id?: string }>;
-      
-      if (!threadStubs || threadStubs.length === 0) break;
-
-      // Fetch metadata for each thread to extract message IDs
-      const threadGetStart = Date.now();
-      const detailed = await Promise.all(
-        threadStubs.map((t: { id?: string }) =>
-          (tenant.gmail.api as any).threads.get({
-            id: t.id!,
-            format: "metadata",
-          }),
-        ),
+      const listResult = await withGmailRetry<{
+        threads?: Array<{ id?: string }>;
+        nextPageToken?: string | null;
+      }>(`threads.list backfill ${category}`, () =>
+        tenant.gmail.api.threads.list({
+          maxResults: batchSize,
+          ...(isSent
+            ? { labelIds: ["SENT"] }
+            : q
+              ? { q }
+              : { labelIds: ["INBOX"] }),
+          pageToken: pageToken ?? undefined,
+        }),
       );
 
-      const messageIds = detailed.flatMap((t: Record<string, unknown>) => {
-  const msgs = (t.messages ?? []) as Array<{ id?: string }>;
-  return msgs.map((m) => m.id).filter(Boolean) as string[];
-});
+      const threadStubs = (listResult.threads ?? []) as Array<{ id?: string }>;
+
+      if (!threadStubs || threadStubs.length === 0) break;
+
+      // Fetch metadata for each thread to extract message IDs — concurrency-
+      // limited + retried so a transient 429 skips one thread instead of
+      // aborting the whole backfill page.
+      const detailed = await mapWithConcurrency(
+        threadStubs,
+        10,
+        (t: { id?: string }) =>
+          withGmailRetry(`threads.get backfill ${t.id}`, () =>
+            (tenant.gmail.api as any).threads.get({
+              id: t.id!,
+              format: "metadata",
+            }),
+          ),
+      );
+
+      const messageIds = detailed
+        .filter((t): t is NonNullable<typeof t> => Boolean(t))
+        .flatMap((t: Record<string, unknown>) => {
+          const msgs = (t.messages ?? []) as Array<{ id?: string }>;
+          return msgs.map((m) => m.id).filter(Boolean) as string[];
+        });
 
 
 const before = await db

@@ -4,6 +4,7 @@ import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 import {CATEGORY_TO_GMAIL_QUERY, ALL_CATEGORIES, extractHeader} from './metadata.ts';
+import { withGmailRetry } from './retry.ts';
 
 // ── Category mapping ──────────────────────────────────────────────────
 
@@ -122,11 +123,13 @@ export async function processMessage(
   const gmailStart = Date.now();
   const tenant = corsair.withTenant(userId);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const msg = await (tenant.gmail.api as any).messages.get({
-    userId: "me",
-    id: entityId,
-    format: "full",
-  });
+  const msg = await withGmailRetry(`messages.get ${entityId}`, () =>
+    (tenant.gmail.api as any).messages.get({
+      userId: "me",
+      id: entityId,
+      format: "full",
+    }),
+  );
   // Gmail API returns labelIds directly on the message object, not nested
   const raw = msg as Record<string, unknown>;
   const sender = extractHeader(raw, "From");
@@ -184,6 +187,37 @@ export async function processMessages(
 }
 
 
+// Gmail's per-user quota is 250 units/sec and threads.get costs 5 units, so
+// firing all ~100 threads per page at once (500 units) reliably triggers 429s.
+// A single rejected call in Promise.all previously aborted the whole
+// syncAllEmails call (and therefore the rest of pagination) — this limiter
+// caps concurrency and isolates per-thread failures so one bad/rate-limited
+// thread just gets skipped (and logged) instead of truncating the sync.
+export async function mapWithConcurrency<T, R>(
+  items: T[],
+  concurrency: number,
+  fn: (item: T) => Promise<R>,
+): Promise<(R | undefined)[]> {
+  const results: (R | undefined)[] = new Array(items.length);
+  let index = 0;
+
+  async function worker() {
+    while (index < items.length) {
+      const current = index++;
+      try {
+        results[current] = await fn(items[current]!);
+      } catch (err) {
+        logger.error("[SYNC] thread fetch failed, skipping", { error: String(err) });
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(concurrency, items.length) }, () => worker()),
+  );
+  return results;
+}
+
 export async function syncAllEmails(
   userId: string,
   category: string,
@@ -196,30 +230,40 @@ export async function syncAllEmails(
   let pageToken: string | undefined;
 
   do {
-    const result = await tenant.gmail.api.threads.list({
-      maxResults: 100,
-      ...(isSent
-        ? { labelIds: ["SENT"] }
-        : gmailQueryTerm
-          ? { q: `category:${gmailQueryTerm}` }
-          : { labelIds: ["INBOX"] }),
-      pageToken,
-    });
-
-    const detailed = await Promise.all(
-      (result.threads ?? []).map((t: any) =>
-        tenant.gmail.api.threads.get({
-          id: t.id,
-          format: "metadata",
-        }),
-      ),
+    const result = await withGmailRetry<{
+      threads?: Array<{ id?: string }>;
+      nextPageToken?: string | null;
+    }>(`threads.list ${category}`, () =>
+      tenant.gmail.api.threads.list({
+        maxResults: 100,
+        ...(isSent
+          ? { labelIds: ["SENT"] }
+          : gmailQueryTerm
+            ? { q: `category:${gmailQueryTerm}` }
+            : { labelIds: ["INBOX"] }),
+        pageToken,
+      }),
     );
 
-    const messageIds = detailed.flatMap((t: any) =>
-      (t.messages ?? [])
-        .map((m: any) => m.id)
-        .filter(Boolean),
+    const detailed = await mapWithConcurrency(
+      result.threads ?? [],
+      10,
+      (t: any) =>
+        withGmailRetry(`threads.get ${t.id}`, () =>
+          tenant.gmail.api.threads.get({
+            id: t.id,
+            format: "metadata",
+          }),
+        ),
     );
+
+    const messageIds = detailed
+      .filter((t): t is NonNullable<typeof t> => Boolean(t))
+      .flatMap((t: any) =>
+        (t.messages ?? [])
+          .map((m: any) => m.id)
+          .filter(Boolean),
+      );
 
     await processMessages(userId, messageIds);
 
@@ -238,6 +282,14 @@ export async function syncAllEmails(
 
 export async function syncMailbox(userId: string) {
   for (const category of ALL_CATEGORIES) {
-    await syncAllEmails(userId, category);
+    // Isolate each category so an exhausted-retry failure in one (e.g. a
+    // large PROMOTIONS folder) doesn't abort the remaining categories.
+    try {
+      await syncAllEmails(userId, category);
+    } catch (err) {
+      logger.error("[SYNC] syncAllEmails category failed, continuing", {
+        userId, category, error: String(err),
+      });
+    }
   }
 }

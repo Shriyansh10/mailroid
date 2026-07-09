@@ -1,4 +1,22 @@
 mailroid.in {
+	# apps/web has its own /api/* route handlers (Next.js route.ts files) that
+	# must stay with the web container — these have to be matched before the
+	# catch-all /api/* below, since Caddy's handle blocks are first-match-wins
+	handle /api/chat {
+		reverse_proxy mailroid-web:3000
+	}
+	handle /api/approvals/* {
+		reverse_proxy mailroid-web:3000
+	}
+	handle /api/feedback {
+		reverse_proxy mailroid-web:3000
+	}
+	handle /api/tools/* {
+		reverse_proxy mailroid-web:3000
+	}
+	handle /api/usage {
+		reverse_proxy mailroid-web:3000
+	}
 	handle /api/* {
 		reverse_proxy mailroid-api:8000
 	}
