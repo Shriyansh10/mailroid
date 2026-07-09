@@ -2,6 +2,15 @@ mailroid.shriyansh.xyz {
 	handle /api/* {
 		reverse_proxy mailroid-api:8000
 	}
+	handle /trpc/* {
+		reverse_proxy mailroid-api:8000
+	}
+	handle /openapi.json {
+		reverse_proxy mailroid-api:8000
+	}
+	handle /docs* {
+		reverse_proxy mailroid-api:8000
+	}
 	handle {
 		reverse_proxy mailroid-web:3000
 	}
