@@ -15,12 +15,14 @@ import 'dotenv/config';
  * EMBEDDINGS_API_KEY is required for all providers.
  * EMBEDDINGS_MODEL defaults to "text-embedding-3-small".
  */
+// .trim() — `docker run --env-file` keeps trailing whitespace, which would
+// corrupt the base URL / model name (see client.ts for the 404 this causes).
 const client = new OpenAI({
-  apiKey: process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
-  baseURL: process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? undefined,
+  apiKey: (process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "").trim(),
+  baseURL: (process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? "").trim() || undefined,
 });
 
-const MODEL = process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small";
+const MODEL = (process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small").trim();
 
 /**
  * Generate an embedding vector for a single text string.

@@ -13,14 +13,18 @@ import "dotenv/config";
  *   DEEPSEEK_CHAT_MODEL — defaults to "deepseek-chat"
  */
 
+// .trim() these because `docker run --env-file` preserves trailing whitespace
+// literally (unlike dotenv). A stray space on DEEPSEEK_BASE_URL builds a
+// malformed request URL (".../v1  /chat/completions") → 404 (no body); a space
+// on the model name → model-not-found. Trimming makes env parsing whitespace-safe.
 const DEEPSEEK_BASE_URL =
-  process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1";
+  (process.env.DEEPSEEK_BASE_URL ?? "https://api.deepseek.com/v1").trim();
 
 const DEEPSEEK_CHAT_MODEL =
-  process.env.DEEPSEEK_CHAT_MODEL ?? "deepseek-chat";
+  (process.env.DEEPSEEK_CHAT_MODEL ?? "deepseek-chat").trim();
 
 export const deepseek = new OpenAI({
-  apiKey: process.env.DEEPSEEK_API_KEY ?? "",
+  apiKey: (process.env.DEEPSEEK_API_KEY ?? "").trim(),
   baseURL: DEEPSEEK_BASE_URL,
 });
 
