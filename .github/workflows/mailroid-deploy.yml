@@ -50,6 +50,18 @@ jobs:
     needs: build-and-push
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Copy Caddyfile to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          source: "Caddyfile"
+          target: "~/mailroid"
+
       - name: Deploy to VPS over SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -61,10 +73,12 @@ jobs:
             docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
             docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
 
+            docker network create mailroid-net || true
+
             docker stop mailroid-api || true
             docker rm mailroid-api || true
             docker run -d --restart unless-stopped \
-              -p 8000:8000 \
+              --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-api \
               ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
@@ -72,9 +86,20 @@ jobs:
             docker stop mailroid-web || true
             docker rm mailroid-web || true
             docker run -d --restart unless-stopped \
-              -p 3000:3000 \
+              --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-web \
               ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+
+            docker stop mailroid-caddy || true
+            docker rm mailroid-caddy || true
+            docker run -d --restart unless-stopped \
+              --network mailroid-net \
+              -p 80:80 -p 443:443 \
+              -v ~/mailroid/Caddyfile:/etc/caddy/Caddyfile \
+              -v caddy_data:/data \
+              -v caddy_config:/config \
+              --name mailroid-caddy \
+              caddy:2-alpine
 
             docker image prune -af
