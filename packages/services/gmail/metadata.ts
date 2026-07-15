@@ -1,10 +1,8 @@
-import { corsair } from "@repo/corsair";
 import { db, eq, and, sql, desc, inArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import type { ThreadSummary } from "./model.ts";
-import { processMessages, mapWithConcurrency } from "./sync-metadata.ts";
-import { withGmailRetry } from "./retry.ts";
+import { triggerGmailSync } from "./sync-metadata.ts";
 
 export const ALL_CATEGORIES = [
   "PRIMARY", "PROMOTIONS", "SOCIAL", "UPDATES", "FORUMS", "SENT",
@@ -22,19 +20,6 @@ export const CATEGORY_TO_GMAIL_QUERY: Record<string, string> = {
   PROMOTIONS: "promotions",
   UPDATES: "updates",
   FORUMS: "forums",
-};
-
-/**
- * Map our internal category names → Gmail CATEGORY_* label IDs for
- * counting via messages.list.  SENT uses labelIds directly.
- */
-const CATEGORY_TO_GMAIL_LABEL: Record<string, string> = {
-  PRIMARY: "CATEGORY_PERSONAL",
-  SOCIAL: "CATEGORY_SOCIAL",
-  PROMOTIONS: "CATEGORY_PROMOTIONS",
-  UPDATES: "CATEGORY_UPDATES",
-  FORUMS: "CATEGORY_FORUMS",
-  SENT: "SENT",
 };
 
 type PayloadHeader = { name?: string; value?: string };
@@ -58,12 +43,57 @@ function resolveCategories(category: string): string[] {
   return [category];
 }
 
+// ── Background top-up throttle ────────────────────────────────────────
+// When a category page is served from a DB that looks short, we enqueue the
+// durable full-mailbox sync in the background so the missing history lands for
+// a later load. This map throttles per user so rapid pagination / repeated
+// loads can't enqueue a storm of full syncs.
+const BACKGROUND_SYNC_THROTTLE_MS = 60_000;
+const lastBackgroundSyncByUser = new Map<string, number>();
+
+function maybeTriggerBackgroundSync(
+  userId: string,
+  requestId: string,
+  ctx: { category: string; totalCount: number; needed: number },
+): void {
+  const now = Date.now();
+  const last = lastBackgroundSyncByUser.get(userId) ?? 0;
+  if (now - last < BACKGROUND_SYNC_THROTTLE_MS) return;
+
+  lastBackgroundSyncByUser.set(userId, now);
+  logger.info("[SERVICE] getEmailsByCategory background sync top-up", {
+    requestId, userId, ...ctx,
+  });
+  void triggerGmailSync(userId).catch((err) =>
+    logger.error("[SERVICE] background sync top-up failed", {
+      requestId, userId, error: String(err),
+    }),
+  );
+}
+
+/**
+ * Cheap per-user change token for the inbox. Returns the newest `updatedAt`
+ * across the user's message metadata (in epoch ms), or 0 when the user has no
+ * rows yet. `updatedAt` is bumped on every ingest and on async priority
+ * reclassification, so an increasing value means "this user's mail changed" —
+ * the client polls this and only re-fetches its cached lists when it grows.
+ */
+export async function getInboxVersion(userId: string): Promise<{ version: number }> {
+  const rows = await db
+    .select({ max: sql<string | null>`max(${messageMetadata.updatedAt})` })
+    .from(messageMetadata)
+    .where(eq(messageMetadata.userId, userId));
+
+  const maxUpdatedAt = rows[0]?.max;
+  const version = maxUpdatedAt ? new Date(maxUpdatedAt).getTime() : 0;
+  return { version };
+}
+
 export async function getEmailsByCategory(
   userId: string,
   category: string,
   opts?: { maxResults?: number; page?: number },
 ): Promise<{ threads: ThreadSummary[] }> {
-    console.log("📨 GET EMAILS", category, "page=", opts?.page ?? 0);
   const limit = opts?.maxResults ?? 50;
   const page = opts?.page ?? 0;
   const offset = page * limit;
@@ -76,8 +106,12 @@ export async function getEmailsByCategory(
   const categories = resolveCategories(category);
 
   // ── 1. Count how many we have locally ──────────────────────────────
+  // Used only to decide whether to kick a background top-up. We NEVER block
+  // the response on a live Gmail fetch — the list is served straight from the
+  // local DB below, and any missing history is filled in asynchronously by the
+  // durable Inngest sync so it's present on a later load.
   const dbStart = Date.now();
-  let countResult = await db
+  const countResult = await db
     .select({ count: sql<number>`count(DISTINCT COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId}))` })
     .from(messageMetadata)
     .where(
@@ -93,118 +127,12 @@ export async function getEmailsByCategory(
     requestId, category, categories, totalCount, needed, durationMs: Date.now() - dbStart,
   });
 
-  // ── 2. Backfill from Gmail if local DB doesn't have enough ─────────
+  // ── 2. Fire a throttled background sync if we look short ────────────
   if (totalCount < needed) {
-    logger.info("[SERVICE] getEmailsByCategory backfill needed", {
-      requestId, category, categories, totalCount, needed, deficit: needed - totalCount,
-    });
-    const tenant = corsair.withTenant(userId);
-
-    // When PRIMARY is requested, backfill both `category:personal` and `category:updates`
-    const gmailQueries = categories
-      .filter((c) => c !== "SENT")
-      .map((c) => CATEGORY_TO_GMAIL_QUERY[c])
-      .filter(Boolean);
-    const isSent = category === "SENT";
-
-    let pageToken: string | undefined;
-    const targetNew = needed - totalCount + 10;
-
-    for (
-      let newMessages = 0;
-      newMessages < targetNew;
-    ) {
-      const batchSize = Math.min(100, targetNew - newMessages + 10);
-      const gmailStart = Date.now();
-
-      // Build Gmail query — for PRIMARY we combine both categories
-      const q = isSent
-        ? undefined
-        : gmailQueries.map((t) => `category:${t}`).join(" OR ");
-
-      logger.info("[GMAIL] threads.list call (backfill)", {
-        requestId, category, q: q ?? "(labelIds)", batchSize, pageToken: pageToken ?? null,
-      });
-      const listResult = await withGmailRetry<{
-        threads?: Array<{ id?: string }>;
-        nextPageToken?: string | null;
-      }>(`threads.list backfill ${category}`, () =>
-        tenant.gmail.api.threads.list({
-          maxResults: batchSize,
-          ...(isSent
-            ? { labelIds: ["SENT"] }
-            : q
-              ? { q }
-              : { labelIds: ["INBOX"] }),
-          pageToken: pageToken ?? undefined,
-        }),
-      );
-
-      const threadStubs = (listResult.threads ?? []) as Array<{ id?: string }>;
-
-      if (!threadStubs || threadStubs.length === 0) break;
-
-      // Fetch metadata for each thread to extract message IDs — concurrency-
-      // limited + retried so a transient 429 skips one thread instead of
-      // aborting the whole backfill page.
-      const detailed = await mapWithConcurrency(
-        threadStubs,
-        10,
-        (t: { id?: string }) =>
-          withGmailRetry(`threads.get backfill ${t.id}`, () =>
-            (tenant.gmail.api as any).threads.get({
-              id: t.id!,
-              format: "metadata",
-            }),
-          ),
-      );
-
-      const messageIds = detailed
-        .filter((t): t is NonNullable<typeof t> => Boolean(t))
-        .flatMap((t: Record<string, unknown>) => {
-          const msgs = (t.messages ?? []) as Array<{ id?: string }>;
-          return msgs.map((m) => m.id).filter(Boolean) as string[];
-        });
-
-
-const before = await db
-  .select({ count: sql<number>`count(*)` })
-  .from(messageMetadata)
-  .where(eq(messageMetadata.userId, userId));
-
-console.log("BEFORE", before[0]?.count);
-
-await processMessages(userId, messageIds);
-
-const after = await db
-  .select({ count: sql<number>`count(*)` })
-  .from(messageMetadata)
-  .where(eq(messageMetadata.userId, userId));
-
-console.log("AFTER", after[0]?.count);
-
-newMessages += messageIds.length;
-
-      if (!listResult.nextPageToken) break;
-      pageToken = listResult.nextPageToken as string;
-    }
-
-    // Re-count after backfill
-    const recountStart = Date.now();
-    countResult = await db
-      .select({ count: sql<number>`count(DISTINCT COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId}))` })
-      .from(messageMetadata)
-      .where(
-        and(
-          eq(messageMetadata.userId, userId),
-          inArray(messageMetadata.category, categories as any[]),
-        ),
-      );
-    const newCount = Number(countResult[0]?.count ?? 0);
+    maybeTriggerBackgroundSync(userId, requestId, { category, totalCount, needed });
   }
 
   // ── 3. Query the requested page from local DB ──────────────────────
-  const dbQueryStart = Date.now();
   const sq = db
   .select({
     entityId: messageMetadata.entityId,
@@ -255,8 +183,6 @@ newMessages += messageIds.length;
   .orderBy(desc(sq.receivedAt))
   .offset(offset)
   .limit(limit);
-
-  console.log("🤦DB PAGE QUERY DONE", Date.now());
 
   const validResults: ThreadSummary[] = rows.map((row) => ({
   threadId: row.threadId || row.entityId,

@@ -14,7 +14,8 @@
     "./models/message-metadata": "./models/message-metadata.ts",
     "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts",
     "./models/calendar-tenant-mappings": "./models/calendar-tenant-mappings.ts",
-    "./models/calendar-events": "./models/calendar-events.ts"
+    "./models/calendar-events": "./models/calendar-events.ts",
+    "./models/daily-briefs": "./models/daily-briefs.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

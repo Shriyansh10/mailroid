@@ -30,6 +30,7 @@ import {
   ArrowUpRightIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
+import { trpc } from "@web/trpc/client";
 import { toast } from "sonner";
 import { motion, AnimatePresence } from "framer-motion";
 
@@ -41,6 +42,11 @@ const CATEGORIES = [
 ] as const;
 
 const PAGE_SIZE = 50;
+// Fetch a large window from the DB in one query and slice it into PAGE_SIZE
+// pages on the client, so paging within a window is instant (no network). When
+// the user crosses into the next window, one background fetch runs (previous
+// window stays visible via keepPreviousData).
+const WINDOW_SIZE = 500;
 
 function formatThreadDate(dateString: string): string {
   if (!dateString) return "";
@@ -560,10 +566,22 @@ function DossierLayout({
   pagination?: React.ReactNode;
 }) {
   const router = useRouter();
+  const utils = trpc.useUtils();
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [archivedIds, setArchivedIds] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [mobileView, setMobileView] = useState<"list" | "detail">("list");
+  const [refreshing, setRefreshing] = useState(false);
+
+  // Refetch the current inbox data in place instead of reloading the whole SPA.
+  const handleRefresh = async () => {
+    setRefreshing(true);
+    try {
+      await Promise.all([utils.gmail.invalidate(), utils.calendar.invalidate()]);
+    } finally {
+      setRefreshing(false);
+    }
+  };
 
   const visibleThreads = useMemo(() => {
     return threads.filter((t) => !archivedIds.includes(t.threadId));
@@ -631,16 +649,22 @@ function DossierLayout({
       }
     };
 
+    const handleArchiveSelected = () => {
+      if (selectedThreadId) handleArchiveThread(selectedThreadId);
+    };
+
     window.addEventListener("mailroid-select-next", handleNext);
     window.addEventListener("mailroid-select-prev", handlePrev);
     window.addEventListener("mailroid-open-selected", handleOpen);
+    window.addEventListener("mailroid-archive-selected", handleArchiveSelected);
 
     return () => {
       window.removeEventListener("mailroid-select-next", handleNext);
       window.removeEventListener("mailroid-select-prev", handlePrev);
       window.removeEventListener("mailroid-open-selected", handleOpen);
+      window.removeEventListener("mailroid-archive-selected", handleArchiveSelected);
     };
-  }, [activeIndex, visibleThreads, router]);
+  }, [activeIndex, visibleThreads, router, selectedThreadId]);
 
   // Sync keyboard changes back to active selection state
   useEffect(() => {
@@ -674,7 +698,13 @@ function DossierLayout({
         <div className="flex items-center justify-between h-12 px-4 border-b border-border bg-background sticky top-0 z-10">
           <div className="flex items-center gap-4 text-muted-foreground/70">
             
-            <RefreshCwIcon className="size-4 hover:text-foreground cursor-pointer transition-colors" onClick={() => window.location.reload()} />
+            <RefreshCwIcon
+              className={cn(
+                "size-4 hover:text-foreground cursor-pointer transition-colors",
+                refreshing && "animate-spin pointer-events-none",
+              )}
+              onClick={handleRefresh}
+            />
             {headerActions}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
@@ -808,8 +838,12 @@ function CategoryInbox({
   page: number;
   onNavigate: (newCategory: string, newPage: number) => void;
 }) {
-  const { data, isLoading, isError, error } = useCategoryEmails(category, { maxResults: PAGE_SIZE, page: page - 1 });
-  const threads = data?.threads ?? [];
+  // Fetch a whole window, then slice out the requested page on the client.
+  const windowIndex = Math.floor(((page - 1) * PAGE_SIZE) / WINDOW_SIZE);
+  const startInWindow = (page - 1) * PAGE_SIZE - windowIndex * WINDOW_SIZE;
+  const { data, isLoading, isError, error } = useCategoryEmails(category, { maxResults: WINDOW_SIZE, page: windowIndex });
+  const windowThreads = data?.threads ?? [];
+  const threads = windowThreads.slice(startInWindow, startInWindow + PAGE_SIZE);
 
   return (
     <DossierLayout
@@ -920,12 +954,16 @@ function PriorityInbox({
   const { data: countsData } = usePriorityCounts();
   const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, ALL: 0 };
 
+  // Fetch a whole window, then slice out the requested page on the client.
+  const windowIndex = Math.floor(((page - 1) * PAGE_SIZE) / WINDOW_SIZE);
+  const startInWindow = (page - 1) * PAGE_SIZE - windowIndex * WINDOW_SIZE;
   const { data, isLoading, isError, error } = usePriorityEmails({
     priorities,
-    maxResults: PAGE_SIZE,
-    page: page - 1,
+    maxResults: WINDOW_SIZE,
+    page: windowIndex,
   });
-  const threads = data?.threads ?? [];
+  const windowThreads = data?.threads ?? [];
+  const threads = windowThreads.slice(startInWindow, startInWindow + PAGE_SIZE);
 
   React.useEffect(() => {
     onNavigate("PRIORITY", 1);

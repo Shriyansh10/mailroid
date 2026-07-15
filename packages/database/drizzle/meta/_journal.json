@@ -120,6 +120,13 @@
       "when": 1781784082990,
       "tag": "0018_colossal_captain_marvel",
       "breakpoints": true
+    },
+    {
+      "idx": 19,
+      "version": "7",
+      "when": 1784154669169,
+      "tag": "0019_dashing_franklin_richards",
+      "breakpoints": true
     }
   ]
 }

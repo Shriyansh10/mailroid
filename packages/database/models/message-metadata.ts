@@ -81,5 +81,8 @@ snippet: text("snippet"),
     ),
     index("idx_mm_user_category").on(table.userId, table.category),
     index("idx_mm_user_received").on(table.userId, table.receivedAt),
+    // Supports the cheap per-user inbox change token: max(updated_at) filtered
+    // by user_id, polled every ~10s by the client for realtime freshness.
+    index("idx_mm_user_updated").on(table.userId, table.updatedAt),
   ],
 );

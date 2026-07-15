@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect } from "react";
+import { useEffect, useRef } from "react";
+import { keepPreviousData } from "@tanstack/react-query";
 import { trpc } from "@web/trpc/client";
 import { frontendLogger } from "@web/lib/frontend-logger";
 
@@ -208,7 +209,8 @@ export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number;
 
   const result = trpc.gmail.listPriority.useQuery(opts ?? undefined, {
     refetchOnMount: true,
-    staleTime: 30_000,
+    staleTime: Infinity,
+    placeholderData: keepPreviousData,
   });
 
   useEffect(() => {
@@ -238,7 +240,7 @@ export const usePriorityCounts = (opts?: { days?: number }) => {
 
   const result = trpc.gmail.priorityCounts.useQuery(opts ?? undefined, {
     refetchOnMount: true,
-    staleTime: 30_000,
+    staleTime: Infinity,
   });
 
   useEffect(() => {
@@ -268,7 +270,12 @@ export const useCategoryEmails = (category: string, opts?: { maxResults?: number
 
   const result = trpc.gmail.listByCategory.useQuery(
     { category, maxResults: opts?.maxResults, page: opts?.page },
-    { enabled: !!category, refetchOnMount: true, staleTime: 30_000 },
+    {
+      enabled: !!category,
+      refetchOnMount: true,
+      staleTime: Infinity,
+      placeholderData: keepPreviousData,
+    },
   );
 
   useEffect(() => {
@@ -296,7 +303,7 @@ export const useCategoryCounts = () => {
 
   const result = trpc.gmail.categoryCounts.useQuery(undefined, {
     refetchOnMount: true,
-    staleTime: 30_000,
+    staleTime: Infinity,
   });
 
   useEffect(() => {
@@ -315,4 +322,44 @@ export const useCategoryCounts = () => {
   }, [result.error]);
 
   return result;
+};
+
+/**
+ * Per-user realtime freshness. Polls the cheap `gmail.inboxVersion` token and,
+ * when it grows (i.e. a webhook touched THIS user's mail), invalidates the
+ * cached inbox lists/counts so they re-sync. The inbox lists themselves use
+ * `staleTime: Infinity`, so they only ever refetch because of this signal or an
+ * explicit refresh — never on a timer. Mount this once in the inbox layout.
+ */
+export const useInboxSync = () => {
+  const utils = trpc.useUtils();
+  const lastVersionRef = useRef<number | null>(null);
+
+  const { data } = trpc.gmail.inboxVersion.useQuery(undefined, {
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    const version = data?.version;
+    if (version === undefined) return;
+
+    // First reading just establishes the baseline — don't refetch on mount.
+    if (lastVersionRef.current === null) {
+      lastVersionRef.current = version;
+      return;
+    }
+
+    if (version > lastVersionRef.current) {
+      frontendLogger.info("[INBOX_HOOK]", "inbox version changed, invalidating", {
+        prev: lastVersionRef.current, next: version,
+      });
+      lastVersionRef.current = version;
+      void utils.gmail.listByCategory.invalidate();
+      void utils.gmail.listPriority.invalidate();
+      void utils.gmail.categoryCounts.invalidate();
+      void utils.gmail.priorityCounts.invalidate();
+    }
+  }, [data?.version, utils]);
 };

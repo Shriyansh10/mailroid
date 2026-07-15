@@ -977,8 +977,15 @@ export default function AssistantPage() {
                transition={{ delay: 0.2 }}
                className="mt-8 flex flex-wrap justify-center gap-2.5 max-w-2xl mx-auto"
              >
-               <Button 
-                 variant="outline" 
+               <Button
+                 variant="outline"
+                 onClick={() => handleSend("Prepare me for today")}
+                 className="text-xs font-mono uppercase border border-[#b08d57]/40 bg-[#b08d57]/5 text-[#b08d57] hover:bg-[#b08d57]/10 rounded-xl h-9 px-4 shrink-0 transition-colors"
+               >
+                 Prepare me for today
+               </Button>
+               <Button
+                 variant="outline"
                  onClick={() => handleSend("Summarize my unread emails")}
                  className="text-xs font-mono uppercase border border-border/80 bg-background text-foreground hover:bg-accent/50 rounded-xl h-9 px-4 shrink-0 transition-colors"
                >

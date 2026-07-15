@@ -20,7 +20,7 @@ import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
-import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts } from "@web/hooks/api/gmail";
+import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
 import { frontendLogger } from "@web/lib/frontend-logger";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 
@@ -50,7 +50,13 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   const [localValue, setLocalValue] = useState(currentQuery);
   const [composeOpen, setComposeOpen] = useState(false);
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const { data: session } = useSession();
+
+  // Poll the per-user inbox version and invalidate cached lists when it grows,
+  // so a webhook touching this user's mail refreshes only this user.
+  useInboxSync();
+
   const { syncEmailsAsync, isPending: syncing } = useSyncEmails();
   const { data: countData, refetch: refetchCount } = useStoredEmailCount();
   const { generateEmbeddingsAsync, isPending: embedding } = useGenerateEmbeddings();
@@ -110,6 +116,56 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   }, [generateEmbeddingsAsync, refetchPending]);
 
   const count = (cat: string) => categoryCounts?.[cat] ?? 0;
+
+  // Global inbox shortcuts (documented at /settings/shortcuts). Disabled while
+  // typing in a field or while the compose dialog is open, so single-letter
+  // keys don't hijack normal text entry.
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (composeOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const isTyping = target && (
+        target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable
+      );
+
+      if (e.key === "/" && !isTyping) {
+        e.preventDefault();
+        searchInputRef.current?.focus();
+        return;
+      }
+
+      if (isTyping) return;
+
+      switch (e.key) {
+        case "j":
+        case "ArrowDown":
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("mailroid-select-next"));
+          break;
+        case "k":
+        case "ArrowUp":
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("mailroid-select-prev"));
+          break;
+        case "Enter":
+        case "o":
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("mailroid-open-selected"));
+          break;
+        case "e":
+          e.preventDefault();
+          window.dispatchEvent(new CustomEvent("mailroid-archive-selected"));
+          break;
+        case "c":
+          e.preventDefault();
+          setComposeOpen(true);
+          break;
+      }
+    };
+
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [composeOpen]);
 
   return (
     <div className="flex h-screen bg-background text-foreground">
@@ -245,6 +301,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             <div className="relative w-full">
               <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
               <Input
+                ref={searchInputRef}
                 type="text"
                 placeholder={searchMode === "gmail" ? "Search your workspace..." : "Ask Dobbie about your emails…"}
                 value={localValue}

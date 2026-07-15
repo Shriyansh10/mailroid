@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useMemo, useCallback } from "react";
+import React, { useState, useMemo, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
@@ -44,6 +44,24 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
     await authClient.signOut();
     router.push("/sign-in");
   }, [router]);
+
+  // "c" to compose, mirroring the inbox shortcut (documented at /settings/shortcuts).
+  useEffect(() => {
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (composeOpen || e.ctrlKey || e.metaKey || e.altKey) return;
+      const target = e.target as HTMLElement | null;
+      const isTyping = target && (
+        target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable
+      );
+      if (isTyping) return;
+      if (e.key === "c") {
+        e.preventDefault();
+        setComposeOpen(true);
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [composeOpen]);
 
   return (
     <div className="flex h-screen bg-background text-foreground overflow-hidden">

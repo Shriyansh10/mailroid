@@ -1,0 +1,37 @@
+# Build context is the repo ROOT (docker build -f Dockerfile.migrate .), not
+# packages/database, because turbo prune needs to see the whole workspace to
+# compute the subset @repo/database actually depends on.
+#
+# Unlike Dockerfile.api/Dockerfile.web, this image keeps devDependencies
+# (drizzle-kit) since `drizzle-kit migrate` runs directly against TS source —
+# there's no build step for @repo/database.
+
+FROM node:24-alpine AS base
+RUN corepack enable
+# pnpm's global bin dir isn't on PATH by default in this image, which breaks
+# `pnpm add -g turbo` below with "configured global bin directory is not in PATH"
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+# ---- pruner: cut the monorepo down to just what @repo/database needs ----
+FROM base AS pruner
+WORKDIR /app
+# turbo isn't a repo dependency yet at this point, so install it globally just
+# to run the prune command
+RUN pnpm add -g turbo
+COPY . .
+RUN turbo prune @repo/database --docker
+
+# ---- installer: pnpm install against the pruned workspace ----
+FROM base AS installer
+WORKDIR /app
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 migrateuser
+COPY --from=pruner /app/out/json/ .
+# no --prod here: drizzle-kit is a devDependency and this image runs it directly
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+RUN chown -R migrateuser:nodejs /app
+
+USER migrateuser
+WORKDIR /app/packages/database
+CMD ["pnpm", "db:migrate"]

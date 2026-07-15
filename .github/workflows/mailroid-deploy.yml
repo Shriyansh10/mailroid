@@ -46,6 +46,18 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+      - name: Build and push DB migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrate
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
   deploy:
     needs: build-and-push
     runs-on: ubuntu-latest
@@ -72,8 +84,34 @@ jobs:
           script: |
             docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
             docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
 
             docker network create mailroid-net || true
+
+            # Postgres (pgvector) on the VPS, reachable only from other
+            # containers on mailroid-net — no host port published.
+            # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB and a matching
+            # DATABASE_URL (host = mailroid-db) must be set in ~/mailroid/.env
+            if ! docker inspect mailroid-db >/dev/null 2>&1; then
+              docker run -d --restart unless-stopped \
+                --network mailroid-net \
+                --env-file ~/mailroid/.env \
+                -v mailroid_pg_data:/var/lib/postgresql/data \
+                --name mailroid-db \
+                pgvector/pgvector:pg15
+            fi
+
+            echo "Waiting for Postgres to accept connections..."
+            for i in $(seq 1 30); do
+              docker exec mailroid-db pg_isready -U "$(grep -m1 '^POSTGRES_USER=' ~/mailroid/.env | cut -d= -f2-)" >/dev/null 2>&1 && break
+              sleep 2
+            done
+
+            echo "Running DB migrations..."
+            docker run --rm \
+              --network mailroid-net \
+              --env-file ~/mailroid/.env \
+              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
 
             docker stop mailroid-api || true
             docker rm mailroid-api || true

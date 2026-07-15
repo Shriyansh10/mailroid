@@ -1,5 +1,7 @@
 import { db, eq, and, or, gte, lte, gt } from "@repo/database";
-import { dailyBriefs, messageMetadata, calendarEvents } from "@repo/database/schema";
+import { dailyBriefs } from "@repo/database/models/daily-briefs";
+import { messageMetadata } from "@repo/database/models/message-metadata";
+import { calendarEvents } from "@repo/database/models/calendar-events";
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "@repo/ai";
 import { logger } from "@repo/logger";
 
@@ -112,6 +114,11 @@ function getEmailRank(email: typeof messageMetadata.$inferSelect): number {
 export async function getOrGenerateBrief(userId: string, localDate: string): Promise<string> {
   logger.info("[daily-briefing] Fetching brief for user", { userId, localDate });
 
+  // The briefing is forward-looking: it only considers meetings from this
+  // moment onward, so a meeting that already happened earlier today is never
+  // included ("prepare me for today" = what's still ahead).
+  const now = new Date();
+
   // ── 1. Query for today's brief cache ────────────────────────────────
   const cachedBriefs = await db
     .select()
@@ -153,7 +160,22 @@ export async function getOrGenerateBrief(userId: string, localDate: string): Pro
       )
       .limit(1);
 
-    if (messageChanged.length === 0 && eventChanged.length === 0) {
+    // Invalidation 3: A meeting has *started* since this brief was generated,
+    // so the cached brief may still list a now-past meeting. Regenerate so the
+    // forward-looking `now` cutoff below drops it.
+    const eventPassed = await db
+      .select({ id: calendarEvents.id })
+      .from(calendarEvents)
+      .where(
+        and(
+          eq(calendarEvents.userId, userId),
+          gt(calendarEvents.startTime, cached.generatedAt),
+          lte(calendarEvents.startTime, now)
+        )
+      )
+      .limit(1);
+
+    if (messageChanged.length === 0 && eventChanged.length === 0 && eventPassed.length === 0) {
       logger.info("[daily-briefing] Cache is VALID. Returning cached brief.");
       return cached.rawResponse;
     }
@@ -161,6 +183,7 @@ export async function getOrGenerateBrief(userId: string, localDate: string): Pro
     logger.info("[daily-briefing] Cache is STALE. Re-generating.", {
       messageChanged: messageChanged.length > 0,
       eventChanged: eventChanged.length > 0,
+      eventPassed: eventPassed.length > 0,
     });
   } else {
     logger.info("[daily-briefing] Cache MISS. Generating briefing.");
@@ -171,14 +194,15 @@ export async function getOrGenerateBrief(userId: string, localDate: string): Pro
   const endOf14Days = new Date(startOfDay.getTime() + 14 * 24 * 60 * 60 * 1000);
   const startOf7DaysAgo = new Date(startOfDay.getTime() - 7 * 24 * 60 * 60 * 1000);
 
-  // Fetch calendar events
+  // Fetch calendar events — from NOW (not start of day) through the next 14
+  // days, so meetings that already happened earlier today are excluded.
   const events = await db
     .select()
     .from(calendarEvents)
     .where(
       and(
         eq(calendarEvents.userId, userId),
-        gte(calendarEvents.startTime, startOfDay),
+        gte(calendarEvents.startTime, now),
         lte(calendarEvents.startTime, endOf14Days)
       )
     )
@@ -240,7 +264,7 @@ export async function getOrGenerateBrief(userId: string, localDate: string): Pro
 
   const systemPrompt = `
 You are Dobbie, a world-class AI executive assistant. Your goal is to prepare a highly actionable execution plan and briefing for the user for today.
-You are given the user's local current date, calendar events for today and the next 14 days, and critical emails from the last 7 days.
+You are given the user's local current date and time, their UPCOMING calendar events (from now through the next 14 days — meetings earlier today that already happened are intentionally excluded), and critical emails from the last 7 days.
 
 Do NOT simply list the items. You must synthesize the data to help the user manage their attention.
 
@@ -295,9 +319,10 @@ Output a strictly valid JSON object matching the following structure:
 
   const userPrompt = `
 Local Date: ${localDate}
+Current time (UTC): ${now.toISOString()}
 
---- CALENDAR EVENTS (TODAY + 14 DAYS) ---
-${calendarString || "No calendar events."}
+--- UPCOMING CALENDAR EVENTS (FROM NOW THROUGH NEXT 14 DAYS) ---
+${calendarString || "No upcoming calendar events."}
 
 --- CRITICAL EMAILS (LAST 7 DAYS, DEDUPLICATED BY THREAD) ---
 ${emailsString || "No critical emails."}

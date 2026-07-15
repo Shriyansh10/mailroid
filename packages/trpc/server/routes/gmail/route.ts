@@ -4,7 +4,7 @@ import { generatePath } from "../../utils/path-generator.js";
 import { logger } from "@repo/logger";
 
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
-import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts } from "@repo/services/gmail/metadata.js";
+import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
 import {
   threadListOutputModel,
@@ -303,6 +303,23 @@ export const gmailRouter = router({
         userId: ctx.user!.id, counts: result, durationMs: Date.now() - startMs,
       });
       return result;
+    }),
+
+  // Cheap per-user change token. The client polls this on an interval and only
+  // re-fetches its cached inbox lists when the returned version grows, so a
+  // webhook that touches user A's mail refreshes only A — user B, whose version
+  // is unchanged, never refetches.
+  inboxVersion: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/inbox-version"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ version: z.number() }))
+    .query(async ({ ctx }) => {
+      return getInboxVersion(ctx.user!.id);
     }),
 
   listPriority: protectedProcedure

@@ -1,0 +1,1 @@
+CREATE INDEX "idx_mm_user_updated" ON "message_metadata" USING btree ("user_id","updated_at");
