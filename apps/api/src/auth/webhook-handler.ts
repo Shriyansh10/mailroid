@@ -8,6 +8,30 @@ import { ingestMessage } from "@repo/services/gmail/index.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 import { describeError } from "../diagnostics/describe-error.js";
 
+/**
+ * Gmail historyIds are monotonically increasing uint64 values delivered as
+ * strings. Pub/Sub gives no ordering or exactly-once guarantee, so a stale
+ * notification can arrive *after* a newer one — comparing with `!==` instead of
+ * an ordered compare is what let the stored cursor regress to an older value,
+ * which in turn made every subsequent notification re-fetch and re-ingest the
+ * same history window forever.
+ *
+ * Parsed as BigInt rather than Number: historyIds are uint64 and would silently
+ * lose precision past 2^53.
+ *
+ * Returns null when the value is absent or not a valid non-negative integer, so
+ * callers can fall back rather than throw on unexpected input.
+ */
+function parseHistoryId(value: string | null | undefined): bigint | null {
+  if (value === null || value === undefined || value === "") return null;
+  try {
+    const parsed = BigInt(value);
+    return parsed >= 0n ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
 async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | undefined> {
   const targetEmailLower = targetEmail.toLowerCase();
   console.log(`[webhook] Attempting to resolve tenantId for email: "${targetEmailLower}"`);
@@ -206,9 +230,32 @@ export async function handleCorsairWebhook(req: {
           return;
         }
 
-        if (lastHistoryId === incomingHistoryId) {
-          console.log(`[webhook] Incoming historyId "${incomingHistoryId}" matches last stored historyId. Skipping.`);
+        const lastParsed = parseHistoryId(lastHistoryId);
+        const incomingParsed = parseHistoryId(incomingHistoryId);
+
+        // Drop notifications that are not strictly newer than the cursor.
+        // Pub/Sub redelivers and does not preserve order, so this covers both
+        // exact duplicates and genuinely stale deliveries. The previous `!==`
+        // check only caught duplicates, so a stale id fell through, fetched an
+        // empty window, and then reset the cursor backwards to itself — leaving
+        // two ids to ping-pong forever, re-ingesting the same messages on every
+        // swing.
+        if (lastParsed !== null && incomingParsed !== null && incomingParsed <= lastParsed) {
+          console.log(
+            `[webhook] Incoming historyId "${incomingHistoryId}" is not newer than stored "${lastHistoryId}". Skipping stale notification.`,
+          );
           return;
+        }
+
+        // Unparseable ids should not silently disable the guard above.
+        if (lastParsed === null || incomingParsed === null) {
+          console.warn(
+            `[webhook] Non-numeric historyId (stored: "${lastHistoryId}", incoming: "${incomingHistoryId}") — falling back to equality check.`,
+          );
+          if (lastHistoryId === incomingHistoryId) {
+            console.log(`[webhook] Incoming historyId "${incomingHistoryId}" matches last stored historyId. Skipping.`);
+            return;
+          }
         }
 
         const tenantClient = corsair.withTenant(tenantId);
@@ -321,14 +368,22 @@ export async function handleCorsairWebhook(req: {
         }
 
         if (hasError) {
-          console.warn(`[webhook] Resetting historyId to incoming: "${incomingHistoryId}"`);
-          if (mapping) {
+          // Only ever skip *forward* on error. Writing the incoming id
+          // unconditionally would regress the cursor whenever a stale
+          // notification happened to fail, re-opening the ping-pong this fix
+          // exists to close.
+          if (mapping && (lastParsed === null || incomingParsed === null || incomingParsed > lastParsed)) {
+            console.warn(`[webhook] Resetting historyId to incoming: "${incomingHistoryId}"`);
             await db
               .update(gmailTenantMappings)
               .set({
                 lastHistoryId: incomingHistoryId,
               })
               .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
+          } else {
+            console.warn(
+              `[webhook] Fetch failed for stale historyId "${incomingHistoryId}"; keeping stored "${lastHistoryId}".`,
+            );
           }
           return;
         }
@@ -353,8 +408,12 @@ export async function handleCorsairWebhook(req: {
           console.log(`[webhook] No new messages added since historyId "${lastHistoryId}".`);
         }
 
-        // Update stored mapping with the latest historyId
-        if (mapping && incomingHistoryId !== lastHistoryId) {
+        // Advance the stored cursor — forward only. The previous `!==` check
+        // wrote whatever arrived last, so an out-of-order delivery moved the
+        // cursor backwards and the next notification re-fetched an already
+        // -ingested window. Guarding on `>` makes the cursor monotonic, which is
+        // what Gmail's historyId semantics already assume.
+        if (mapping && (lastParsed === null || incomingParsed === null || incomingParsed > lastParsed)) {
           await db
             .update(gmailTenantMappings)
             .set({
