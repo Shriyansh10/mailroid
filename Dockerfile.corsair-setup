@@ -1,0 +1,35 @@
+# Build context is the repo ROOT (docker build -f Dockerfile.corsair-setup .),
+# not packages/corsair, because turbo prune needs to see the whole workspace to
+# compute the subset @repo/corsair actually depends on.
+#
+# One-off provisioning image: writes/updates OAuth integration credentials
+# (corsair_integrations) against the target DATABASE_URL. Not part of the
+# regular deploy — run manually on the VPS whenever credentials change.
+#
+# Like Dockerfile.migrate, this runs directly against TS source — there's no
+# build step for @repo/corsair.
+
+FROM node:24-alpine AS base
+RUN corepack enable
+ENV PNPM_HOME="/pnpm"
+ENV PATH="$PNPM_HOME:$PNPM_HOME/bin:$PATH"
+
+# ---- pruner: cut the monorepo down to just what @repo/corsair needs ----
+FROM base AS pruner
+WORKDIR /app
+RUN pnpm add -g turbo
+COPY . .
+RUN turbo prune @repo/corsair --docker
+
+# ---- installer: pnpm install against the pruned workspace ----
+FROM base AS installer
+WORKDIR /app
+RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 corsairuser
+COPY --from=pruner /app/out/json/ .
+RUN pnpm install --frozen-lockfile
+COPY --from=pruner /app/out/full/ .
+RUN chown -R corsairuser:nodejs /app
+
+USER corsairuser
+WORKDIR /app/packages/corsair
+CMD ["pnpm", "corsair:setup"]
