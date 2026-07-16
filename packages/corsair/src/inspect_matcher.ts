@@ -4,7 +4,7 @@ function main() {
   const plugin = googlecalendar();
   console.log("Plugin ID:", plugin.id);
   console.log("Matcher string representation:");
-  console.log(plugin.pluginWebhookMatcher.toString());
+  console.log(plugin.pluginWebhookMatcher!.toString());
 
   const onEventChanged = plugin.webhooks?.onEventChanged;
   if (onEventChanged) {
