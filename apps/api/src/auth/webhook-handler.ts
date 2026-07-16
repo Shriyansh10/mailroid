@@ -6,6 +6,7 @@ import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-ma
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { ingestMessage } from "@repo/services/gmail/index.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
+import { describeError } from "../diagnostics/describe-error.js";
 
 async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | undefined> {
   const targetEmailLower = targetEmail.toLowerCase();
@@ -211,7 +212,25 @@ export async function handleCorsairWebhook(req: {
         }
 
         const tenantClient = corsair.withTenant(tenantId);
-        const accessToken = await tenantClient.gmail.keys.get_access_token();
+
+        // keys.get_access_token() decrypts the account DEK with CORSAIR_KEK
+        // (scrypt + AES-256-GCM) and then the stored token. It does NOT refresh
+        // — refresh only happens via the plugin's keyBuilder on an SDK api.*
+        // call. So a throw here is a *decryption* problem (wrong KEK =>
+        // "Unsupported state or unable to authenticate data"), whereas a throw
+        // during ingestMessage is a *refresh/network* problem. Separating the
+        // two is the whole point of logging them distinctly.
+        let accessToken: string | null;
+        try {
+          accessToken = await tenantClient.gmail.keys.get_access_token();
+        } catch (err) {
+          console.error(
+            `[webhook] Gmail credential decrypt FAILED for tenant "${tenantId}" (KEK/DEK problem, not network):`,
+            JSON.stringify(describeError(err)),
+          );
+          return;
+        }
+
         if (!accessToken) {
           console.error(`[webhook] Failed to get Gmail access token for tenant "${tenantId}"`);
           return;
@@ -291,7 +310,13 @@ export async function handleCorsairWebhook(req: {
             nextPageToken = data.nextPageToken;
           } while (nextPageToken);
         } catch (err) {
-          console.error("[webhook] Error fetching history list:", err);
+          // describeError unwraps err.cause — without it undici reports only
+          // "fetch failed" and the real errno (ENETUNREACH/ETIMEDOUT/EAI_AGAIN)
+          // plus the address actually dialed are lost.
+          console.error(
+            "[webhook] Error fetching history list:",
+            JSON.stringify(describeError(err)),
+          );
           hasError = true;
         }
 
@@ -313,7 +338,15 @@ export async function handleCorsairWebhook(req: {
           for (const messageId of addedMessageIds) {
             console.log(`[webhook] Triggering ingestMessage for tenant "${tenantId}", message "${messageId}"`);
             void ingestMessage(tenantId, messageId, true).catch((err) => {
-              console.error("[webhook] Failed to ingest message:", err);
+              // This is the path that reaches Corsair's keyBuilder -> token
+              // refresh against oauth2.googleapis.com, so "[corsair:gmail]
+              // Failed to obtain valid access token: fetch failed" surfaces
+              // here. The wrapped Error drops the cause, so log both the
+              // message and any chain we can still recover.
+              console.error(
+                `[webhook] Failed to ingest message "${messageId}" for tenant "${tenantId}":`,
+                JSON.stringify(describeError(err)),
+              );
             });
           }
         } else {
@@ -331,7 +364,10 @@ export async function handleCorsairWebhook(req: {
           console.log(`[webhook] Updated stored historyId for tenant "${tenantId}" to "${incomingHistoryId}"`);
         }
       } catch (err) {
-        console.error("[webhook] Async sync process failed:", err);
+        console.error(
+          "[webhook] Async sync process failed:",
+          JSON.stringify(describeError(err)),
+        );
       }
     })();
   }

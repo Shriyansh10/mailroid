@@ -15,6 +15,8 @@ import { auth } from "./auth/index.js";
 import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 import { handleCorsairWebhook } from "./auth/webhook-handler.js";
+import { probeEgress } from "./diagnostics/egress-probe.js";
+import { describeError } from "./diagnostics/describe-error.js";
 import { serve } from "inngest/express";
 import { inngest, emailPriority } from "@repo/inngest";
 import { gmailWatchCron } from "@repo/services/gmail/watch-cron.js";
@@ -75,6 +77,21 @@ app.post("/api/webhook", async (req, res) => {
   } catch (err) {
     console.error("[webhook] handler failed:", err);
     res.status(500).json({ error: "Webhook processing failed" });
+  }
+});
+
+// Outbound-connectivity diagnostics for the Gmail webhook path. Hits only
+// hardcoded Google hosts and returns errno/DNS data — no credentials are sent
+// or returned. Registered before the /api catch-all router below so it isn't
+// swallowed by it.
+app.get("/api/_debug/egress", async (req, res) => {
+  try {
+    const attempts = Math.min(Number(req.query.attempts ?? 5) || 5, 20);
+    const report = await probeEgress(attempts);
+    const failures = report.hosts.flatMap((h) => h.attempts.filter((a) => !a.ok));
+    return res.json({ failureCount: failures.length, report });
+  } catch (err) {
+    return res.status(500).json({ error: "probe failed", detail: describeError(err) });
   }
 });
 
