@@ -1,0 +1,112 @@
+name: Migrate Mailroid DB
+
+# Manual-only, migrate-ONLY pipeline. Applies `drizzle-kit migrate` against
+# PRODUCTION WITHOUT shipping new api/web images — use it for expand/contract
+# changes where you migrate first and deploy code later. It does NOT build; it
+# pulls an already-built migrate image (from the Build workflow). Optionally
+# chains the Deploy workflow after a clean migration via deploy_after (which
+# deploys the SAME image_tag and does NOT re-run migrations).
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'Type "migrate" to confirm running migrations against PRODUCTION'
+        required: true
+        default: ''
+      image_tag:
+        description: 'Migrate image tag to run (a commit SHA to pin an exact build, or "latest")'
+        required: false
+        default: latest
+      deploy_after:
+        description: 'Run the Deploy workflow after migrations succeed (deploys the SAME image_tag)'
+        type: boolean
+        required: false
+        default: false
+
+# Never let two migration runs overlap.
+concurrency:
+  group: mailroid-migrate
+  cancel-in-progress: false
+
+jobs:
+  # Hard gate: fail loudly (red X) unless the operator typed the confirm word,
+  # rather than silently skipping.
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require confirmation
+        run: |
+          if [ "${{ github.event.inputs.confirm }}" != "migrate" ]; then
+            echo "::error::Type 'migrate' in the confirm box to run this workflow. Got: '${{ github.event.inputs.confirm }}'"
+            exit 1
+          fi
+
+  migrate:
+    needs: guard
+    runs-on: ubuntu-latest
+    steps:
+      - name: Run DB migrations on VPS
+        uses: appleboy/ssh-action@v1
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          script: |
+            set -euo pipefail
+
+            TAG="${{ github.event.inputs.image_tag }}"
+            REGISTRY="${{ secrets.DOCKERHUB_USERNAME }}"
+            echo "Migrating with tag: ${TAG}"
+
+            docker pull ${REGISTRY}/mailroid-migrate:${TAG}
+
+            # Migrations need the DB, but this workflow does NOT own its
+            # lifecycle (the deploy workflow creates it). Just confirm it's up.
+            if ! docker inspect mailroid-db >/dev/null 2>&1; then
+              echo "mailroid-db container not found — deploy the stack first."
+              exit 1
+            fi
+
+            echo "Waiting for Postgres to accept connections..."
+            ok=0
+            for i in $(seq 1 30); do
+              if docker exec mailroid-db pg_isready \
+                   -U "$(grep -m1 '^POSTGRES_USER=' ~/mailroid/.env | cut -d= -f2-)" >/dev/null 2>&1; then
+                ok=1; break
+              fi
+              sleep 2
+            done
+            if [ "$ok" != "1" ]; then
+              echo "Postgres did not become ready in time."; exit 1
+            fi
+
+            echo "Running DB migrations (drizzle-kit migrate)..."
+            docker run --rm \
+              --network mailroid-net \
+              --env-file ~/mailroid/.env \
+              ${REGISTRY}/mailroid-migrate:${TAG}
+
+            echo "Migrations complete."
+
+  # Optionally kick off the deploy workflow once migrations have applied cleanly.
+  # Only runs when the operator opted in via deploy_after=true. Deploys the SAME
+  # image_tag with run_migrations=false (we already migrated above).
+  trigger-deploy:
+    needs: migrate
+    if: ${{ needs.migrate.result == 'success' && github.event.inputs.deploy_after == 'true' }}
+    runs-on: ubuntu-latest
+    permissions:
+      actions: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Dispatch Deploy Mailroid workflow
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh workflow run mailroid-deploy.yml \
+            --ref "${{ github.ref_name }}" \
+            -f image_tag="${{ github.event.inputs.image_tag }}" \
+            -f run_migrations=false
+          echo "Deploy Mailroid workflow dispatched (tag ${{ github.event.inputs.image_tag }}, run_migrations=false)."

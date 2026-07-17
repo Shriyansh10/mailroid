@@ -1,65 +1,30 @@
 name: Deploy Mailroid
 
+# Manual DEPLOY pipeline. Ships already-built api + web images to the VPS and
+# (re)starts the stack. It does NOT build — it pulls an image that the Build
+# workflow already pushed to Docker Hub. Optionally applies DB migrations first
+# when run_migrations=true, using the SAME image_tag so schema and code always
+# come from one build.
 on:
-  push:
-    branches: [main]
   workflow_dispatch:
+    inputs:
+      image_tag:
+        description: 'Image tag to deploy (a commit SHA to pin an exact build, or "latest")'
+        required: false
+        default: latest
+      run_migrations:
+        description: 'Run DB migrations before deploying (uses the SAME image_tag)'
+        type: boolean
+        required: false
+        default: false
+
+# Never let two deploys (or a deploy and a migrate-triggered deploy) overlap.
+concurrency:
+  group: mailroid-deploy
+  cancel-in-progress: false
 
 jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      - name: Build and push API image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.api
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push Web image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.web
-          push: true
-          # NEXT_PUBLIC_API_URL is inlined into the client bundle at build time,
-          # so it must be your real public API URL here, not localhost
-          build-args: |
-            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      - name: Build and push DB migrate image
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: Dockerfile.migrate
-          push: true
-          tags: |
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
-            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:${{ github.sha }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   deploy:
-    needs: build-and-push
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -82,9 +47,15 @@ jobs:
           key: ${{ secrets.VPS_SSH_KEY }}
           port: ${{ secrets.VPS_SSH_PORT }}
           script: |
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
-            docker pull ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
+            set -euo pipefail
+
+            TAG="${{ github.event.inputs.image_tag }}"
+            RUN_MIGRATIONS="${{ github.event.inputs.run_migrations }}"
+            REGISTRY="${{ secrets.DOCKERHUB_USERNAME }}"
+            echo "Deploying tag: ${TAG} (run_migrations=${RUN_MIGRATIONS})"
+
+            docker pull ${REGISTRY}/mailroid-api:${TAG}
+            docker pull ${REGISTRY}/mailroid-web:${TAG}
 
             docker network create mailroid-net || true
 
@@ -107,11 +78,21 @@ jobs:
               sleep 2
             done
 
-            echo "Running DB migrations..."
-            docker run --rm \
-              --network mailroid-net \
-              --env-file ~/mailroid/.env \
-              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
+            # Migrations are opt-in. When enabled, run drizzle-kit migrate from
+            # the SAME tag we're about to deploy, so the DB schema matches the
+            # code we ship. If this fails, `set -e` aborts BEFORE any app
+            # container is replaced, leaving the current app running.
+            if [ "${RUN_MIGRATIONS}" = "true" ]; then
+              echo "Running DB migrations (tag ${TAG})..."
+              docker pull ${REGISTRY}/mailroid-migrate:${TAG}
+              docker run --rm \
+                --network mailroid-net \
+                --env-file ~/mailroid/.env \
+                ${REGISTRY}/mailroid-migrate:${TAG}
+              echo "Migrations complete."
+            else
+              echo "Skipping DB migrations (run_migrations=false)."
+            fi
 
             docker stop mailroid-api || true
             docker rm mailroid-api || true
@@ -119,7 +100,7 @@ jobs:
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-api \
-              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
+              ${REGISTRY}/mailroid-api:${TAG}
 
             docker stop mailroid-web || true
             docker rm mailroid-web || true
@@ -127,7 +108,7 @@ jobs:
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-web \
-              ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+              ${REGISTRY}/mailroid-web:${TAG}
 
             docker stop mailroid-caddy || true
             docker rm mailroid-caddy || true
