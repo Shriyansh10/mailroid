@@ -1,0 +1,64 @@
+name: Build Mailroid
+
+# Automatic BUILD pipeline. Every push to main builds and pushes the api, web,
+# and migrate images to Docker Hub. Nothing is deployed here — this only
+# produces artifacts. Each image is tagged BOTH :latest (a moving pointer to the
+# newest build) and :<commit-sha> (a frozen pointer to this exact build), so the
+# Deploy/Migrate workflows can pin an exact image instead of racing :latest.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build and push API image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.api
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-api:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push Web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          # NEXT_PUBLIC_API_URL is inlined into the client bundle at build time,
+          # so it must be your real public API URL here, not localhost
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ secrets.NEXT_PUBLIC_API_URL }}
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-web:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push DB migrate image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.migrate
+          push: true
+          tags: |
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:latest
+            ${{ secrets.DOCKERHUB_USERNAME }}/mailroid-migrate:${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
