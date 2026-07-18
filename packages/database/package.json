@@ -22,7 +22,7 @@
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",
     "db:generate": "dotenv -- drizzle-kit generate",
-    "dev": "dotenv -- drizzle-kit studio",
+    "dev": "dotenv -- drizzle-kit studio --port 4984",
     "db:studio:prod": "dotenv -- drizzle-kit studio --config drizzle.config.prod.ts"
   },
   "devDependencies": {

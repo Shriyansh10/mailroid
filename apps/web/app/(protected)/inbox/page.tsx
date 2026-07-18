@@ -10,6 +10,7 @@ import {
   usePriorityCounts,
   useThread,
   useStartClassificationJob,
+  useRetryFailedClassifications,
   useClassificationJobStatus,
 } from "@web/hooks/api/gmail";
 import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
@@ -50,31 +51,48 @@ const PAGE_SIZE = 50;
 // window stays visible via keepPreviousData).
 const WINDOW_SIZE = 500;
 
+/**
+ * Compares CALENDAR position in the viewer's local timezone, not elapsed time.
+ *
+ * Elapsed-time thresholds put the cutoff in the wrong place at both ends. At
+ * 02:00, an email from 23:00 *yesterday* is only 3 hours old, so a "< 24h"
+ * rule renders it as a bare time with nothing to say it wasn't today. And in
+ * July 2026 a December 2025 email is ~7 months old, so a "< 1 year" rule
+ * strips the year off a date from a different year.
+ *
+ * "Today" means the same local calendar date, so the boundary is local
+ * midnight — which is what a reader actually means by today. Likewise the year
+ * shows whenever the calendar year differs, however recent that is.
+ */
 function formatThreadDate(dateString: string): string {
   if (!dateString) return "";
   const date = new Date(dateString);
+  if (Number.isNaN(date.getTime())) return "";
   const now = new Date();
-  const diffMs = now.getTime() - date.getTime();
-  const oneDayMs = 24 * 60 * 60 * 1000;
-  const oneYearMs = 365.25 * oneDayMs;
 
-  if (diffMs < oneDayMs && diffMs >= 0) {
+  const sameYear = date.getFullYear() === now.getFullYear();
+  const sameDay =
+    sameYear &&
+    date.getMonth() === now.getMonth() &&
+    date.getDate() === now.getDate();
+
+  if (sameDay) {
     return date.toLocaleTimeString(undefined, {
       hour: "numeric",
       minute: "2-digit",
     });
-  } else if (diffMs < oneYearMs) {
+  }
+  if (sameYear) {
     return date.toLocaleDateString(undefined, {
       month: "short",
       day: "numeric",
-    });
-  } else {
-    return date.toLocaleDateString(undefined, {
-      month: "short",
-      day: "numeric",
-      year: "numeric",
     });
   }
+  return date.toLocaleDateString(undefined, {
+    month: "short",
+    day: "numeric",
+    year: "numeric",
+  });
 }
 
 // ── Priority Wax Seals ───────────────────────────────────────────────
@@ -946,8 +964,11 @@ function AiSearchResults({ query }: { query: string }) {
 function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) {
   const { data: job } = useClassificationJobStatus();
   const { startClassificationJobAsync, isPending } = useStartClassificationJob();
+  const { retryFailedClassificationsAsync, isPending: isRetrying } =
+    useRetryFailedClassifications();
 
   const jobRunning = job?.status === "running";
+  const failedCount = job?.failedCount ?? 0;
 
   const handleClassify = async (scope: "last_week" | "last_month") => {
     const result = await startClassificationJobAsync({ scope });
@@ -956,10 +977,35 @@ function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) 
       return;
     }
     if (result.jobId === null) {
+      // "Nothing to classify" is true but useless on its own when the
+      // Unclassified tab is showing a non-zero count — those emails hit the
+      // attempt cap and no job will ever select them again. Name that, rather
+      // than leaving the two numbers silently contradicting each other.
+      if (failedCount > 0) {
+        toast.warning(
+          `${failedCount.toLocaleString()} email${failedCount === 1 ? "" : "s"} failed classification — use Retry to clear them`,
+        );
+        return;
+      }
       toast.info("Nothing to classify in that range");
       return;
     }
     toast.success(`Classifying ${result.totalCount.toLocaleString()} emails…`);
+  };
+
+  const handleRetryFailed = async () => {
+    const result = await retryFailedClassificationsAsync({});
+    if (result.alreadyRunning) {
+      // The rows were still un-stuck (see retryFailedClassifications) — only
+      // the new job was refused, so this isn't a no-op the user should redo.
+      toast.info("Retry queued — a classification job is already running");
+      return;
+    }
+    if (result.jobId === null) {
+      toast.info("No failed emails to retry");
+      return;
+    }
+    toast.success(`Retrying ${result.resetCount.toLocaleString()} failed emails…`);
   };
 
   if (jobRunning && job) {
@@ -968,16 +1014,33 @@ function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) 
       <div className="flex items-center gap-2 text-xs text-muted-foreground">
         <Spinner className="size-3.5" />
         <span>
-          Classifying {job.scope === "last_week" ? "last week" : "last month"}… {job.processedCount.toLocaleString()} / {job.totalCount.toLocaleString()} ({pct}%)
+          {job.scope === "retry_failed"
+            ? "Retrying failed"
+            : `Classifying ${job.scope === "last_week" ? "last week" : "last month"}`}
+          … {job.processedCount.toLocaleString()} / {job.totalCount.toLocaleString()} ({pct}%)
         </span>
       </div>
     );
   }
 
-  if (unclassifiedCount === 0) return null;
+  // Still render when everything unclassified is stuck at the attempt cap —
+  // hiding the controls there would leave the failed count with nowhere to show.
+  if (unclassifiedCount === 0 && failedCount === 0) return null;
 
   return (
     <div className="flex items-center gap-2">
+      {failedCount > 0 && (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={isRetrying || isPending}
+          onClick={handleRetryFailed}
+          title="These emails hit the classification retry limit. Retrying clears it and classifies them again."
+          className="text-xs h-8 border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive"
+        >
+          {isRetrying ? "Retrying…" : `Retry ${failedCount.toLocaleString()} failed`}
+        </Button>
+      )}
       <Button
         variant="outline"
         size="sm"

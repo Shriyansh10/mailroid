@@ -44,10 +44,15 @@ export const emailPriority = inngest.createFunction(
     id: "email-priority",
     // Previously unbounded — during initial sync this let thousands of
     // concurrent runs pile into the same API container the sync itself was
-    // using, which is what made the sync starve on its own load. Sync no
-    // longer triggers this (see docs/architecture-plan.md Stage 0), so today
-    // this only fires from the webhook's one-email-at-a-time path, but the
-    // limit stays as a hard ceiling against any future fan-out.
+    // using, which is what made the sync starve on its own load.
+    //
+    // Every bulk path now classifies in batches instead of emitting one event
+    // per email: sync-metadata.ts stopped emitting, and syncEmails passes
+    // triggerClassification=false to ingestMessage. So this should only fire
+    // from the webhook, one email at a time. The limit stays as a hard ceiling
+    // — the claim above was true of sync-metadata.ts alone once before, while
+    // ingestMessage was quietly fanning out thousands of runs from the Sync
+    // button.
     concurrency: { limit: Number(process.env.WEBHOOK_CONCURRENCY ?? 2) },
   },
   { event: "email.received" },

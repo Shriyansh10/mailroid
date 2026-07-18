@@ -12,12 +12,26 @@
   "js/ts.tsdk.path": "node_modules/typescript/lib",
   "sqltools.connections": [
     {
-      "ssh": "Disabled",
-      "previewLimit": 50,
-      "server": "localhost",
-      "driver": "PostgreSQL",
-      "connectString": "postgresql://postgres:postgres@localhost:5432/mailroid_db",
-      "name": "mailroid-db"
+        "ssh": "Disabled",
+        "previewLimit": 50,
+        "server": "localhost",
+        "driver": "PostgreSQL",
+        "connectString": "postgresql://postgres:postgres@localhost:5432/mailroid_db",
+        "name": "mailroid-db"
+    },
+    {
+        "ssh": "Disabled",
+        "previewLimit": 50,
+        "server": "localhost",
+        "port": 5432,
+        "askForPassword": true,
+        "sshOptions": {
+            "port": 22
+        },
+        "driver": "PostgreSQL",
+        "database": "mailroid_db",
+        "username": "postgres",
+        "name": "Mailroid"
     }
-  ]
+]
 }

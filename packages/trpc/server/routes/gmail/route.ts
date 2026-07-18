@@ -7,7 +7,12 @@ import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEm
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
 import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
-import { startClassificationJob, getLatestClassificationJob } from "@repo/services/gmail/classification.js";
+import {
+  startClassificationJob,
+  getLatestClassificationJob,
+  countFailedClassifications,
+  retryFailedClassifications,
+} from "@repo/services/gmail/classification.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -223,6 +228,43 @@ export const gmailRouter = router({
       return { started: true, jobId: result.jobId, totalCount: result.totalCount, alreadyRunning: false };
     }),
 
+  // Clears the attempt cap on emails stuck at FAILED and classifies them.
+  // Separate from startClassificationJob because it takes no scope — the
+  // window is derived from where the failed rows are, which no fixed scope
+  // would reliably cover.
+  retryFailedClassifications: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/retry-failed-classifications"),
+        tags: TAGS,
+      },
+    })
+    .input(z.object({}))
+    .output(
+      z.object({
+        started: z.boolean(),
+        jobId: z.string().nullable(),
+        totalCount: z.number(),
+        resetCount: z.number(),
+        alreadyRunning: z.boolean(),
+      }),
+    )
+    .mutation(async ({ ctx }) => {
+      logger.info("[TRPC] gmail.retryFailedClassifications called", { userId: ctx.user!.id });
+      const result = await retryFailedClassifications(ctx.user!.id);
+      if (!result.started) {
+        return { started: false, jobId: null, totalCount: 0, resetCount: 0, alreadyRunning: true };
+      }
+      return {
+        started: true,
+        jobId: result.jobId,
+        totalCount: result.totalCount,
+        resetCount: result.resetCount,
+        alreadyRunning: false,
+      };
+    }),
+
   // Polled by the priority inbox while a classification job is in flight.
   classificationJobStatus: protectedProcedure
     .meta({
@@ -238,15 +280,23 @@ export const gmailRouter = router({
         scope: z.string().nullable(),
         processedCount: z.number(),
         totalCount: z.number(),
+        // Emails stuck at the attempt cap. Reported alongside job status so the
+        // inbox can explain a "nothing to classify" result instead of leaving
+        // the user with an Unclassified count nothing will ever act on.
+        failedCount: z.number(),
       }),
     )
     .query(async ({ ctx }) => {
-      const job = await getLatestClassificationJob(ctx.user!.id);
+      const [job, failedCount] = await Promise.all([
+        getLatestClassificationJob(ctx.user!.id),
+        countFailedClassifications(ctx.user!.id),
+      ]);
       return {
         status: (job?.status as "running" | "complete" | "failed" | undefined) ?? null,
         scope: job?.scope ?? null,
         processedCount: job?.processedCount ?? 0,
         totalCount: job?.totalCount ?? 0,
+        failedCount,
       };
     }),
 

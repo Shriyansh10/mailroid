@@ -398,7 +398,14 @@ export async function searchEmails(
 export async function ingestMessage(
   tenantId: string,
   messageId: string,
-  triggerEmbeddings = true
+  triggerEmbeddings = true,
+  // Per-email classification is right for the webhook (one new email, classify
+  // it now) and wrong for any bulk caller: syncEmails walks the whole mailbox,
+  // so leaving this on emits one event — and one LLM call — per unread email.
+  // A fresh account with 2,671 unread emails queued 2,671 runs. Bulk callers
+  // pass false and let the batch classifier pick the rows up from PENDING,
+  // which is what it exists for.
+  triggerClassification = true
 ): Promise<void> {
   const startMs = Date.now();
   logger.info("[SERVICE] ingestMessage start", { tenantId, messageId });
@@ -481,7 +488,7 @@ export async function ingestMessage(
   });
 
   // Trigger priority classification for unread emails (commit success before emitting event)
-  if (flags.isUnread) {
+  if (flags.isUnread && triggerClassification) {
     const { inngest } = await import("@repo/inngest");
     void inngest
       .send({
@@ -537,7 +544,9 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
 
     await Promise.all(
       batch.map((stub) =>
-        ingestMessage(tenantId, stub.id!, false).catch((err) =>
+        // No per-email classification: this walks the whole mailbox. Rows land
+        // as PENDING and the batch classifier handles them.
+        ingestMessage(tenantId, stub.id!, false, false).catch((err) =>
           logger.error("[DB] syncEmails upsert failed", { gmailMessageId: stub.id, error: String(err) })
         )
       )

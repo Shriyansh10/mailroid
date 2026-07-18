@@ -19,7 +19,9 @@ export const LLM_BATCH_SIZE = 50;
 // PROCESSING state between PENDING and DONE/FAILED.
 export const MAX_CLASSIFICATION_ATTEMPTS = 3;
 
-export type ClassificationScope = "last_week" | "last_month";
+// "retry_failed" has no fixed window — its date range comes from where the
+// failed rows actually sit, so it always carries an explicit `since`.
+export type ClassificationScope = "last_week" | "last_month" | "retry_failed";
 
 export function scopeToSinceDate(scope: ClassificationScope): Date {
   const d = new Date();
@@ -39,6 +41,30 @@ export async function countPendingForScope(userId: string, since: Date): Promise
         eq(messageMetadata.classificationStatus, "PENDING"),
         lt(messageMetadata.classificationAttempts, MAX_CLASSIFICATION_ATTEMPTS),
         gte(messageMetadata.receivedAt, since),
+      ),
+    );
+  return Number(row?.count ?? 0);
+}
+
+/**
+ * Emails that exhausted MAX_CLASSIFICATION_ATTEMPTS and will never be picked
+ * up again by any job.
+ *
+ * Deliberately NOT scoped by date. These rows are invisible to every other
+ * count in the product: the "Unclassified" tab counts `priority IS NULL`,
+ * while job sizing counts PENDING-and-under-the-cap. A FAILED row satisfies
+ * the first and not the second, so the UI offers to classify emails the
+ * backend then refuses — which surfaces as "Nothing to classify in that range"
+ * with no explanation. This is the number that explains the gap.
+ */
+export async function countFailedClassifications(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.classificationStatus, "FAILED"),
       ),
     );
   return Number(row?.count ?? 0);
@@ -223,8 +249,11 @@ export async function runClassificationBatch(
 export async function createClassificationJob(
   userId: string,
   scope: ClassificationScope,
+  // Retry passes this: its window is defined by where the failed rows actually
+  // are, which is older than any fixed scope would give.
+  sinceOverride?: Date,
 ): Promise<{ id: string; totalCount: number; since: Date } | { alreadyRunning: true }> {
-  const since = scopeToSinceDate(scope);
+  const since = sinceOverride ?? scopeToSinceDate(scope);
   const totalCount = await countPendingForScope(userId, since);
   const id = `${userId}-${Date.now()}`;
 
@@ -283,6 +312,83 @@ export async function startClassificationJob(
   logger.info("[CLASSIFY] job started", { userId, scope, jobId: job.id, totalCount: job.totalCount });
 
   return { started: true, jobId: job.id, totalCount: job.totalCount };
+}
+
+export type RetryFailedResult =
+  | { started: true; jobId: string; totalCount: number; resetCount: number }
+  | { started: false; reason: "already_running" }
+  | { started: true; jobId: null; totalCount: 0; resetCount: 0 }; // nothing failed
+
+/**
+ * Clears the attempt cap on FAILED emails and starts a job over them.
+ *
+ * The cap exists to stop an *automatic* loop burning credit on rows that can
+ * never classify. A button press is not that loop — it's a person deciding the
+ * original cause (an exhausted quota, a provider outage) is fixed. So resetting
+ * attempts here is the intended escape hatch, not a bypass.
+ *
+ * `since` is the oldest failed row rather than a fixed window: these rows can
+ * be arbitrarily old, and a last_week/last_month job would silently skip the
+ * very emails the user clicked retry to rescue.
+ */
+export async function retryFailedClassifications(userId: string): Promise<RetryFailedResult> {
+  const [oldest] = await db
+    .select({ receivedAt: messageMetadata.receivedAt })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.classificationStatus, "FAILED"),
+      ),
+    )
+    .orderBy(sql`${messageMetadata.receivedAt} ASC`)
+    .limit(1);
+
+  if (!oldest?.receivedAt) {
+    return { started: true, jobId: null, totalCount: 0, resetCount: 0 };
+  }
+
+  // Reset before sizing the job — countPendingForScope only sees PENDING rows
+  // under the cap, so a job created first would come back empty.
+  const reset = await db
+    .update(messageMetadata)
+    .set({ classificationStatus: "PENDING", classificationAttempts: 0, updatedAt: new Date() })
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.classificationStatus, "FAILED"),
+      ),
+    )
+    .returning({ entityId: messageMetadata.entityId });
+
+  const since = new Date(oldest.receivedAt);
+  const job = await createClassificationJob(userId, "retry_failed", since);
+
+  if ("alreadyRunning" in job) {
+    // The rows stay PENDING, so this isn't lost work — the in-flight job picks
+    // them up if its own window covers them, and otherwise the next retry
+    // click starts a job that does.
+    logger.info("[CLASSIFY] retry reset rows but a job is already running", {
+      userId, resetCount: reset.length,
+    });
+    return { started: false, reason: "already_running" };
+  }
+
+  if (job.totalCount === 0) {
+    await markJobComplete(job.id);
+    return { started: true, jobId: null, totalCount: 0, resetCount: 0 };
+  }
+
+  const { inngest } = await import("@repo/inngest");
+  await inngest.send({
+    name: "classification/batch.requested",
+    data: { jobId: job.id, userId, since: job.since.toISOString() },
+  });
+  logger.info("[CLASSIFY] retry job started", {
+    userId, jobId: job.id, totalCount: job.totalCount, resetCount: reset.length,
+  });
+
+  return { started: true, jobId: job.id, totalCount: job.totalCount, resetCount: reset.length };
 }
 
 export async function getLatestClassificationJob(userId: string) {

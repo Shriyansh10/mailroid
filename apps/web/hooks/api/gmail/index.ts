@@ -335,6 +335,27 @@ export const useStartClassificationJob = () => {
 };
 
 /**
+ * Retries emails stuck at the classification attempt cap. Also invalidates the
+ * message lists, since a successful retry changes priorities on rows already
+ * rendered as Unclassified.
+ */
+export const useRetryFailedClassifications = () => {
+  const utils = trpc.useUtils();
+  const result = trpc.gmail.retryFailedClassifications.useMutation({
+    onSuccess: () => {
+      void utils.gmail.classificationJobStatus.invalidate();
+      void utils.gmail.invalidate();
+    },
+  });
+
+  return {
+    retryFailedClassificationsAsync: result.mutateAsync,
+    isPending: result.isPending,
+    error: result.error,
+  };
+};
+
+/**
  * Polls the active/most-recent classification job. Same stop-polling-once-
  * settled pattern as useSyncStatus — this is a single-row read so 10s is
  * cheap, and it stops entirely once there's nothing left to watch.
