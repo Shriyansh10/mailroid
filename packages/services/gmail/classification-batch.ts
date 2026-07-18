@@ -1,7 +1,7 @@
 import { inngest } from "@repo/inngest";
 import {
   runClassificationBatch,
-  incrementJobProgress,
+  setJobProgress,
   markJobComplete,
   markJobFailed,
 } from "./classification.js";
@@ -54,7 +54,7 @@ export const classificationBatch = inngest.createFunction(
       return { jobId, done: true };
     }
 
-    await step.run("job-progress", () => incrementJobProgress(jobId, outcome.attempted));
+    await step.run("job-progress", () => setJobProgress(jobId, outcome.remaining));
 
     if (outcome.remaining > 0) {
       await step.sendEvent("continue-classification-batch", {

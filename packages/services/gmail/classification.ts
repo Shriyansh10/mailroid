@@ -183,6 +183,16 @@ export async function runClassificationBatch(
       const chunkResults = await classifyEmailPriorityBatch(chunk);
       allResults.push(...chunkResults);
     } catch (err) {
+      // An exhausted quota is not a transient chunk failure — every remaining
+      // chunk will fail the same way. Aborting the batch stops it burning an
+      // attempt on each of the other chunks' rows, which would otherwise mark
+      // hundreds of perfectly classifiable emails FAILED at
+      // MAX_CLASSIFICATION_ATTEMPTS for a reason that had nothing to do with
+      // them. Rows already applied above keep their results.
+      if ((err as { code?: string })?.code === "insufficient_quota") {
+        logger.error("[CLASSIFY] provider quota exhausted, aborting batch", { userId });
+        throw err;
+      }
       // One bad LLM call must not block the OTHER chunk in this batch, and
       // must not throw away the sub-batch that DID succeed. These emails
       // simply stay PENDING (or become FAILED below, if attempts are now
@@ -285,12 +295,31 @@ export async function getLatestClassificationJob(userId: string) {
   return row ?? null;
 }
 
-/** `delta` is this batch's attempted count — accumulated onto the job's running total, not overwritten. */
-export async function incrementJobProgress(jobId: string, delta: number): Promise<void> {
+/**
+ * Records progress from what the DB actually says is left, rather than
+ * accumulating each batch's attempted count.
+ *
+ * Accumulating over-counted badly: a row whose LLM chunk failed stays PENDING
+ * by design, gets re-selected by the next batch, and was counted again each
+ * time — so processed_count tracked *attempts*, not emails, and could reach
+ * total_count × MAX_CLASSIFICATION_ATTEMPTS. A run against an exhausted API
+ * quota reported "1,800 / 855" while classifying nothing.
+ *
+ * `remaining` is a fresh countPendingForScope, so deriving from it is
+ * self-correcting: retries no longer inflate it, and a lost continuation event
+ * that the reconciliation cron re-kicks resumes at the true figure.
+ *
+ * Both expressions read the pre-UPDATE total_count, so they stay consistent
+ * within the statement. GREATEST covers mail arriving mid-job, which can push
+ * `remaining` above the total snapshotted at job start — the total grows to fit
+ * instead of the progress bar running backwards or going negative.
+ */
+export async function setJobProgress(jobId: string, remaining: number): Promise<void> {
   await db
     .update(classificationJobs)
     .set({
-      processedCount: sql`${classificationJobs.processedCount} + ${delta}`,
+      totalCount: sql`GREATEST(${classificationJobs.totalCount}, ${remaining})`,
+      processedCount: sql`GREATEST(${classificationJobs.totalCount}, ${remaining}) - ${remaining}`,
       updatedAt: new Date(),
     })
     .where(eq(classificationJobs.id, jobId));

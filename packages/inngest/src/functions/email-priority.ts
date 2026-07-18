@@ -1,5 +1,5 @@
 import { inngest } from "../client.ts";
-import { RetryAfterError } from "inngest";
+import { RetryAfterError, NonRetriableError } from "inngest";
 import { db, eq } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classifyEmailPriority } from "@repo/ai";
@@ -19,6 +19,16 @@ async function classifyWithRetryTranslation(
     return await classifyEmailPriority(sender, subject, snippet);
   } catch (err) {
     const status = (err as { status?: number })?.status;
+    const code = (err as { code?: string })?.code;
+    // A 429 means two very different things. "Too fast" clears on its own, so
+    // backing off is right. "Out of credit" (insufficient_quota) never clears
+    // without a human topping up the account — retrying it just burns requests
+    // against a dead quota every retryAfter seconds, indefinitely, which is
+    // exactly how an exhausted OpenAI balance turned into a silent retry storm.
+    // NonRetriableError surfaces it as a failed run instead of hiding it.
+    if (code === "insufficient_quota") {
+      throw new NonRetriableError("LLM provider quota exhausted — check billing", { cause: err });
+    }
     if (status === 429) {
       const retryAfterHeader = (err as { headers?: { get?: (name: string) => string | null } })
         ?.headers?.get?.("retry-after");
