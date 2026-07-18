@@ -12,3 +12,5 @@ export * from './models/daily-briefs';
 export * from './models/assistant-chats';
 export * from './models/feedbacks';
 export * from './models/user-usage';
+export * from './models/gmail-sync-status';
+export * from './models/classification-jobs';
