@@ -2,7 +2,11 @@ import { corsair } from "@repo/corsair";
 import { db, eq } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 
-const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC ?? "projects/mailroid-499113/topics/mailroid-webhooks";
+const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC;
+if (!TOPIC_NAME) {
+  throw new Error("GMAIL_PUBSUB_TOPIC is not set — refusing to register a Gmail watch against a fallback topic");
+}
+
 
 export async function startGmailWatch(
   tenantId: string,

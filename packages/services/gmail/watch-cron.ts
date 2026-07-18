@@ -45,6 +45,16 @@ export const gmailWatchCron = inngest.createFunction(
       }
     }
 
-    return { processed: tenants.length, results };
+    const failed = results.filter((r) => !r.success);
+    if (failed.length > 0) {
+      console.error(
+        `[gmail-watch-cron] ⚠️ ${failed.length}/${tenants.length} Gmail watch renewals FAILED:`,
+        JSON.stringify(failed),
+      );
+    } else {
+      console.log(`[gmail-watch-cron] Renewed ${results.length}/${tenants.length} Gmail watches successfully.`);
+    }
+
+    return { processed: tenants.length, succeeded: results.length - failed.length, failed: failed.length, results };
   }
 );
