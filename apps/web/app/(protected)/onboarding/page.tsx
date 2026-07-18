@@ -1,6 +1,7 @@
 "use client";
 
 import { useGetGmailOAuthUrl, useGetCalendarOAuthUrl, useGetAccountsExist } from "@web/hooks/api/tentant";
+import { useSyncStatus } from "@web/hooks/api/gmail";
 import { useSession, authClient } from "@web/lib/auth-client";
 import { useRouter, useSearchParams } from "next/navigation";
 import { useState, useEffect, useRef, useCallback } from "react";
@@ -9,6 +10,42 @@ import { Mail, Calendar, LogOut } from "lucide-react";
 import { Progress } from "@web/components/ui/progress";
 import { Button } from "@web/components/ui/button";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+
+// ── mailbox sync waiting screen ───────────────────────────────────────
+function SyncProgress({ enabled }: { enabled: boolean }) {
+  const { data } = useSyncStatus({ enabled });
+  if (!enabled || !data || !data.status || data.status === "complete") return null;
+
+  const { status, processed, estimatedTotal } = data;
+
+  if (status === "failed") {
+    return (
+      <div className="mt-6 rounded-xl border border-red-500/20 bg-red-500/5 p-4 text-sm text-red-500">
+        Mailbox sync failed. You can still use Mailroid — try reconnecting Gmail to retry.
+      </div>
+    );
+  }
+
+  const label = status === "queued"
+    ? "Waiting to start — another mailbox is syncing first…"
+    : estimatedTotal
+      ? `Imported ${processed.toLocaleString()} / ~${estimatedTotal.toLocaleString()} emails…`
+      : `Imported ${processed.toLocaleString()} emails…`;
+
+  const progress = status === "queued"
+    ? 0
+    : estimatedTotal
+      ? Math.min(100, Math.round((processed / estimatedTotal) * 100))
+      : undefined;
+
+  return (
+    <div className="mt-6 rounded-xl border bg-card/50 p-4">
+      <p className="text-sm font-medium text-foreground/90 mb-2">Preparing your mailbox…</p>
+      <Progress value={progress ?? 0} className="h-2" />
+      <p className="mt-2 text-xs text-muted-foreground">{label}</p>
+    </div>
+  );
+}
 
 
 // ── types ────────────────────────────────────────────────────────────
@@ -131,6 +168,13 @@ export default function OnboardingPage() {
   const calConnected   = connectedPlugins.includes("googlecalendar");
   const bothConnected  = gmailConnected && calConnected;
 
+  // The user waits until the mailbox is fully imported before entering the app
+  // (docs/architecture-plan.md) — entering mid-sync means a half-populated
+  // inbox visibly filling in as rows land. 'failed' does not block: a failed
+  // sync should not lock the user out of the product entirely.
+  const { data: sync } = useSyncStatus({ enabled: gmailConnected });
+  const syncInProgress = sync?.status === "queued" || sync?.status === "running";
+
   const progress = ((gmailConnected ? 1 : 0) + (calConnected ? 1 : 0)) * 50;
 
   return (
@@ -216,6 +260,8 @@ export default function OnboardingPage() {
             <p className="mt-6 text-sm text-red-500 text-center font-medium">{errorMsg}</p>
           )}
 
+          <SyncProgress enabled={gmailConnected} />
+
           <div className="mt-10 w-full pt-6 border-t">
             <div className="mb-3 flex justify-between text-sm font-medium text-foreground/80">
               <span>Setup Progress</span>
@@ -227,10 +273,14 @@ export default function OnboardingPage() {
             <Button
               size="lg"
               onClick={handleProceed}
-              disabled={!bothConnected || proceeding || checkingServer}
+              disabled={!bothConnected || proceeding || checkingServer || syncInProgress}
               className="mt-8 w-full h-12 text-base font-semibold shadow-sm transition-transform hover:scale-[1.01]"
             >
-              {proceeding ? "Redirecting..." : "Continue to Mailroid"}
+              {proceeding
+                ? "Redirecting..."
+                : syncInProgress
+                  ? "Preparing your mailbox…"
+                  : "Continue to Mailroid"}
             </Button>
           </div>
         </div>

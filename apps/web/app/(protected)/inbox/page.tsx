@@ -2,13 +2,15 @@
 
 import React, { useEffect, useState, useMemo } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { 
-  useCategoryEmails, 
-  useSearchLocalEmails, 
-  useSearchEmails, 
-  usePriorityEmails, 
+import {
+  useCategoryEmails,
+  useSearchLocalEmails,
+  useSearchEmails,
+  usePriorityEmails,
   usePriorityCounts,
-  useThread
+  useThread,
+  useStartClassificationJob,
+  useClassificationJobStatus,
 } from "@web/hooks/api/gmail";
 import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
 import { Button } from "@web/components/ui/button";
@@ -78,9 +80,10 @@ function formatThreadDate(dateString: string): string {
 // ── Priority Wax Seals ───────────────────────────────────────────────
 
 function PrioritySeal({ priority }: { priority?: string; score?: number | null }) {
-  const p = priority || "MEDIUM";
-  if (p === "HIGH") return <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase rounded">HIGH</Badge>;
-  if (p === "LOW") return <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-muted-foreground bg-muted rounded">LOW</Badge>;
+  // No priority means genuinely unclassified — never default to MEDIUM.
+  if (!priority) return <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-muted-foreground/70 border-muted-foreground/20 rounded">Unclassified</Badge>;
+  if (priority === "HIGH") return <Badge variant="destructive" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase rounded">HIGH</Badge>;
+  if (priority === "LOW") return <Badge variant="secondary" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-muted-foreground bg-muted rounded">LOW</Badge>;
   return <Badge variant="outline" className="text-[10px] px-1.5 py-0 h-4.5 font-bold tracking-widest uppercase text-amber-600 border-amber-600/30 bg-amber-500/10 rounded">MEDIUM</Badge>;
 }
 
@@ -935,6 +938,68 @@ function AiSearchResults({ query }: { query: string }) {
   );
 }
 
+// ── Historical classification controls ────────────────────────────────
+// "Classify Full Inbox" was deliberately dropped from the product — old
+// mail is rarely actionable and future mail is already auto-classified via
+// the webhook, so only a bounded recent window is offered here.
+
+function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) {
+  const { data: job } = useClassificationJobStatus();
+  const { startClassificationJobAsync, isPending } = useStartClassificationJob();
+
+  const jobRunning = job?.status === "running";
+
+  const handleClassify = async (scope: "last_week" | "last_month") => {
+    const result = await startClassificationJobAsync({ scope });
+    if (result.alreadyRunning) {
+      toast.info("A classification job is already running");
+      return;
+    }
+    if (result.jobId === null) {
+      toast.info("Nothing to classify in that range");
+      return;
+    }
+    toast.success(`Classifying ${result.totalCount.toLocaleString()} emails…`);
+  };
+
+  if (jobRunning && job) {
+    const pct = job.totalCount > 0 ? Math.min(100, Math.round((job.processedCount / job.totalCount) * 100)) : 0;
+    return (
+      <div className="flex items-center gap-2 text-xs text-muted-foreground">
+        <Spinner className="size-3.5" />
+        <span>
+          Classifying {job.scope === "last_week" ? "last week" : "last month"}… {job.processedCount.toLocaleString()} / {job.totalCount.toLocaleString()} ({pct}%)
+        </span>
+      </div>
+    );
+  }
+
+  if (unclassifiedCount === 0) return null;
+
+  return (
+    <div className="flex items-center gap-2">
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={isPending}
+        onClick={() => handleClassify("last_week")}
+        className="text-xs h-8"
+      >
+        Classify Last Week
+      </Button>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={isPending}
+        onClick={() => handleClassify("last_month")}
+        className="text-xs h-8"
+      >
+        Classify Last Month
+      </Button>
+    </div>
+  );
+}
+
 // ── Priority Inbox View ──────────────────────────────────────────────
 
 function PriorityInbox({
@@ -944,15 +1009,15 @@ function PriorityInbox({
   page: number;
   onNavigate: (newCategory: string, newPage: number) => void;
 }) {
-  const [filter, setFilter] = React.useState<"ALL" | "HIGH" | "MEDIUM" | "LOW">("ALL");
+  const [filter, setFilter] = React.useState<"ALL" | "HIGH" | "MEDIUM" | "LOW" | "UNCLASSIFIED">("ALL");
 
   const priorities = React.useMemo(() => {
-    if (filter === "ALL") return ["HIGH", "MEDIUM", "LOW"];
+    if (filter === "ALL") return ["HIGH", "MEDIUM", "LOW", "UNCLASSIFIED"];
     return [filter];
   }, [filter]);
 
   const { data: countsData } = usePriorityCounts();
-  const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, ALL: 0 };
+  const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, UNCLASSIFIED: 0, ALL: 0 };
 
   // Fetch a whole window, then slice out the requested page on the client.
   const windowIndex = Math.floor(((page - 1) * PAGE_SIZE) / WINDOW_SIZE);
@@ -979,11 +1044,15 @@ function PriorityInbox({
       error={error}
       headerActions={
         <div className="flex items-center gap-2 px-2">
-          {(["ALL", "HIGH", "MEDIUM", "LOW"] as const).map((key) => {
+          {(["ALL", "HIGH", "MEDIUM", "LOW", "UNCLASSIFIED"] as const).map((key) => {
             const count = key === "ALL" ? counts.ALL : counts[key];
-            const label = key === "ALL" ? "All" : key.charAt(0) + key.slice(1).toLowerCase();
+            const label = key === "ALL"
+              ? "All"
+              : key === "UNCLASSIFIED"
+                ? "Unclassified"
+                : key.charAt(0) + key.slice(1).toLowerCase();
             const isActive = filter === key;
-            
+
             return (
               <button
                 key={key}
@@ -998,6 +1067,9 @@ function PriorityInbox({
               </button>
             );
           })}
+          <div className="ml-2 pl-2 border-l border-border/40">
+            <ClassifyControls unclassifiedCount={counts.UNCLASSIFIED} />
+          </div>
         </div>
       }
       pagination={

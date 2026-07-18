@@ -141,6 +141,28 @@ export const useSyncEmails = () => {
   };
 };
 
+/**
+ * Polls the durable sync checkpoint (see @repo/services/gmail/sync-status.ts).
+ * `status` is null when no sync has ever been triggered for this user.
+ * Poll cadence matches useInboxSync's 10s so a fresh connect's "queued" ->
+ * "running" -> "complete" transition shows up promptly without hammering the
+ * API — this is a single indexed primary-key read, far cheaper than the
+ * inbox list queries already polled at the same interval.
+ */
+export const useSyncStatus = (opts?: { enabled?: boolean }) => {
+  const result = trpc.gmail.syncStatus.useQuery(undefined, {
+    enabled: opts?.enabled ?? true,
+    refetchInterval: (query) => {
+      const status = query.state.data?.status;
+      // Stop polling once there's nothing left to watch.
+      return status === "complete" || status === "failed" ? false : 10_000;
+    },
+    staleTime: 0,
+  });
+
+  return result;
+};
+
 export const useStoredEmailCount = () => {
   const { data, isLoading, isError, error, refetch } =
     trpc.gmail.storedCount.useQuery();
@@ -295,6 +317,33 @@ export const useCategoryEmails = (category: string, opts?: { maxResults?: number
   }, [result.error]);
 
   return result;
+};
+
+export const useStartClassificationJob = () => {
+  const utils = trpc.useUtils();
+  const result = trpc.gmail.startClassificationJob.useMutation({
+    onSuccess: () => {
+      void utils.gmail.classificationJobStatus.invalidate();
+    },
+  });
+
+  return {
+    startClassificationJobAsync: result.mutateAsync,
+    isPending: result.isPending,
+    error: result.error,
+  };
+};
+
+/**
+ * Polls the active/most-recent classification job. Same stop-polling-once-
+ * settled pattern as useSyncStatus — this is a single-row read so 10s is
+ * cheap, and it stops entirely once there's nothing left to watch.
+ */
+export const useClassificationJobStatus = () => {
+  return trpc.gmail.classificationJobStatus.useQuery(undefined, {
+    refetchInterval: (query) => (query.state.data?.status === "running" ? 10_000 : false),
+    staleTime: 0,
+  });
 };
 
 export const useCategoryCounts = () => {

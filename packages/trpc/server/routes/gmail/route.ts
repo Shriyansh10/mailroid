@@ -6,6 +6,8 @@ import { logger } from "@repo/logger";
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
+import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
+import { startClassificationJob, getLatestClassificationJob } from "@repo/services/gmail/classification.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -162,6 +164,90 @@ export const gmailRouter = router({
       logger.info("[TRPC] gmail.resync called", { userId: ctx.user!.id });
       await triggerGmailSync(ctx.user!.id);
       return { queued: true };
+    }),
+
+  // Polled by the onboarding waiting screen and (once complete) used to gate
+  // historical classification. status is 'queued' | 'running' | 'complete' |
+  // 'failed' | null (no sync has ever been triggered for this user).
+  syncStatus: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/sync-status"),
+        tags: TAGS,
+      },
+    })
+    .output(
+      z.object({
+        status: z.enum(["queued", "running", "complete", "failed"]).nullable(),
+        processed: z.number(),
+        estimatedTotal: z.number().nullable(),
+      }),
+    )
+    .query(async ({ ctx }) => {
+      const row = await getSyncStatus(ctx.user!.id);
+      return {
+        status: (row?.status as "queued" | "running" | "complete" | "failed" | undefined) ?? null,
+        processed: row?.processed ?? 0,
+        estimatedTotal: row?.estimatedTotal ?? null,
+      };
+    }),
+
+  // Starts a historical bulk classification job ("Classify Last Week" /
+  // "Classify Last Month"). Rejects with a friendly result (not an error) if
+  // one is already running for this user — the unique partial index on
+  // classification_jobs is the actual guard; this just surfaces it cleanly.
+  startClassificationJob: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/start-classification-job"),
+        tags: TAGS,
+      },
+    })
+    .input(z.object({ scope: z.enum(["last_week", "last_month"]) }))
+    .output(
+      z.object({
+        started: z.boolean(),
+        jobId: z.string().nullable(),
+        totalCount: z.number(),
+        alreadyRunning: z.boolean(),
+      }),
+    )
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.startClassificationJob called", { userId: ctx.user!.id, scope: input.scope });
+      const result = await startClassificationJob(ctx.user!.id, input.scope);
+      if (!result.started) {
+        return { started: false, jobId: null, totalCount: 0, alreadyRunning: true };
+      }
+      return { started: true, jobId: result.jobId, totalCount: result.totalCount, alreadyRunning: false };
+    }),
+
+  // Polled by the priority inbox while a classification job is in flight.
+  classificationJobStatus: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/classification-job-status"),
+        tags: TAGS,
+      },
+    })
+    .output(
+      z.object({
+        status: z.enum(["running", "complete", "failed"]).nullable(),
+        scope: z.string().nullable(),
+        processedCount: z.number(),
+        totalCount: z.number(),
+      }),
+    )
+    .query(async ({ ctx }) => {
+      const job = await getLatestClassificationJob(ctx.user!.id);
+      return {
+        status: (job?.status as "running" | "complete" | "failed" | undefined) ?? null,
+        scope: job?.scope ?? null,
+        processedCount: job?.processedCount ?? 0,
+        totalCount: job?.totalCount ?? 0,
+      };
     }),
 
   storedCount: protectedProcedure
@@ -386,6 +472,7 @@ export const gmailRouter = router({
         HIGH: z.number(),
         MEDIUM: z.number(),
         LOW: z.number(),
+        UNCLASSIFIED: z.number(),
         ALL: z.number(),
       }),
     )

@@ -21,6 +21,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
 import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
+import { useCalendarSync } from "@web/hooks/api/calendar";
 import { frontendLogger } from "@web/lib/frontend-logger";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 
@@ -56,6 +57,8 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   // Poll the per-user inbox version and invalidate cached lists when it grows,
   // so a webhook touching this user's mail refreshes only this user.
   useInboxSync();
+  // Same for the calendar widgets shown on the inbox.
+  useCalendarSync();
 
   const { syncEmailsAsync, isPending: syncing } = useSyncEmails();
   const { data: countData, refetch: refetchCount } = useStoredEmailCount();

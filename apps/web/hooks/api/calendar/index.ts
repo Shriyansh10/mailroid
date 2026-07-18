@@ -1,6 +1,40 @@
 "use client";
 
+import { useEffect, useRef } from "react";
 import { trpc } from "@web/trpc/client";
+
+/**
+ * Per-user realtime freshness for the calendar. Polls the cheap
+ * `calendar.calendarVersion` token and, when it grows (a webhook synced THIS
+ * user's calendar), invalidates the cached event lists so they re-fetch. Mirrors
+ * gmail's useInboxSync. Mount this once where the calendar is rendered.
+ */
+export const useCalendarSync = () => {
+  const utils = trpc.useUtils();
+  const lastVersionRef = useRef<number | null>(null);
+
+  const { data } = trpc.calendar.calendarVersion.useQuery(undefined, {
+    refetchInterval: 10_000,
+    refetchOnWindowFocus: true,
+    staleTime: 0,
+  });
+
+  useEffect(() => {
+    const version = data?.version;
+    if (version === undefined) return;
+
+    // First reading just establishes the baseline — don't refetch on mount.
+    if (lastVersionRef.current === null) {
+      lastVersionRef.current = version;
+      return;
+    }
+
+    if (version > lastVersionRef.current) {
+      lastVersionRef.current = version;
+      void utils.calendar.events.invalidate();
+    }
+  }, [data?.version, utils]);
+};
 
 export const useCalendarEvents = (timeMin: string, timeMax: string) => {
   const {

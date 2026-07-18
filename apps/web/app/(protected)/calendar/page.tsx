@@ -23,6 +23,7 @@ import type { EventResizeDoneArg } from "@fullcalendar/interaction";
 
 import {
   useCalendarEvents,
+  useCalendarSync,
   useCreateEvent,
   useUpdateEvent,
   useDeleteEvent,
@@ -60,6 +61,11 @@ export default function CalendarPage() {
     timeMin: new Date().toISOString(),
     timeMax: new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString(),
   });
+
+  // Poll the per-user calendar version and invalidate cached events when it
+  // grows, so a webhook syncing this user's calendar refreshes the UI without a
+  // manual reload.
+  useCalendarSync();
 
   // Fetch events for the visible range
   const { data: events, refetch } = useCalendarEvents(
