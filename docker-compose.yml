@@ -10,11 +10,39 @@ services:
       POSTGRES_DB: mailroid_db
 
     ports:
+      # Host 5432 deliberately. 5433 is reserved for the SSH tunnel to the
+      # production DB — publishing local Postgres there too made DATABASE_URL
+      # and PROD_DATABASE_URL resolve to the same socket, so local dev wrote to
+      # prod whenever the tunnel happened to be open.
       - "5432:5432"
 
     volumes:
       - pg_data:/var/lib/postgresql/data
       - ./docker-init.sql:/docker-entrypoint-initdb.d/init.sql
+
+  # Local stand-in for Inngest Cloud. Without a platform (cloud OR this), the
+  # functions served at /api/inngest are never invoked by anything: the app only
+  # *exposes* them and *sends* events — the queue, retries and step memoization
+  # all live in the platform, which calls back into the app one step at a time.
+  #
+  # Only the mailbox sync has an inline fallback when Inngest is absent
+  # (triggerGmailSync checks INNGEST_EVENT_KEY); classification, the webhook
+  # path and the reconciliation cron have none and simply never run without it.
+  inngest:
+    image: inngest/inngest:latest
+    container_name: inngest
+    restart: unless-stopped
+    # The API runs on the host via `pnpm dev`, not in this compose network, so
+    # the dev server must dial back out to the host — inside the container
+    # `localhost` would be the container itself. --no-discovery stops it from
+    # scanning the usual localhost ports, which for the same reason find nothing.
+    command: inngest dev -u http://host.docker.internal:8000/api/inngest --no-discovery
+    ports:
+      - "8288:8288"
+    extra_hosts:
+      # Docker Desktop provides host.docker.internal automatically; this keeps
+      # the same compose file working on native Linux, where it doesn't exist.
+      - "host.docker.internal:host-gateway"
 
 volumes:
   pg_data:

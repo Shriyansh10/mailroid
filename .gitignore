@@ -11,6 +11,10 @@ node_modules
 .env.development.local
 .env.test.local
 .env.production.local
+# Backups of .env made while switching credentials — these hold real secrets
+# and the bare `.env` rule above does not match them.
+.env.bak*
+.env.backup*
 
 # Testing
 coverage
