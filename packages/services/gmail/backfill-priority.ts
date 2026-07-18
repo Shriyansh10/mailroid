@@ -72,26 +72,25 @@ export async function backfillPriorityEmails(opts?: {
           snippet || "No Content"
         );
 
-        if (classification) {
-          await db
-            .update(messageMetadata)
-            .set({
-              priority: classification.priority,
-              priorityScore: classification.priorityScore,
-              priorityReason: classification.priorityReason,
-              isActionRequired: classification.isActionRequired,
-              isReplyNeeded: classification.isReplyNeeded,
-              lastClassifiedAt: new Date(),
-              updatedAt: new Date(),
-            })
-            .where(eq(messageMetadata.entityId, entityId));
+        // classifyEmailPriority throws on failure now (rate limit, malformed
+        // output, network error) instead of returning null — the catch below
+        // is what counts a failed email, so there's no separate null branch.
+        await db
+          .update(messageMetadata)
+          .set({
+            priority: classification.priority,
+            priorityScore: classification.priorityScore,
+            priorityReason: classification.priorityReason,
+            isActionRequired: classification.isActionRequired,
+            isReplyNeeded: classification.isReplyNeeded,
+            classificationStatus: "DONE",
+            lastClassifiedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(eq(messageMetadata.entityId, entityId));
 
-          successCount++;
-          logger.info(`[BACKFILL] Successfully updated classification to ${classification.priority} (Score: ${classification.priorityScore})`);
-        } else {
-          errorCount++;
-          logger.error(`[BACKFILL] Classification returned null for email: ${entityId}`);
-        }
+        successCount++;
+        logger.info(`[BACKFILL] Successfully updated classification to ${classification.priority} (Score: ${classification.priorityScore})`);
       } catch (err) {
         errorCount++;
         logger.error(`[BACKFILL] Failed to process email ${entityId}:`, err);

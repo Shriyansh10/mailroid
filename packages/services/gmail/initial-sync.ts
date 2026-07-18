@@ -1,6 +1,13 @@
 import { inngest } from "@repo/inngest";
 import { syncCategoryPage } from "./sync-metadata.js";
 import { ALL_CATEGORIES } from "./metadata.js";
+import {
+  markSyncRunning,
+  updateSyncProgress,
+  markSyncComplete,
+  markSyncFailed,
+  estimateMailboxTotal,
+} from "./sync-status.js";
 
 // Hand off to a fresh function run after this many pages so the memoized
 // step state of a single run stays bounded on very large mailboxes (25k+
@@ -19,6 +26,15 @@ const MAX_PAGES_PER_RUN = 15;
  *
  * Re-syncing any account = send `gmail/sync.requested` with that userId.
  *
+ * `gmail_sync_status` (see sync-status.ts) is this function's only durable
+ * trace outside of Inngest's own run history — it's what lets the UI poll
+ * for progress and know when it's safe to unlock historical classification.
+ * `categoryIndex === undefined` on the incoming event is what distinguishes a
+ * genuinely first run from a continuation (a continuation always sets it
+ * explicitly, even to 0), so only the first run writes `running` and only the
+ * run whose loop exits with nextPageToken == null on every category writes
+ * `complete`. Continuation runs must never touch `status`.
+ *
  * NOTE: this lives in @repo/services (not @repo/inngest) because it needs
  * syncCategoryPage/ALL_CATEGORIES from this package, and @repo/services
  * already depends on @repo/inngest — defining it here keeps that dependency
@@ -31,16 +47,30 @@ export const gmailInitialSync = inngest.createFunction(
     // Cap simultaneous syncs so a burst of new connections can't exhaust the
     // API container. Per-user Gmail rate limiting is handled inside
     // syncCategoryPage (concurrency cap + backoff/retry).
-    concurrency: { limit: 5 },
+    concurrency: { limit: Number(process.env.INITIAL_SYNC_CONCURRENCY ?? 1) },
     retries: 4,
+    onFailure: async ({ event }) => {
+      // onFailure's event wraps the original triggering event at event.data.event
+      // — the original `gmail/sync.requested` payload, not this failure event.
+      const userId: string | undefined = event.data.event?.data?.userId;
+      if (userId) await markSyncFailed(userId);
+    },
   },
   { event: "gmail/sync.requested" },
   async ({ event, step }) => {
     const userId: string = event.data.userId;
+    const isFirstRun = event.data.categoryIndex === undefined;
     let categoryIndex: number = event.data.categoryIndex ?? 0;
     let pageToken: string | undefined = event.data.pageToken ?? undefined;
     let syncedTotal: number = event.data.syncedTotal ?? 0;
     let pagesThisRun = 0;
+
+    if (isFirstRun) {
+      const estimatedTotal = await step.run("sync-status-estimate", () =>
+        estimateMailboxTotal(userId),
+      );
+      await step.run("sync-status-running", () => markSyncRunning(userId, estimatedTotal));
+    }
 
     while (categoryIndex < ALL_CATEGORIES.length) {
       const category = ALL_CATEGORIES[categoryIndex]!;
@@ -62,6 +92,14 @@ export const gmailInitialSync = inngest.createFunction(
         pageToken = undefined;
       }
 
+      await step.run(`sync-status-progress-${pagesThisRun}`, () =>
+        updateSyncProgress(
+          userId,
+          { categoryIndex, pageToken: pageToken ?? null },
+          syncedTotal,
+        ),
+      );
+
       if (
         pagesThisRun >= MAX_PAGES_PER_RUN &&
         categoryIndex < ALL_CATEGORIES.length
@@ -73,6 +111,8 @@ export const gmailInitialSync = inngest.createFunction(
         return { userId, syncedTotal, continued: true };
       }
     }
+
+    await step.run("sync-status-complete", () => markSyncComplete(userId, syncedTotal));
 
     return { userId, syncedTotal, done: true };
   },

@@ -85,7 +85,11 @@ export type {
 } from "./security/index.ts";
 
 // ── Prompts ────────────────────────────────────────────────────────────
-export { classifyEmailPriority } from "./prompts/priority.ts";
-export type { PriorityClassificationResult } from "./prompts/priority.ts";
+export { classifyEmailPriority, classifyEmailPriorityBatch } from "./prompts/priority.ts";
+export type {
+  PriorityClassificationResult,
+  PriorityBatchItem,
+  PriorityBatchResult,
+} from "./prompts/priority.ts";
 export { evaluateFeedback } from "./prompts/feedback-evaluator.ts";
 export type { FeedbackEvaluationResult } from "./prompts/feedback-evaluator.ts";

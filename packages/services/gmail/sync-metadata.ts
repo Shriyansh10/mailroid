@@ -1,10 +1,22 @@
 import { corsair } from "@repo/corsair";
-import { db } from "@repo/database";
+import { db, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 import {CATEGORY_TO_GMAIL_QUERY, ALL_CATEGORIES, extractHeader} from './metadata.ts';
 import { withGmailRetry } from './retry.ts';
+import {
+  markSyncQueued,
+  markSyncRunning,
+  markSyncComplete,
+  markSyncFailed,
+  updateSyncProgress,
+  estimateMailboxTotal,
+} from './sync-status.ts';
+
+// Postgres has a bind-parameter ceiling, and one round trip per row defeats
+// the point of batching — chunk large pages into fixed-size upsert statements.
+const UPSERT_BATCH_SIZE = 100;
 
 // ── Category mapping ──────────────────────────────────────────────────
 
@@ -74,116 +86,122 @@ snippet?: string;
 }
 
 export async function upsertMessageMetadata(input: MetadataInput): Promise<void> {
-  await db
-    .insert(messageMetadata)
-    .values({
-      entityId: input.entityId,
-      userId: input.userId,
-      gmailLabels: input.gmailLabels,
-      category: input.category as any,
-      sender: input.sender,
-subject: input.subject,
-snippet: input.snippet,
-      isUnread: input.isUnread,
-      isInInbox: input.isInInbox,
-      isStarred: input.isStarred,
-      isImportant: input.isImportant,
-      receivedAt: input.receivedAt,
-      threadId: input.threadId,
-    })
-    .onConflictDoUpdate({
-      target: messageMetadata.entityId,
-      set: {
-        userId: input.userId,
-        gmailLabels: input.gmailLabels,
-        category: input.category as any,
-        sender: input.sender,
-subject: input.subject,
-snippet: input.snippet,
-        isUnread: input.isUnread,
-        isInInbox: input.isInInbox,
-        isStarred: input.isStarred,
-        isImportant: input.isImportant,
-        receivedAt: input.receivedAt,
-        threadId: input.threadId,
-        updatedAt: new Date(),
-      },
-    });
-  logger.debug("[DB] upsertMessageMetadata completed", {
-    entityId: input.entityId, category: input.category, userId: input.userId,
+  await upsertMessageMetadataBatch([input]);
+}
+
+/**
+ * Batch upsert — one INSERT ... ON CONFLICT statement per chunk of rows,
+ * instead of one round trip per email. `excluded.*` refers to the row that
+ * lost the conflict, which is what makes a single multi-row statement upsert
+ * every row correctly (Drizzle's per-column `set` on a single-row upsert
+ * would otherwise just repeat the first row's values for the whole batch).
+ */
+export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promise<void> {
+  if (inputs.length === 0) return;
+
+  for (let i = 0; i < inputs.length; i += UPSERT_BATCH_SIZE) {
+    const chunk = inputs.slice(i, i + UPSERT_BATCH_SIZE);
+    await db
+      .insert(messageMetadata)
+      .values(
+        chunk.map((input) => ({
+          entityId: input.entityId,
+          userId: input.userId,
+          gmailLabels: input.gmailLabels,
+          category: input.category as any,
+          sender: input.sender,
+          subject: input.subject,
+          snippet: input.snippet,
+          isUnread: input.isUnread,
+          isInInbox: input.isInInbox,
+          isStarred: input.isStarred,
+          isImportant: input.isImportant,
+          receivedAt: input.receivedAt,
+          threadId: input.threadId,
+        })),
+      )
+      .onConflictDoUpdate({
+        target: messageMetadata.entityId,
+        set: {
+          userId: sql`excluded.user_id`,
+          gmailLabels: sql`excluded.gmail_labels`,
+          category: sql`excluded.category`,
+          sender: sql`excluded.sender`,
+          subject: sql`excluded.subject`,
+          snippet: sql`excluded.snippet`,
+          isUnread: sql`excluded.is_unread`,
+          isInInbox: sql`excluded.is_in_inbox`,
+          isStarred: sql`excluded.is_starred`,
+          isImportant: sql`excluded.is_important`,
+          receivedAt: sql`excluded.received_at`,
+          threadId: sql`excluded.thread_id`,
+          updatedAt: new Date(),
+        },
+      });
+  }
+
+  logger.debug("[DB] upsertMessageMetadataBatch completed", {
+    count: inputs.length, batches: Math.ceil(inputs.length / UPSERT_BATCH_SIZE),
   });
 }
 
 // ── Single pipeline entry point ───────────────────────────────────────
+//
+// syncCategoryPage already calls threads.get(format:"metadata"), whose
+// response contains every field used below (From/Subject headers, snippet,
+// labelIds, internalDate, threadId). Building the row from that response
+// instead of re-fetching messages.get(format:"full") per message removes
+// ~1 redundant Gmail API call (and a full-body download) per email synced.
 
-export async function processMessage(
-  userId: string,
-  entityId: string,
-): Promise<void> {
-  const gmailStart = Date.now();
-  const tenant = corsair.withTenant(userId);
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const msg = await withGmailRetry(`messages.get ${entityId}`, () =>
-    (tenant.gmail.api as any).messages.get({
-      userId: "me",
-      id: entityId,
-      format: "full",
-    }),
-  );
-  // Gmail API returns labelIds directly on the message object, not nested
+interface RawGmailMessage {
+  id?: string;
+  threadId?: string;
+  labelIds?: string[];
+  snippet?: string;
+  internalDate?: string;
+  payload?: unknown;
+}
+
+function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput | null {
+  if (!msg.id) return null;
+
   const raw = msg as Record<string, unknown>;
   const sender = extractHeader(raw, "From");
-const subject = extractHeader(raw, "Subject");
-const snippet = (raw.snippet as string) ?? "";
-  const labels: string[] = (raw.labelIds as string[]) ?? [];
-  const internalDate = Number(raw.internalDate);
+  const subject = extractHeader(raw, "Subject");
+  const snippet = msg.snippet ?? "";
+  const labels: string[] = msg.labelIds ?? [];
+  const internalDate = Number(msg.internalDate);
   const receivedAt = isNaN(internalDate) ? undefined : new Date(internalDate);
-  const threadId = raw.threadId as string | undefined;
   const category = deriveCategory(labels);
   const flags = deriveFlags(labels);
 
-  logger.debug("[CATEGORY] processMessage classification", {
-    entityId, userId, labels, category, flags, threadId, receivedAt,
-    gmailDurationMs: Date.now() - gmailStart,
-  });
-
-  await upsertMessageMetadata({
-    entityId,
+  return {
+    entityId: msg.id,
     userId,
     gmailLabels: labels,
     sender,
-subject,
-snippet,
+    subject,
+    snippet,
     category,
     ...flags,
     receivedAt,
-    threadId,
-  });
-
-  // Trigger priority classification
-  if (flags.isUnread) {
-    const { inngest } = await import("@repo/inngest");
-    await inngest.send({
-      name: "email.received",
-      data: { userId, entityId },
-    });
-  }
+    threadId: msg.threadId,
+  };
 }
 
 export async function processMessages(
   userId: string,
-  entityIds: string[],
+  messages: RawGmailMessage[],
 ): Promise<void> {
-    
-  logger.info("[SERVICE] processMessages batch", { userId, entityCount: entityIds.length });
-  await Promise.all(
-    entityIds.map((id) =>
-      processMessage(userId, id).catch((err) =>
-        logger.error("[CATEGORY] processMessage failed", { entityId: id, userId, error: String(err) }),
-      ),
-    ),
-  );
-  logger.info("[SERVICE] processMessages batch completed", { userId, entityCount: entityIds.length });
+  logger.info("[SERVICE] processMessages batch", { userId, entityCount: messages.length });
+
+  const rows = messages
+    .map((msg) => buildMetadataInput(userId, msg))
+    .filter((row): row is MetadataInput => row !== null);
+
+  await upsertMessageMetadataBatch(rows);
+
+  logger.info("[SERVICE] processMessages batch completed", { userId, entityCount: rows.length });
 }
 
 
@@ -262,27 +280,31 @@ export async function syncCategoryPage(
       ),
   );
 
-  const messageIds = detailed
+  const messages: RawGmailMessage[] = detailed
     .filter((t): t is NonNullable<typeof t> => Boolean(t))
-    .flatMap((t: any) =>
-      (t.messages ?? [])
-        .map((m: any) => m.id)
-        .filter(Boolean),
-    );
+    .flatMap((t: any) => (t.messages ?? []).filter((m: any) => m?.id));
 
-  await processMessages(userId, messageIds);
+  await processMessages(userId, messages);
 
   return {
-    processed: messageIds.length,
+    processed: messages.length,
     nextPageToken: result.nextPageToken ?? undefined,
   };
 }
 
+/**
+ * `onPage` is invoked after each page with the running total so the in-process
+ * path can report progress the same way gmailInitialSync does — without it the
+ * onboarding waiting screen sits at "Imported 0 emails" for the entire sync.
+ */
 export async function syncAllEmails(
   userId: string,
   category: string,
-): Promise<void> {
+  runningTotal = 0,
+  onPage?: (total: number) => Promise<void>,
+): Promise<number> {
   let pageToken: string | undefined;
+  let total = runningTotal;
 
   do {
     const { processed, nextPageToken } = await syncCategoryPage(
@@ -291,8 +313,12 @@ export async function syncAllEmails(
       pageToken,
     );
     pageToken = nextPageToken;
-    console.log("SYNC", category, "processed", processed, "next", pageToken);
+    total += processed;
+    logger.debug("[SYNC] page complete", { category, processed, total, hasNext: Boolean(pageToken) });
+    if (onPage) await onPage(total);
   } while (pageToken);
+
+  return total;
 }
 
 /**
@@ -304,6 +330,7 @@ export async function syncAllEmails(
  */
 export async function triggerGmailSync(userId: string): Promise<void> {
   if (process.env.INNGEST_EVENT_KEY) {
+    await markSyncQueued(userId);
     const { inngest } = await import("@repo/inngest");
     await inngest.send({ name: "gmail/sync.requested", data: { userId } });
     logger.info("[SYNC] enqueued durable gmail sync", { userId });
@@ -313,19 +340,37 @@ export async function triggerGmailSync(userId: string): Promise<void> {
     "[SYNC] INNGEST_EVENT_KEY not set — running in-process sync (not durable/resumable)",
     { userId },
   );
-  await syncMailbox(userId);
+  const estimatedTotal = await estimateMailboxTotal(userId);
+  await markSyncRunning(userId, estimatedTotal);
+  try {
+    // Report progress per page so the waiting screen moves on this path too.
+    // The cursor stays null here, honestly: unlike gmailInitialSync this path
+    // genuinely cannot resume — a restart mid-sync starts over.
+    const total = await syncMailbox(userId, (processed) =>
+      updateSyncProgress(userId, { categoryIndex: 0, pageToken: null }, processed),
+    );
+    await markSyncComplete(userId, total);
+  } catch (err) {
+    await markSyncFailed(userId);
+    throw err;
+  }
 }
 
-export async function syncMailbox(userId: string) {
+export async function syncMailbox(
+  userId: string,
+  onPage?: (total: number) => Promise<void>,
+): Promise<number> {
+  let total = 0;
   for (const category of ALL_CATEGORIES) {
     // Isolate each category so an exhausted-retry failure in one (e.g. a
     // large PROMOTIONS folder) doesn't abort the remaining categories.
     try {
-      await syncAllEmails(userId, category);
+      total = await syncAllEmails(userId, category, total, onPage);
     } catch (err) {
       logger.error("[SYNC] syncAllEmails category failed, continuing", {
         userId, category, error: String(err),
       });
     }
   }
+  return total;
 }

@@ -2,7 +2,6 @@ import { db, eq, and, sql, desc, inArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import type { ThreadSummary } from "./model.ts";
-import { triggerGmailSync } from "./sync-metadata.ts";
 
 export const ALL_CATEGORIES = [
   "PRIMARY", "PROMOTIONS", "SOCIAL", "UPDATES", "FORUMS", "SENT",
@@ -43,34 +42,6 @@ function resolveCategories(category: string): string[] {
   return [category];
 }
 
-// ── Background top-up throttle ────────────────────────────────────────
-// When a category page is served from a DB that looks short, we enqueue the
-// durable full-mailbox sync in the background so the missing history lands for
-// a later load. This map throttles per user so rapid pagination / repeated
-// loads can't enqueue a storm of full syncs.
-const BACKGROUND_SYNC_THROTTLE_MS = 60_000;
-const lastBackgroundSyncByUser = new Map<string, number>();
-
-function maybeTriggerBackgroundSync(
-  userId: string,
-  requestId: string,
-  ctx: { category: string; totalCount: number; needed: number },
-): void {
-  const now = Date.now();
-  const last = lastBackgroundSyncByUser.get(userId) ?? 0;
-  if (now - last < BACKGROUND_SYNC_THROTTLE_MS) return;
-
-  lastBackgroundSyncByUser.set(userId, now);
-  logger.info("[SERVICE] getEmailsByCategory background sync top-up", {
-    requestId, userId, ...ctx,
-  });
-  void triggerGmailSync(userId).catch((err) =>
-    logger.error("[SERVICE] background sync top-up failed", {
-      requestId, userId, error: String(err),
-    }),
-  );
-}
-
 /**
  * Cheap per-user change token for the inbox. Returns the newest `updatedAt`
  * across the user's message metadata (in epoch ms), or 0 when the user has no
@@ -105,34 +76,11 @@ export async function getEmailsByCategory(
 
   const categories = resolveCategories(category);
 
-  // ── 1. Count how many we have locally ──────────────────────────────
-  // Used only to decide whether to kick a background top-up. We NEVER block
-  // the response on a live Gmail fetch — the list is served straight from the
-  // local DB below, and any missing history is filled in asynchronously by the
-  // durable Inngest sync so it's present on a later load.
-  const dbStart = Date.now();
-  const countResult = await db
-    .select({ count: sql<number>`count(DISTINCT COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId}))` })
-    .from(messageMetadata)
-    .where(
-      and(
-        eq(messageMetadata.userId, userId),
-        inArray(messageMetadata.category, categories as any[]),
-      ),
-    );
-  const totalCount = Number(countResult[0]?.count ?? 0);
-  const needed = offset + limit;
+  // Browsing the inbox never triggers a sync — see docs/architecture-plan.md Stage 0.
+  // The list is served straight from the local DB; missing history is only backfilled
+  // by an explicit Gmail connect or a user-initiated resync.
 
-  logger.info("[DB] getEmailsByCategory count query", {
-    requestId, category, categories, totalCount, needed, durationMs: Date.now() - dbStart,
-  });
-
-  // ── 2. Fire a throttled background sync if we look short ────────────
-  if (totalCount < needed) {
-    maybeTriggerBackgroundSync(userId, requestId, { category, totalCount, needed });
-  }
-
-  // ── 3. Query the requested page from local DB ──────────────────────
+  // ── Query the requested page from local DB ──────────────────────
   const sq = db
   .select({
     entityId: messageMetadata.entityId,
@@ -190,7 +138,9 @@ export async function getEmailsByCategory(
   subject: row.subject ?? "(no subject)",
   date: row.receivedAt?.toISOString() ?? "",
   snippet: row.snippet ?? "",
-  priority: row.priority ?? "MEDIUM",
+  // No MEDIUM fallback — a NULL priority means genuinely unclassified, and
+  // the UI (PrioritySeal) renders an explicit "Unclassified" badge for that.
+  priority: row.priority ?? undefined,
   priorityScore: row.priorityScore,
   priorityReason: row.priorityReason,
   isActionRequired: row.isActionRequired,
@@ -287,9 +237,19 @@ export async function getPriorityEmails(
   const thresholdDate = new Date();
   thresholdDate.setDate(thresholdDate.getDate() - days);
 
+  // "UNCLASSIFIED" isn't a real priority_level enum value — it means
+  // priority IS NULL, so it needs its own clause rather than inArray.
+  const wantsUnclassified = priorities.includes("UNCLASSIFIED");
+  const realPriorities = priorities.filter((p) => p !== "UNCLASSIFIED");
+  const priorityFilter = wantsUnclassified
+    ? realPriorities.length > 0
+      ? sql`(${inArray(messageMetadata.priority, realPriorities as any[])} OR ${messageMetadata.priority} IS NULL)`
+      : sql`${messageMetadata.priority} IS NULL`
+    : inArray(messageMetadata.priority, realPriorities as any[]);
+
   const filters = [
     eq(messageMetadata.userId, userId),
-    inArray(messageMetadata.priority, priorities as any[]),
+    priorityFilter,
     sql`${messageMetadata.receivedAt} >= ${thresholdDate}`,
   ];
 
@@ -353,7 +313,7 @@ export async function getPriorityEmails(
     subject: row.subject ?? "(no subject)",
     date: row.receivedAt?.toISOString() ?? "",
     snippet: row.snippet ?? "",
-    priority: row.priority ?? "MEDIUM",
+    priority: row.priority ?? undefined,
     priorityScore: row.priorityScore,
     priorityReason: row.priorityReason,
     isActionRequired: row.isActionRequired,
@@ -367,7 +327,7 @@ export async function getPriorityEmails(
 export async function getPriorityCounts(
   userId: string,
   days: number = 7
-): Promise<{ HIGH: number; MEDIUM: number; LOW: number; ALL: number }> {
+): Promise<{ HIGH: number; MEDIUM: number; LOW: number; UNCLASSIFIED: number; ALL: number }> {
   const thresholdDate = new Date();
   thresholdDate.setDate(thresholdDate.getDate() - days);
 
@@ -385,12 +345,16 @@ export async function getPriorityCounts(
     )
     .groupBy(messageMetadata.priority);
 
-  const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, ALL: 0 };
+  // A NULL priority (genuinely unclassified — see message-metadata.ts) forms
+  // its own group here with row.priority === null; without counting it, ALL
+  // used to render "0 emails" on a full but not-yet-classified mailbox.
+  const counts = { HIGH: 0, MEDIUM: 0, LOW: 0, UNCLASSIFIED: 0, ALL: 0 };
   for (const row of rows) {
     if (row.priority === "HIGH") counts.HIGH = Number(row.count);
     else if (row.priority === "MEDIUM") counts.MEDIUM = Number(row.count);
     else if (row.priority === "LOW") counts.LOW = Number(row.count);
+    else if (row.priority === null) counts.UNCLASSIFIED = Number(row.count);
   }
-  counts.ALL = counts.HIGH + counts.MEDIUM + counts.LOW;
+  counts.ALL = counts.HIGH + counts.MEDIUM + counts.LOW + counts.UNCLASSIFIED;
   return counts;
 }

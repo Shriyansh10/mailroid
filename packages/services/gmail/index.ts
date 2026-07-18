@@ -744,12 +744,71 @@ export async function validateEmbeddingsApi(): Promise<void> {
   }
 }
 
+interface EmbeddingRun {
+  rerun: boolean;
+  promise: Promise<EmbedResult>;
+}
+
+/**
+ * In-flight embedding runs, keyed by userId. Two callers can otherwise overlap
+ * — a webhook diff and a manual sync a second apart — and since the pending
+ * SELECT below has no claim or lock between read and write, both would pick up
+ * the same rows and pay the embedding API twice for them.
+ *
+ * Process-local. Good enough while the API runs as a single container; if this
+ * is ever scaled horizontally, two processes will still overlap and this needs
+ * to become a DB-backed lock (e.g. pg_advisory_lock on a hash of userId).
+ */
+const embeddingRuns = new Map<string, EmbeddingRun>();
+
 /**
  * Generate embeddings for all emails that don't have one yet.
  * Batches 20 at a time using @repo/ai's createEmbeddingsBatch.
  * Idempotent — safe to re-run.
+ *
+ * Serialized per user: a call that arrives while another is running for the
+ * same user does not start a second pass. It waits for the in-flight one and,
+ * because that pass may have already run its pending-rows SELECT before the
+ * caller's new emails landed, schedules exactly one follow-up pass to sweep
+ * whatever the first missed. Without that follow-up, rows written during a run
+ * would sit un-embedded until some unrelated sync happened to trigger another.
  */
 export async function generateMissingEmbeddings(userId: string): Promise<EmbedResult> {
+  const existing = embeddingRuns.get(userId);
+  if (existing) {
+    logger.info("[SERVICE] generateMissingEmbeddings already running, coalescing", { userId });
+    existing.rerun = true;
+    return existing.promise;
+  }
+
+  // The flag object is created before the async body so the body closes over
+  // it directly, rather than re-reading the map and depending on `set` having
+  // happened before the first await yields.
+  const entry: EmbeddingRun = { rerun: false, promise: undefined! };
+
+  entry.promise = (async (): Promise<EmbedResult> => {
+    let total = 0;
+    // Loops rather than recursing so a steady stream of concurrent callers
+    // can't build an unbounded promise chain — `rerun` collapses any number
+    // of overlapping requests into a single extra pass.
+    for (;;) {
+      const result = await runGenerateMissingEmbeddings(userId);
+      total += result.embedded;
+      if (!entry.rerun) break;
+      entry.rerun = false;
+    }
+    return { embedded: total };
+  })();
+
+  embeddingRuns.set(userId, entry);
+  try {
+    return await entry.promise;
+  } finally {
+    embeddingRuns.delete(userId);
+  }
+}
+
+async function runGenerateMissingEmbeddings(userId: string): Promise<EmbedResult> {
   const startMs = Date.now();
   logger.info("[SERVICE] generateMissingEmbeddings start", { userId });
 

@@ -1,10 +1,45 @@
 import { inngest } from "../client.ts";
+import { RetryAfterError } from "inngest";
 import { db, eq } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classifyEmailPriority } from "@repo/ai";
 
+/**
+ * classifyEmailPriority now throws instead of swallowing errors (see
+ * @repo/ai/prompts/priority.ts) — this translates a rate-limit-shaped error
+ * into Inngest's RetryAfterError so a 429 backs off for the time the
+ * provider actually asked for, instead of Inngest's default immediate retry.
+ */
+async function classifyWithRetryTranslation(
+  sender: string,
+  subject: string,
+  snippet: string,
+) {
+  try {
+    return await classifyEmailPriority(sender, subject, snippet);
+  } catch (err) {
+    const status = (err as { status?: number })?.status;
+    if (status === 429) {
+      const retryAfterHeader = (err as { headers?: { get?: (name: string) => string | null } })
+        ?.headers?.get?.("retry-after");
+      const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : 30_000;
+      throw new RetryAfterError("DeepSeek rate limited", retryAfterMs, { cause: err });
+    }
+    throw err;
+  }
+}
+
 export const emailPriority = inngest.createFunction(
-  { id: "email-priority" },
+  {
+    id: "email-priority",
+    // Previously unbounded — during initial sync this let thousands of
+    // concurrent runs pile into the same API container the sync itself was
+    // using, which is what made the sync starve on its own load. Sync no
+    // longer triggers this (see docs/architecture-plan.md Stage 0), so today
+    // this only fires from the webhook's one-email-at-a-time path, but the
+    // limit stays as a hard ceiling against any future fan-out.
+    concurrency: { limit: Number(process.env.WEBHOOK_CONCURRENCY ?? 2) },
+  },
   { event: "email.received" },
   async ({ event, step }) => {
     const { userId, entityId } = event.data;
@@ -31,18 +66,15 @@ export const emailPriority = inngest.createFunction(
       return { success: false, reason: "No content to classify" };
     }
 
-    // 2. Classify via LLM
-    const classification = await step.run("classify-email", async () => {
-      return await classifyEmailPriority(
+    // 2. Classify via LLM — throws on failure (rate limit, malformed output,
+    // network error) so Inngest actually retries instead of silently skipping.
+    const classification = await step.run("classify-email", () =>
+      classifyWithRetryTranslation(
         sender || "Unknown Sender",
         subject || "No Subject",
         snippet || "No Content"
-      );
-    });
-
-    if (!classification) {
-      return { success: false, reason: "Classification failed" };
-    }
+      ),
+    );
 
     // 3. Update database
     await step.run("update-metadata", async () => {
@@ -54,6 +86,7 @@ export const emailPriority = inngest.createFunction(
           priorityReason: classification.priorityReason,
           isActionRequired: classification.isActionRequired,
           isReplyNeeded: classification.isReplyNeeded,
+          classificationStatus: "DONE",
           lastClassifiedAt: new Date(),
           updatedAt: new Date(),
         })
