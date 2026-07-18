@@ -1,6 +1,7 @@
 import { corsair } from "@repo/corsair";
 import { db, sql, and, eq, gte, lte, inArray } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
+import { touchCalendarVersion } from "./version.js";
 
 export async function syncCalendarEvents(tenantId: string): Promise<void> {
   console.log(`[sync-calendar-events] Starting sync for tenant: ${tenantId}`);
@@ -55,6 +56,11 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
 
     if (items.length === 0) {
       console.log(`[sync-calendar-events] No events to sync/upsert for tenant ${tenantId}`);
+      // A pure-deletion sync still changed local data — bump the change token so
+      // the client re-fetches and drops the removed event(s).
+      if (deletedEventIds.length > 0) {
+        await touchCalendarVersion(tenantId);
+      }
       return;
     }
 
@@ -99,6 +105,10 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
       });
 
     console.log(`[sync-calendar-events] Successfully reconciled ${items.length} events in DB for tenant ${tenantId}`);
+
+    // Bump the per-tenant change token so the client's next poll re-fetches
+    // (see getCalendarVersion / useCalendarSync).
+    await touchCalendarVersion(tenantId);
   } catch (error) {
     console.error(`[sync-calendar-events] Sync failed for tenant ${tenantId}:`, error);
     throw error;

@@ -9,6 +9,7 @@ import {
   updateEvent,
   deleteEvent,
 } from "../../../services/index.js";
+import { getCalendarVersion } from "@repo/services/calendar/version.js";
 
 import {
   calendarEventListOutputModel,
@@ -33,6 +34,22 @@ export const calendarRouter = router({
     .output(calendarEventListOutputModel)
     .query(async ({ ctx, input }) => {
       return getEvents(ctx.user!.id, input);
+    }),
+
+  // Cheap per-user change token. The client polls this and re-fetches its
+  // cached event lists only when it grows — mirrors gmail.inboxVersion so a
+  // calendar webhook refreshes the UI without a manual reload.
+  calendarVersion: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/version"),
+        tags: TAGS,
+      },
+    })
+    .output(z.object({ version: z.number() }))
+    .query(async ({ ctx }) => {
+      return getCalendarVersion(ctx.user!.id);
     }),
 
   event: protectedProcedure

@@ -45,6 +45,16 @@ export const calendarWatchCron = inngest.createFunction(
       }
     }
 
-    return { processed: tenants.length, results };
+    const failed = results.filter((r) => !r.success);
+    if (failed.length > 0) {
+      console.error(
+        `[calendar-watch-cron] ⚠️ ${failed.length}/${tenants.length} calendar watch renewals FAILED:`,
+        JSON.stringify(failed),
+      );
+    } else {
+      console.log(`[calendar-watch-cron] Renewed ${results.length}/${tenants.length} calendar watches successfully.`);
+    }
+
+    return { processed: tenants.length, succeeded: results.length - failed.length, failed: failed.length, results };
   }
 );
