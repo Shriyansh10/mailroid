@@ -5,6 +5,7 @@ import {
   timestamp,
   boolean,
   real,
+  integer,
   index,
   pgEnum,
 } from "drizzle-orm/pg-core";
@@ -50,7 +51,10 @@ export const messageMetadata = pgTable(
     isStarred: boolean("is_starred").notNull().default(false),
     isImportant: boolean("is_important").notNull().default(false),
 
-    priority: priorityEnum("priority").default("MEDIUM"),
+    // No default. An email is unclassified (priority IS NULL) until the LLM
+    // actually classifies it — a MEDIUM default lied about that (every synced
+    // row read as classified with a NULL score, which is self-contradictory).
+    priority: priorityEnum("priority"),
     priorityScore: real("priority_score"),
     priorityReason: text("priority_reason"),
 
@@ -60,6 +64,16 @@ snippet: text("snippet"),
 
     isActionRequired: boolean("is_action_required").notNull().default(false),
     isReplyNeeded: boolean("is_reply_needed").notNull().default(false),
+
+    // The checkpoint for historical bulk classification: PENDING -> DONE or
+    // FAILED. No PROCESSING state — classification concurrency is 1, so
+    // there are no competing workers to guard against, and PROCESSING would
+    // strand rows forever if a batch crashed mid-run. classificationAttempts
+    // is what guarantees every email eventually leaves the PENDING pool, even
+    // ones that can never classify (e.g. no sender/subject/snippet) — without
+    // it those would be re-selected by every batch forever.
+    classificationStatus: text("classification_status").notNull().default("PENDING"),
+    classificationAttempts: integer("classification_attempts").notNull().default(0),
 
     lastClassifiedAt: timestamp("last_classified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
@@ -81,6 +95,13 @@ snippet: text("snippet"),
     ),
     index("idx_mm_user_category").on(table.userId, table.category),
     index("idx_mm_user_received").on(table.userId, table.receivedAt),
+    // Supports the historical classification batch query: WHERE user_id = ?
+    // AND classification_status = 'PENDING' ORDER BY received_at DESC.
+    index("idx_mm_user_class_status_received").on(
+      table.userId,
+      table.classificationStatus,
+      table.receivedAt,
+    ),
     // Supports the cheap per-user inbox change token: max(updated_at) filtered
     // by user_id, polled every ~10s by the client for realtime freshness.
     index("idx_mm_user_updated").on(table.userId, table.updatedAt),

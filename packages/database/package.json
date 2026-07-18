@@ -15,7 +15,9 @@
     "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts",
     "./models/calendar-tenant-mappings": "./models/calendar-tenant-mappings.ts",
     "./models/calendar-events": "./models/calendar-events.ts",
-    "./models/daily-briefs": "./models/daily-briefs.ts"
+    "./models/daily-briefs": "./models/daily-briefs.ts",
+    "./models/gmail-sync-status": "./models/gmail-sync-status.ts",
+    "./models/classification-jobs": "./models/classification-jobs.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

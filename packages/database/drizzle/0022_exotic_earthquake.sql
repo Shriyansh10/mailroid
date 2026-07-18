@@ -1,0 +1,1 @@
+ALTER TABLE "classification_jobs" ADD COLUMN "since" timestamp with time zone NOT NULL;
