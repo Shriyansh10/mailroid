@@ -16,11 +16,15 @@ import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 import { handleCorsairWebhook } from "./auth/webhook-handler.js";
 import { probeEgress } from "./diagnostics/egress-probe.js";
+import { getWatchHealth } from "./diagnostics/watch-health.js";
 import { describeError } from "./diagnostics/describe-error.js";
 import { serve } from "inngest/express";
 import { inngest, emailPriority } from "@repo/inngest";
 import { gmailWatchCron } from "@repo/services/gmail/watch-cron.js";
 import { gmailInitialSync } from "@repo/services/gmail/initial-sync.js";
+import { classificationBatch } from "@repo/services/gmail/classification-batch.js";
+import { reconciliationCron } from "@repo/services/gmail/reconciliation-cron.js";
+import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
 
@@ -95,6 +99,24 @@ app.get("/api/_debug/egress", async (req, res) => {
   }
 });
 
+// Watch-health snapshot for both integrations. Surfaces the silent failure the
+// whole system depends on: an expired/missing watch means Google stops
+// delivering with no other signal. `expired > 0` (or a high `missing`) is the
+// alarm. Reads only expiration columns — no credentials touched.
+app.get("/api/_debug/watch-health", async (_req, res) => {
+  try {
+    const report = await getWatchHealth();
+    const degraded =
+      report.gmail.expired > 0 ||
+      report.gmail.missing > 0 ||
+      report.calendar.expired > 0 ||
+      report.calendar.missing > 0;
+    return res.status(degraded ? 503 : 200).json({ degraded, report });
+  } catch (err) {
+    return res.status(500).json({ error: "watch-health failed", detail: describeError(err) });
+  }
+});
+
 app.get("/", (req, res) => {
   return res.json({ message: "Streamyst is up and running..." });
 });
@@ -110,7 +132,15 @@ app.use(
   "/api/inngest",
   serve({
     client: inngest,
-    functions: [gmailWatchCron, calendarWatchCron, emailPriority, gmailInitialSync],
+    functions: [
+      gmailWatchCron,
+      calendarWatchCron,
+      emailPriority,
+      gmailInitialSync,
+      classificationBatch,
+      reconciliationCron,
+      gmailWebhookSync,
+    ],
   })
 );
 

@@ -1,36 +1,23 @@
 import { corsair } from "@repo/corsair";
 import { processWebhook } from "corsair";
+import { inngest } from "@repo/inngest";
 import { db, eq, and } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { calendarEvents } from "@repo/database/models/calendar-events";
-import { ingestMessage } from "@repo/services/gmail/index.js";
+import { syncHistoryForTenant } from "@repo/services/gmail/webhook-sync.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 import { describeError } from "../diagnostics/describe-error.js";
 
-/**
- * Gmail historyIds are monotonically increasing uint64 values delivered as
- * strings. Pub/Sub gives no ordering or exactly-once guarantee, so a stale
- * notification can arrive *after* a newer one — comparing with `!==` instead of
- * an ordered compare is what let the stored cursor regress to an older value,
- * which in turn made every subsequent notification re-fetch and re-ingest the
- * same history window forever.
- *
- * Parsed as BigInt rather than Number: historyIds are uint64 and would silently
- * lose precision past 2^53.
- *
- * Returns null when the value is absent or not a valid non-negative integer, so
- * callers can fall back rather than throw on unexpected input.
- */
-function parseHistoryId(value: string | null | undefined): bigint | null {
-  if (value === null || value === undefined || value === "") return null;
-  try {
-    const parsed = BigInt(value);
-    return parsed >= 0n ? parsed : null;
-  } catch {
-    return null;
-  }
-}
+// Stage 3 rollout flag (see docs/architecture-plan.md). false = the History
+// diff still runs inline in this Express handler as a fire-and-forget
+// promise (legacy behavior, kept for one release as the rollback path).
+// true = it's handed to gmailWebhookSync (webhook-inngest.ts), which is
+// durable, retries on failure, and serializes per-tenant so two
+// notifications for the same mailbox can't race and rewind the cursor. The
+// actual diff/ingest/cursor-advance logic lives in exactly one place
+// (webhook-sync.ts) either way.
+const WEBHOOK_VIA_INNGEST = process.env.WEBHOOK_VIA_INNGEST === "true";
 
 async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | undefined> {
   const targetEmailLower = targetEmail.toLowerCase();
@@ -131,7 +118,23 @@ export async function handleCorsairWebhook(req: {
         }
       };
     } else {
-      console.warn(`[webhook] Calendar push notification received but no tenant mapping found for channelId: "${channelId}"`);
+      // Orphan channel: a watch we've since replaced (or one belonging to a
+      // never-onboarded account) is still pushing. We can't map it to a tenant,
+      // so ack with 200 and stop here — falling through to processWebhook would
+      // resolve tenant "default" and throw "Account not found". 200 also tells
+      // Google the delivery succeeded so it won't retry. The real fix is
+      // stopping old channels on re-register (see startCalendarWatch); these
+      // pings stop once the orphan channel expires.
+      console.warn(`[webhook] Ignoring calendar push from unmapped/orphan channelId: "${channelId}" (acking 200)`);
+      return {
+        plugin: "googlecalendar",
+        action: "ignoredOrphanChannel",
+        response: {
+          statusCode: 200,
+          responseHeaders: {},
+          data: { ignored: true },
+        },
+      };
     }
   }
 
@@ -173,6 +176,27 @@ export async function handleCorsairWebhook(req: {
     bodyPreview: req.body ? JSON.stringify(req.body).slice(0, 200) : "",
   });
 
+  // Gmail Pub/Sub push for a mailbox we don't manage — a watch registered for a
+  // never-onboarded account (e.g. a stray test account still publishing to the
+  // dev topic). `incomingHistoryId` set with no resolvable tenant identifies it.
+  // Ack 200 and stop: falling through to processWebhook resolves tenant
+  // "default", which has no gmail account, and throws "Account not found". This
+  // is the Gmail twin of the orphan-calendar-channel guard above; these pings
+  // stop once that account's watch expires. (Calendar pushes are handled
+  // earlier via channelId, so this only catches the Gmail path.)
+  if (!tenantId && incomingHistoryId) {
+    console.warn("[webhook] Ignoring gmail push for unmapped mailbox (acking 200)");
+    return {
+      plugin: "gmail",
+      action: "ignoredUnmappedMailbox",
+      response: {
+        statusCode: 200,
+        responseHeaders: {},
+        data: { ignored: true },
+      },
+    };
+  }
+
   const result = await processWebhook(
     corsair,
     Object.fromEntries(
@@ -203,232 +227,26 @@ export async function handleCorsairWebhook(req: {
   ) {
     console.log(`[webhook] [INGEST BLOCK REACHED] tenantId: ${tenantId}, incomingHistoryId: ${incomingHistoryId}`);
 
-    // We run the history-based sync inside an asynchronous promise so the webhook returns immediately to the sender
-    void (async () => {
-      try {
-        const [mapping] = await db
-          .select({
-            emailAddress: gmailTenantMappings.emailAddress,
-            lastHistoryId: gmailTenantMappings.lastHistoryId,
-          })
-          .from(gmailTenantMappings)
-          .where(eq(gmailTenantMappings.tenantId, tenantId))
-          .limit(1);
-
-        const lastHistoryId = mapping?.lastHistoryId;
-
-        if (!lastHistoryId) {
-          console.log(`[webhook] No previous historyId stored for tenant "${tenantId}". Initializing lastHistoryId to "${incomingHistoryId}".`);
-          if (mapping) {
-            await db
-              .update(gmailTenantMappings)
-              .set({
-                lastHistoryId: incomingHistoryId,
-              })
-              .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
-          }
-          return;
-        }
-
-        const lastParsed = parseHistoryId(lastHistoryId);
-        const incomingParsed = parseHistoryId(incomingHistoryId);
-
-        // Drop notifications that are not strictly newer than the cursor.
-        // Pub/Sub redelivers and does not preserve order, so this covers both
-        // exact duplicates and genuinely stale deliveries. The previous `!==`
-        // check only caught duplicates, so a stale id fell through, fetched an
-        // empty window, and then reset the cursor backwards to itself — leaving
-        // two ids to ping-pong forever, re-ingesting the same messages on every
-        // swing.
-        if (lastParsed !== null && incomingParsed !== null && incomingParsed <= lastParsed) {
-          console.log(
-            `[webhook] Incoming historyId "${incomingHistoryId}" is not newer than stored "${lastHistoryId}". Skipping stale notification.`,
-          );
-          return;
-        }
-
-        // Unparseable ids should not silently disable the guard above.
-        if (lastParsed === null || incomingParsed === null) {
-          console.warn(
-            `[webhook] Non-numeric historyId (stored: "${lastHistoryId}", incoming: "${incomingHistoryId}") — falling back to equality check.`,
-          );
-          if (lastHistoryId === incomingHistoryId) {
-            console.log(`[webhook] Incoming historyId "${incomingHistoryId}" matches last stored historyId. Skipping.`);
-            return;
-          }
-        }
-
-        const tenantClient = corsair.withTenant(tenantId);
-
-        // keys.get_access_token() decrypts the account DEK with CORSAIR_KEK
-        // (scrypt + AES-256-GCM) and then the stored token. It does NOT refresh
-        // — refresh only happens via the plugin's keyBuilder on an SDK api.*
-        // call. So a throw here is a *decryption* problem (wrong KEK =>
-        // "Unsupported state or unable to authenticate data"), whereas a throw
-        // during ingestMessage is a *refresh/network* problem. Separating the
-        // two is the whole point of logging them distinctly.
-        let accessToken: string | null;
-        try {
-          accessToken = await tenantClient.gmail.keys.get_access_token();
-        } catch (err) {
-          console.error(
-            `[webhook] Gmail credential decrypt FAILED for tenant "${tenantId}" (KEK/DEK problem, not network):`,
-            JSON.stringify(describeError(err)),
-          );
-          return;
-        }
-
-        if (!accessToken) {
-          console.error(`[webhook] Failed to get Gmail access token for tenant "${tenantId}"`);
-          return;
-        }
-
-        const addedMessageIds = new Set<string>();
-        let nextPageToken: string | undefined = undefined;
-        let hasError = false;
-
-        try {
-          do {
-            let url = `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${lastHistoryId}`;
-            if (nextPageToken) {
-              url += `&pageToken=${nextPageToken}`;
-            }
-
-            console.log(`[webhook] Fetching Gmail history since ${lastHistoryId}...`);
-            const response = await fetch(url, {
-              headers: {
-                Authorization: `Bearer ${accessToken}`,
-              },
-            });
-
-            if (!response.ok) {
-              const errorText = await response.text();
-              console.warn(`[webhook] Gmail history fetch failed: ${response.status} - ${errorText}`);
-              hasError = true;
-              break;
-            }
-
-            const data = await response.json() as {
-              history?: Array<{
-                messagesAdded?: Array<{
-                  message?: {
-                    id?: string;
-                  };
-                }>;
-                labelsAdded?: Array<{
-                  message?: {
-                    id?: string;
-                  };
-                }>;
-              }>;
-              nextPageToken?: string;
-            };
-
-            console.log(
-              "[webhook] HISTORY RESPONSE",
-              JSON.stringify(data, null, 2)
-            );
-
-            if (data.history && data.history.length > 0) {
-              for (const record of data.history) {
-                // Extract from messagesAdded
-                if (record.messagesAdded) {
-                  for (const added of record.messagesAdded) {
-                    if (added.message?.id) {
-                      addedMessageIds.add(added.message.id);
-                    }
-                  }
-                }
-                // Extract from labelsAdded (e.g. INBOX label additions)
-                if (record.labelsAdded) {
-                  for (const labelRecord of record.labelsAdded) {
-                    if (labelRecord.message?.id) {
-                      addedMessageIds.add(labelRecord.message.id);
-                    }
-                  }
-                }
-              }
-            } else {
-              console.log(
-                `[webhook] history[] is empty. startHistoryId: ${lastHistoryId}, incomingHistoryId: ${incomingHistoryId}, nextPageToken: ${nextPageToken || "none"}`
-              );
-            }
-
-            nextPageToken = data.nextPageToken;
-          } while (nextPageToken);
-        } catch (err) {
-          // describeError unwraps err.cause — without it undici reports only
-          // "fetch failed" and the real errno (ENETUNREACH/ETIMEDOUT/EAI_AGAIN)
-          // plus the address actually dialed are lost.
-          console.error(
-            "[webhook] Error fetching history list:",
-            JSON.stringify(describeError(err)),
-          );
-          hasError = true;
-        }
-
-        if (hasError) {
-          // Only ever skip *forward* on error. Writing the incoming id
-          // unconditionally would regress the cursor whenever a stale
-          // notification happened to fail, re-opening the ping-pong this fix
-          // exists to close.
-          if (mapping && (lastParsed === null || incomingParsed === null || incomingParsed > lastParsed)) {
-            console.warn(`[webhook] Resetting historyId to incoming: "${incomingHistoryId}"`);
-            await db
-              .update(gmailTenantMappings)
-              .set({
-                lastHistoryId: incomingHistoryId,
-              })
-              .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
-          } else {
-            console.warn(
-              `[webhook] Fetch failed for stale historyId "${incomingHistoryId}"; keeping stored "${lastHistoryId}".`,
-            );
-          }
-          return;
-        }
-
-        if (addedMessageIds.size > 0) {
-          console.log(`[webhook] Found ${addedMessageIds.size} new message(s) via History API:`, Array.from(addedMessageIds));
-          for (const messageId of addedMessageIds) {
-            console.log(`[webhook] Triggering ingestMessage for tenant "${tenantId}", message "${messageId}"`);
-            void ingestMessage(tenantId, messageId, true).catch((err) => {
-              // This is the path that reaches Corsair's keyBuilder -> token
-              // refresh against oauth2.googleapis.com, so "[corsair:gmail]
-              // Failed to obtain valid access token: fetch failed" surfaces
-              // here. The wrapped Error drops the cause, so log both the
-              // message and any chain we can still recover.
-              console.error(
-                `[webhook] Failed to ingest message "${messageId}" for tenant "${tenantId}":`,
-                JSON.stringify(describeError(err)),
-              );
-            });
-          }
-        } else {
-          console.log(`[webhook] No new messages added since historyId "${lastHistoryId}".`);
-        }
-
-        // Advance the stored cursor — forward only. The previous `!==` check
-        // wrote whatever arrived last, so an out-of-order delivery moved the
-        // cursor backwards and the next notification re-fetched an already
-        // -ingested window. Guarding on `>` makes the cursor monotonic, which is
-        // what Gmail's historyId semantics already assume.
-        if (mapping && (lastParsed === null || incomingParsed === null || incomingParsed > lastParsed)) {
-          await db
-            .update(gmailTenantMappings)
-            .set({
-              lastHistoryId: incomingHistoryId,
-            })
-            .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
-          console.log(`[webhook] Updated stored historyId for tenant "${tenantId}" to "${incomingHistoryId}"`);
-        }
-      } catch (err) {
+    if (WEBHOOK_VIA_INNGEST) {
+      // Durable: an Inngest event send is itself reliable, and the function
+      // it triggers (gmailWebhookSync) retries on failure and serializes
+      // per-tenant. Returns to the Pub/Sub sender immediately either way.
+      await inngest.send({
+        name: "gmail/webhook.notification",
+        data: { tenantId, incomingHistoryId },
+      });
+    } else {
+      // Legacy path, kept for one release as the rollback for
+      // WEBHOOK_VIA_INNGEST. Same fire-and-forget shape as before, but now
+      // delegates to the shared syncHistoryForTenant so the ordering fix
+      // (store before advancing the cursor) applies here too.
+      void syncHistoryForTenant(tenantId, incomingHistoryId).catch((err) => {
         console.error(
-          "[webhook] Async sync process failed:",
+          `[webhook] syncHistoryForTenant failed for tenant "${tenantId}":`,
           JSON.stringify(describeError(err)),
         );
-      }
-    })();
+      });
+    }
   }
 
   // Google Calendar webhook sync logic
