@@ -7,7 +7,7 @@ import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 import { 
   LogOutIcon, PencilIcon, CalendarDaysIcon, 
   BotIcon, SparklesIcon, InboxIcon, SendIcon,
-  KeyboardIcon
+  KeyboardIcon, PaletteIcon
 } from "lucide-react";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -156,6 +156,10 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/appearance")}>
+                <PaletteIcon className="mr-2 h-4 w-4" />
+                <span>Appearance</span>
+              </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
                 <KeyboardIcon className="mr-2 h-4 w-4" />
                 <span>Keyboard Shortcuts</span>

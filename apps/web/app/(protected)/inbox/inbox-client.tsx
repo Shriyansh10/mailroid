@@ -12,7 +12,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader,
   DialogTitle, DialogTrigger,
 } from "@web/components/ui/dialog";
-import { SettingsIcon, KeyboardIcon, CheckCircle2, RefreshCwIcon } from "lucide-react";
+import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon } from "lucide-react";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 
 import { Input } from "@web/components/ui/input";
@@ -351,6 +351,10 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/appearance")}>
+                <PaletteIcon className="mr-2 h-4 w-4" />
+                <span>Appearance</span>
+              </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
                 <KeyboardIcon className="mr-2 h-4 w-4" />
                 <span>Keyboard Shortcuts</span>
