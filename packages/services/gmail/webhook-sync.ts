@@ -49,7 +49,14 @@ async function ingestAllOrThrow(
   // True only for genuinely new mail. Label-only changes pass false so that
   // routine mailbox churn stops emitting one classification run per message.
   triggerClassification: boolean,
-  concurrency = 5,
+  // Deliveries are not processed one at a time — several can be in flight at
+  // once (four distinct historyIds were observed overlapping), so the real
+  // ceiling is this number times the number of concurrent deliveries. At 5
+  // that reached ~20 simultaneous connections on a 1-vCPU/512MB host, which is
+  // what pushed Gmail connects past undici's 10s timeout: the egress probe
+  // passes 5/5 on the same host when idle, so those timeouts were saturation,
+  // not transport. 2 costs little wall-clock and keeps the peak survivable.
+  concurrency = 2,
 ): Promise<void> {
   let cursor = 0;
   const errors: unknown[] = [];
@@ -60,9 +67,9 @@ async function ingestAllOrThrow(
       try {
         // triggerEmbeddings=false: generateMissingEmbeddings is a per-USER
         // scan, not a per-message one, so calling it here would run a full
-        // "WHERE embedding IS NULL" sweep once per message — and at
-        // concurrency 5, five of those sweeps would overlap and select the
-        // same rows to embed. The caller runs it once after the whole diff.
+        // "WHERE embedding IS NULL" sweep once per message — and those sweeps
+        // would overlap across workers and select the same rows to embed. The
+        // caller runs it once after the whole diff.
         await ingestMessage(
           tenantId,
           messageIds[current]!,
