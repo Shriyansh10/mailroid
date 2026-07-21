@@ -29,6 +29,11 @@ import {
   useDeleteEvent,
 } from "@web/hooks/api/calendar";
 import EventModal from "@web/components/calendar/EventModal";
+import {
+  allDaySpanInDays,
+  parseLocalDateKey,
+  toLocalDateKey,
+} from "@web/components/calendar/event-form-utils";
 
 interface ModalData {
   id?: string;
@@ -41,11 +46,43 @@ interface ModalData {
   allDay?: boolean;
 }
 
-function formatEventTime(startStr: string, endStr: string): string {
-  if (!startStr) return "";
-  const start = new Date(startStr);
-  const end = endStr ? new Date(endStr) : start;
-  
+interface EventTimes {
+  start: string;
+  end: string;
+  allDay?: boolean;
+}
+
+/**
+ * Local calendar date of an event, as `yyyy-MM-dd`.
+ *
+ * All-day events arrive as a bare `yyyy-MM-dd`. Parsing that with `new Date()`
+ * gives UTC midnight, which is the *previous* day for anyone west of UTC — so
+ * all-day dates are read as strings and never parsed as instants.
+ */
+function eventDateKey(event: EventTimes): string {
+  if (event.allDay) return event.start.slice(0, 10);
+  return toLocalDateKey(new Date(event.start));
+}
+
+/** Local start instant, for sorting and for "has it started yet". */
+function eventStartInstant(event: EventTimes): Date {
+  if (event.allDay) {
+    return parseLocalDateKey(event.start.slice(0, 10)) ?? new Date(event.start);
+  }
+  return new Date(event.start);
+}
+
+function formatEventTime(event: EventTimes): string {
+  if (!event.start) return "";
+
+  if (event.allDay) {
+    const days = allDaySpanInDays(event.start.slice(0, 10), (event.end ?? "").slice(0, 10));
+    return days > 1 ? `All day · ${days} days` : "All day";
+  }
+
+  const start = new Date(event.start);
+  const end = event.end ? new Date(event.end) : start;
+
   const formatTime = (d: Date) => {
     return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
@@ -281,25 +318,29 @@ export default function CalendarPage() {
   const groupedEvents = useMemo(() => {
     if (!events) return { today: [], tomorrow: [], upcoming: [] };
     
-    const todayStr = new Date().toLocaleDateString();
-    
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toLocaleDateString();
-    
+    const now = new Date();
+    const todayKey = toLocalDateKey(now);
+    const tomorrowKey = toLocalDateKey(
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
+    );
+
     const todayEvents: typeof events = [];
     const tomorrowEvents: typeof events = [];
     const upcomingEvents: typeof events = [];
-    
-    const sorted = [...events].sort((a, b) => new Date(a.start).getTime() - new Date(b.start).getTime());
-    
+
+    const sorted = [...events].sort(
+      (a, b) => eventStartInstant(a).getTime() - eventStartInstant(b).getTime(),
+    );
+
     sorted.forEach((event) => {
-      const eventDateStr = new Date(event.start).toLocaleDateString();
-      if (eventDateStr === todayStr) {
+      // `yyyy-MM-dd` keys compare correctly as strings, so a later date always
+      // lands in Upcoming instead of falling through every branch unshown.
+      const key = eventDateKey(event);
+      if (key === todayKey) {
         todayEvents.push(event);
-      } else if (eventDateStr === tomorrowStr) {
+      } else if (key === tomorrowKey) {
         tomorrowEvents.push(event);
-      } else if (new Date(event.start) > tomorrow) {
+      } else if (key > tomorrowKey) {
         upcomingEvents.push(event);
       }
     });
@@ -312,10 +353,14 @@ export default function CalendarPage() {
   }, [events]);
 
   const todaySummary = useMemo(() => {
-    const todayStr = new Date().toLocaleDateString();
-    const todayEvents = events?.filter(e => new Date(e.start).toLocaleDateString() === todayStr) || [];
     const now = new Date();
-    const upcomingEvents = todayEvents.filter(e => new Date(e.start) > now);
+    const todayKey = toLocalDateKey(now);
+    const todayEvents = events?.filter((e) => eventDateKey(e) === todayKey) || [];
+    // All-day events have no start time to be "before" or "after", so only
+    // timed events can still be ahead of us.
+    const upcomingEvents = todayEvents.filter(
+      (e) => !e.allDay && eventStartInstant(e) > now,
+    );
     const nextEvent = upcomingEvents[0] || null;
     
     return {
@@ -337,10 +382,11 @@ export default function CalendarPage() {
     const insights: string[] = [];
     
     // Calculate tomorrow's workload
-    const tomorrow = new Date();
-    tomorrow.setDate(tomorrow.getDate() + 1);
-    const tomorrowStr = tomorrow.toLocaleDateString();
-    const tomorrowCount = events.filter(e => new Date(e.start).toLocaleDateString() === tomorrowStr).length;
+    const now = new Date();
+    const tomorrowKey = toLocalDateKey(
+      new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1),
+    );
+    const tomorrowCount = events.filter((e) => eventDateKey(e) === tomorrowKey).length;
     
     if (tomorrowCount >= 3) {
       insights.push(`You have ${tomorrowCount} back-to-back meetings tomorrow.`);
@@ -418,7 +464,7 @@ export default function CalendarPage() {
                 {todaySummary.nextEvent.title}
               </div>
               <div className="text-xs text-[#b08d57] font-mono mt-0.5">
-                {formatEventTime(todaySummary.nextEvent.start, todaySummary.nextEvent.end)}
+                {formatEventTime(todaySummary.nextEvent)}
               </div>
             </div>
           )}
@@ -459,7 +505,7 @@ export default function CalendarPage() {
                     >
                       <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
                       <div className="text-[10px] text-muted-foreground font-mono mt-1">
-                        {formatEventTime(event.start, event.end)}
+                        {formatEventTime(event)}
                       </div>
                     </Card>
                   ))}
@@ -484,7 +530,7 @@ export default function CalendarPage() {
                     >
                       <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
                       <div className="text-[10px] text-muted-foreground font-mono mt-1">
-                        {formatEventTime(event.start, event.end)}
+                        {formatEventTime(event)}
                       </div>
                     </Card>
                   ))}
@@ -509,7 +555,7 @@ export default function CalendarPage() {
                     >
                       <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
                       <div className="text-[10px] text-muted-foreground font-mono mt-1 flex justify-between gap-2">
-                        <span className="truncate">{formatEventTime(event.start, event.end)}</span>
+                        <span className="truncate">{formatEventTime(event)}</span>
                         <span className="shrink-0 opacity-70">
                           {new Date(event.start).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
                         </span>
