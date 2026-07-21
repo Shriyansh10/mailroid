@@ -54,6 +54,15 @@ export const emailPriority = inngest.createFunction(
     // ingestMessage was quietly fanning out thousands of runs from the Sync
     // button.
     concurrency: { limit: Number(process.env.WEBHOOK_CONCURRENCY ?? 2) },
+    // One run per message, no matter how many times it is announced. Gmail
+    // pushes a separate notification (with its own historyId) for every
+    // mailbox mutation, and a failed history diff is retried wholesale, so the
+    // same entityId legitimately arrives many times over. Without this key each
+    // arrival became its own queued run — 70k of them, against a drain rate of
+    // ~2 per 22s, which pinned the container until they were bulk-cancelled.
+    // The "already classified" guard below cannot help there: it only runs once
+    // a run has started, so it bounds LLM calls, never queue depth.
+    idempotency: "event.data.entityId",
   },
   { event: "email.received" },
   async ({ event, step }) => {

@@ -41,6 +41,14 @@ function parseHistoryId(value: string | null | undefined): bigint | null {
 async function ingestAllOrThrow(
   tenantId: string,
   messageIds: string[],
+  // The delivery's historyId, stamped onto every event this diff emits. A
+  // retried diff re-emits under the SAME id, which is what makes "one delivery
+  // retried N times" distinguishable from "N genuinely new emails" in the
+  // Inngest dashboard.
+  correlationId: string,
+  // True only for genuinely new mail. Label-only changes pass false so that
+  // routine mailbox churn stops emitting one classification run per message.
+  triggerClassification: boolean,
   concurrency = 5,
 ): Promise<void> {
   let cursor = 0;
@@ -55,7 +63,14 @@ async function ingestAllOrThrow(
         // "WHERE embedding IS NULL" sweep once per message — and at
         // concurrency 5, five of those sweeps would overlap and select the
         // same rows to embed. The caller runs it once after the whole diff.
-        await ingestMessage(tenantId, messageIds[current]!, false);
+        await ingestMessage(
+          tenantId,
+          messageIds[current]!,
+          false,
+          triggerClassification,
+          "webhook",
+          correlationId,
+        );
       } catch (err) {
         errors.push(err);
       }
@@ -152,7 +167,15 @@ export async function syncHistoryForTenant(
     return { outcome: "no-token" };
   }
 
-  const addedMessageIds = new Set<string>();
+  // Split by *why* the message appeared in the diff. Both groups get stored,
+  // but only genuinely-new mail is worth classifying: Gmail emits a history
+  // record for every mailbox mutation (read/unread, archive, star, its own
+  // automatic labelling, and every write this app makes), so folding
+  // labelsAdded in with messagesAdded meant a decade-old email being marked
+  // read queued a priority-classification run. That is what filled the queue
+  // with tens of thousands of runs carrying *distinct* historyIds.
+  const newMessageIds = new Set<string>();
+  const changedMessageIds = new Set<string>();
   let nextPageToken: string | undefined;
 
   do {
@@ -192,23 +215,38 @@ export async function syncHistoryForTenant(
 
     for (const record of data.history ?? []) {
       for (const added of record.messagesAdded ?? []) {
-        if (added.message?.id) addedMessageIds.add(added.message.id);
+        if (added.message?.id) newMessageIds.add(added.message.id);
       }
       for (const labelRecord of record.labelsAdded ?? []) {
-        if (labelRecord.message?.id) addedMessageIds.add(labelRecord.message.id);
+        if (labelRecord.message?.id) changedMessageIds.add(labelRecord.message.id);
       }
     }
 
     nextPageToken = data.nextPageToken;
   } while (nextPageToken);
 
-  // Store every email FIRST — throws (and therefore skips the cursor advance
-  // below) if any message failed to ingest. This is the fix for the
+  // A message can appear in both groups (arrives and is labelled in the same
+  // diff). It is new mail in that case, so drop it from the label-only group
+  // rather than ingesting it twice.
+  for (const id of newMessageIds) changedMessageIds.delete(id);
+
+  // Store every email FIRST — both calls throw (and therefore skip the cursor
+  // advance below) if any message failed to ingest. This is the fix for the
   // historical bug: the old code fired these with `void` and advanced the
   // cursor immediately after, so a failed ingest was invisible and the email
-  // was gone forever the moment the cursor moved past it.
-  if (addedMessageIds.size > 0) {
-    await ingestAllOrThrow(tenantId, Array.from(addedMessageIds));
+  // was gone forever the moment the cursor moved past it. Splitting the ingest
+  // into two calls does not weaken that: neither group's failure can reach the
+  // cursor update.
+  if (newMessageIds.size > 0) {
+    await ingestAllOrThrow(tenantId, Array.from(newMessageIds), incomingHistoryId, true);
+  }
+
+  // Label-only changes still need storing (read state, labels, category), but
+  // classification is a property of the message, not of someone marking it
+  // read — so it stays off here. Anything genuinely unclassified is picked up
+  // by the batch classifier from PENDING.
+  if (changedMessageIds.size > 0) {
+    await ingestAllOrThrow(tenantId, Array.from(changedMessageIds), incomingHistoryId, false);
   }
 
   await db
@@ -222,7 +260,9 @@ export async function syncHistoryForTenant(
   // message is already stored and the cursor has moved. The retry would then hit
   // the staleness guard above and skip, so the failure would be silent anyway.
   // Errors are logged instead; the next sync re-selects whatever stayed NULL.
-  if (addedMessageIds.size > 0) {
+  const messagesIngested = newMessageIds.size + changedMessageIds.size;
+
+  if (messagesIngested > 0) {
     void generateMissingEmbeddings(tenantId).catch((err) => {
       logger.error("[WEBHOOK_SYNC] generateMissingEmbeddings failed", {
         tenantId,
@@ -231,6 +271,13 @@ export async function syncHistoryForTenant(
     });
   }
 
-  logger.info("[WEBHOOK_SYNC] synced", { tenantId, messagesIngested: addedMessageIds.size });
-  return { outcome: "synced", messagesIngested: addedMessageIds.size };
+  logger.info("[WEBHOOK_SYNC] synced", {
+    tenantId,
+    messagesIngested,
+    // Split out so a flood is immediately attributable: a large `labelChanges`
+    // with a near-zero `newMessages` is mailbox churn, not incoming mail.
+    newMessages: newMessageIds.size,
+    labelChanges: changedMessageIds.size,
+  });
+  return { outcome: "synced", messagesIngested };
 }

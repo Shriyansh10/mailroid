@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { corsair } from "@repo/corsair";
 import { db, eq, sql, and, or, ilike } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
@@ -395,6 +397,47 @@ export async function searchEmails(
  * Ingest a single Gmail message: fetches full details, inserts/upserts into emails,
  * derives category and flags, updates message_metadata, and optionally triggers embeddings.
  */
+/**
+ * Which code path caused a message to be ingested.
+ *
+ * ingestMessage cannot know its own caller, and without that the only emitter
+ * of `email.received` is anonymous — a backlog of classification runs gives no
+ * hint which path produced it. Answering "who triggered these?" for a 70k-deep
+ * queue meant reading three files; this makes it a dashboard filter.
+ */
+export type IngestSource =
+  | "webhook"
+  | "sync-emails"
+  | "initial-sync"
+  | "manual-resync"
+  | "unknown";
+
+/**
+ * True when Gmail says the message no longer exists (404 Not Found / 410 Gone).
+ *
+ * A history diff routinely names messages that were deleted between the
+ * notification being emitted and us fetching them, so this is expected traffic
+ * rather than a fault. It matters because it is the one failure that retrying
+ * can never fix: the caller in webhook-sync.ts fails the whole diff if any
+ * message throws, and the cursor only advances once the diff succeeds — so a
+ * permanently-deleted message would wedge the cursor forever and starve every
+ * newer email behind it.
+ *
+ * Matched loosely on purpose. Corsair defines no error handling of its own and
+ * its default handler logs only `e.message` (see apps/api/src/diagnostics/
+ * describe-error.ts), so a status code is not guaranteed to survive — the
+ * observed shape in production was the bare string "Not Found".
+ */
+function isMessageGone(err: unknown): boolean {
+  const status = (err as { status?: unknown; statusCode?: unknown } | null)?.status
+    ?? (err as { statusCode?: unknown } | null)?.statusCode;
+  if (status === 404 || status === 410) return true;
+
+  const message = (err as { message?: unknown } | null)?.message;
+  const text = typeof message === "string" ? message : String(err ?? "");
+  return /\b(404|410)\b|not found|notfound|gone/i.test(text);
+}
+
 export async function ingestMessage(
   tenantId: string,
   messageId: string,
@@ -405,18 +448,56 @@ export async function ingestMessage(
   // A fresh account with 2,671 unread emails queued 2,671 runs. Bulk callers
   // pass false and let the batch classifier pick the rows up from PENDING,
   // which is what it exists for.
-  triggerClassification = true
+  triggerClassification = true,
+  // Provenance, carried into the email.received event and both log lines.
+  // Callers name themselves; "unknown" means someone added a call site without
+  // doing so.
+  source: IngestSource = "unknown",
+  // Groups every event emitted by one logical trigger — the Gmail delivery's
+  // historyId on the webhook path, one id per invocation for bulk paths. A
+  // fan-out can then be traced back to the single trigger that caused it,
+  // which is what distinguishes "N new emails" from "one diff retried N times".
+  correlationId?: string
 ): Promise<void> {
   const startMs = Date.now();
-  logger.info("[SERVICE] ingestMessage start", { tenantId, messageId });
+  logger.info("[SERVICE] ingestMessage start", { tenantId, messageId, source, correlationId });
 
   const tenant = corsair.withTenant(tenantId);
 
-  // Fetch full message details
-  const msg = await tenant.gmail.api.messages.get({
-    id: messageId,
-    format: "full",
-  });
+  // Fetch full message details. Guarded on both paths — whether Corsair throws
+  // on a missing message or swallows it and hands back nothing is not something
+  // its types promise, and the difference between the two is a skipped message
+  // versus a TypeError on `raw.payload` below.
+  let msg: unknown;
+  try {
+    msg = await tenant.gmail.api.messages.get({
+      id: messageId,
+      format: "full",
+    });
+  } catch (err) {
+    if (isMessageGone(err)) {
+      logger.info("[SERVICE] ingestMessage skipped: message no longer exists", {
+        tenantId,
+        messageId,
+        source,
+        correlationId,
+      });
+      return;
+    }
+    // Anything else is a real failure (auth, transport, quota) and must keep
+    // propagating so the caller refuses to advance its cursor past it.
+    throw err;
+  }
+
+  if (msg === null || typeof msg !== "object") {
+    logger.info("[SERVICE] ingestMessage skipped: no message returned", {
+      tenantId,
+      messageId,
+      source,
+      correlationId,
+    });
+    return;
+  }
 
   const raw = msg as Record<string, unknown>;
   const payload = raw.payload as MessagePart | undefined;
@@ -493,12 +574,18 @@ export async function ingestMessage(
     void inngest
       .send({
         name: "email.received",
-        data: { userId: tenantId, entityId: messageId },
+        // Identifiers and provenance only — deliberately no mail content.
+        // The consumer reads sender/subject/snippet from message_metadata
+        // itself, so duplicating them here would only inflate the event
+        // (Inngest caps payload size) without saving the consumer a query.
+        data: { userId: tenantId, entityId: messageId, source, correlationId },
       })
       .catch((err) => {
         logger.error("[SERVICE] failed to send email.received event in ingestMessage", {
           tenantId,
           messageId,
+          source,
+          correlationId,
           error: String(err),
         });
       });
@@ -511,7 +598,13 @@ export async function ingestMessage(
     });
   }
 
-  logger.info("[SERVICE] ingestMessage completed", { tenantId, messageId, durationMs: Date.now() - startMs });
+  logger.info("[SERVICE] ingestMessage completed", {
+    tenantId,
+    messageId,
+    source,
+    correlationId,
+    durationMs: Date.now() - startMs,
+  });
 }
 
 
@@ -521,7 +614,10 @@ export async function ingestMessage(
  */
 export async function syncEmails(tenantId: string, userId: string): Promise<SyncResult> {
   const startMs = Date.now();
-  logger.info("[SERVICE] syncEmails start", { tenantId, userId });
+  // One id for the whole invocation, so every message this sync touches is
+  // attributable to this specific run of it.
+  const correlationId = randomUUID();
+  logger.info("[SERVICE] syncEmails start", { tenantId, userId, correlationId });
 
   const tenant = corsair.withTenant(tenantId);
 
@@ -546,8 +642,12 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
       batch.map((stub) =>
         // No per-email classification: this walks the whole mailbox. Rows land
         // as PENDING and the batch classifier handles them.
-        ingestMessage(tenantId, stub.id!, false, false).catch((err) =>
-          logger.error("[DB] syncEmails upsert failed", { gmailMessageId: stub.id, error: String(err) })
+        ingestMessage(tenantId, stub.id!, false, false, "sync-emails", correlationId).catch((err) =>
+          logger.error("[DB] syncEmails upsert failed", {
+            gmailMessageId: stub.id,
+            correlationId,
+            error: String(err),
+          })
         )
       )
     );
