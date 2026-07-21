@@ -1,10 +1,38 @@
 "use client";
 
-import React, { useEffect } from "react";
+import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { z } from "zod";
-import { useForm } from "react-hook-form";
+import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import DOMPurify from "dompurify";
+import { Trash2Icon } from "lucide-react";
+
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@web/components/ui/dialog";
+import { Button } from "@web/components/ui/button";
+import { Input } from "@web/components/ui/input";
+import { Label } from "@web/components/ui/label";
+import { Switch } from "@web/components/ui/switch";
+import { Textarea } from "@web/components/ui/textarea";
+import { GuestInput } from "./GuestInput";
+import { DateTimeFields } from "./DateTimeFields";
+import {
+  allDayEndKey,
+  allDaySpanInDays,
+  combineDateAndTime,
+  formatDuration,
+  formatTimeOfDay,
+  parseDurationInput,
+  parseLocalDateKey,
+  parseTimeInput,
+  sanitizeText,
+  toLocalDateKey,
+} from "./event-form-utils";
 
 interface EventModalProps {
   isOpen: boolean;
@@ -33,55 +61,167 @@ interface EventModalProps {
   onClose: () => void;
 }
 
-const sanitizeText = (val: string | undefined) => {
-  if (!val) return "";
-  return DOMPurify.sanitize(val, { ALLOWED_TAGS: [] }).trim();
-};
+// ── Schema ───────────────────────────────────────────────────────────
+//
+// Times and durations are kept as the raw text the user typed so the fields
+// stay freely editable; they are parsed and validated here, then converted in
+// onSubmit. No transforms, so the form's input and output types match.
 
 const formSchema = z
   .object({
-    title: z.string().transform(sanitizeText).optional(),
-    start: z.string().min(1, "Start time is required"),
-    end: z.string().min(1, "End time is required"),
-    description: z.string().transform(sanitizeText).optional(),
-    location: z.string().transform(sanitizeText).optional(),
-    attendeesStr: z
-      .string()
-      .transform(sanitizeText)
-      .optional()
-      .refine((val) => {
-        if (!val) return true;
-        const emails = val.split(",").map((e) => e.trim()).filter(Boolean);
-        return emails.every((email) => z.string().email().safeParse(email).success);
-      }, "Please enter valid email addresses separated by commas"),
-    allDay: z.boolean().optional(),
+    title: z.string(),
+    date: z.date(),
+    startTime: z.string(),
+    duration: z.string(),
+    allDay: z.boolean(),
+    days: z.string(),
+    attendees: z.array(z.email()).max(50),
+    location: z.string(),
+    description: z.string(),
   })
-  .refine(
-    (data) => {
-      if (data.start && data.end) {
-        return new Date(data.end) >= new Date(data.start);
+  .superRefine((data, ctx) => {
+    if (data.allDay) {
+      const days = Number(data.days);
+      if (!Number.isInteger(days) || days < 1 || days > 365) {
+        ctx.addIssue({
+          code: "custom",
+          path: ["days"],
+          message: "Enter a whole number of days between 1 and 365",
+        });
       }
-      return true;
-    },
-    {
-      message: "End time must be after start time",
-      path: ["end"],
+      return;
     }
-  );
+
+    const minutesOfDay = parseTimeInput(data.startTime);
+    if (minutesOfDay === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["startTime"],
+        message: "Enter a time like 2:30 PM or 14:30",
+      });
+    }
+
+    const durationMinutes = parseDurationInput(data.duration);
+    if (durationMinutes === null) {
+      ctx.addIssue({
+        code: "custom",
+        path: ["duration"],
+        message: "Enter a duration like 30m, 1h 30m, or 90",
+      });
+    }
+  });
 
 type FormValues = z.infer<typeof formSchema>;
 
-/**
- * Format an ISO string or date string for datetime-local input.
- * Returns "YYYY-MM-DDTHH:mm" format.
- */
-function toDateTimeLocal(iso: string): string {
-  if (!iso) return "";
-  const d = new Date(iso);
-  if (isNaN(d.getTime())) return iso.slice(0, 16);
-  const pad = (n: number) => n.toString().padStart(2, "0");
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`;
+// ── Defaults & seeding ───────────────────────────────────────────────
+
+function nextHour(): { date: Date; minutesOfDay: number } {
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  now.setHours(now.getHours() + 1);
+  return { date: now, minutesOfDay: now.getHours() * 60 };
 }
+
+/**
+ * Derive form values from whatever the calendar page handed us.
+ *
+ * All-day values are calendar dates: they are read straight off the
+ * `yyyy-MM-dd` string and never passed through `new Date(str)`, which would
+ * parse as UTC midnight and read back as the previous day west of UTC.
+ */
+function buildDefaults(initialData: EventModalProps["initialData"]): FormValues {
+  const fallback = nextHour();
+  const base: FormValues = {
+    title: initialData?.title ?? "",
+    date: fallback.date,
+    startTime: formatTimeOfDay(fallback.minutesOfDay),
+    duration: formatDuration(60),
+    allDay: initialData?.allDay ?? false,
+    days: "1",
+    attendees: initialData?.attendees ?? [],
+    location: initialData?.location ?? "",
+    description: initialData?.description ?? "",
+  };
+
+  if (!initialData?.start) return base;
+
+  if (base.allDay) {
+    const startKey = initialData.start.slice(0, 10);
+    const date = parseLocalDateKey(startKey);
+    if (date) base.date = date;
+    base.days = String(allDaySpanInDays(startKey, (initialData.end ?? "").slice(0, 10)));
+    return base;
+  }
+
+  const start = new Date(initialData.start);
+  if (Number.isNaN(start.getTime())) return base;
+
+  base.date = start;
+  base.startTime = formatTimeOfDay(start.getHours() * 60 + start.getMinutes());
+
+  const end = initialData.end ? new Date(initialData.end) : null;
+  if (end && !Number.isNaN(end.getTime())) {
+    const minutes = Math.round((end.getTime() - start.getTime()) / 60_000);
+    if (minutes >= 1) base.duration = formatDuration(minutes);
+  }
+
+  return base;
+}
+
+// ── Draft persistence ────────────────────────────────────────────────
+//
+// sessionStorage, not localStorage: the draft survives closing the modal and
+// reloading the page, and dies with the tab.
+
+const DRAFT_KEY = "mailroid:calendar:event-draft";
+
+interface Draft {
+  title: string;
+  duration: string;
+  days: string;
+  attendees: string[];
+  location: string;
+  description: string;
+}
+
+function readDraft(): Draft | null {
+  try {
+    const raw = sessionStorage.getItem(DRAFT_KEY);
+    return raw ? (JSON.parse(raw) as Draft) : null;
+  } catch {
+    return null;
+  }
+}
+
+function writeDraft(draft: Draft) {
+  try {
+    sessionStorage.setItem(DRAFT_KEY, JSON.stringify(draft));
+  } catch {
+    /* quota or private mode — a lost draft is not worth failing over */
+  }
+}
+
+function clearDraft() {
+  try {
+    sessionStorage.removeItem(DRAFT_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Only the fields worth restoring count — defaults alone are not a draft. */
+function hasContent(draft: Draft): boolean {
+  return !!(
+    draft.title.trim() ||
+    draft.location.trim() ||
+    draft.description.trim() ||
+    draft.attendees.length
+  );
+}
+
+// ── Component ────────────────────────────────────────────────────────
+
+const COMMIT = { shouldValidate: true, shouldDirty: true } as const;
 
 export default function EventModal({
   isOpen,
@@ -91,303 +231,311 @@ export default function EventModal({
   onDelete,
   onClose,
 }: EventModalProps) {
+  const [draftRestored, setDraftRestored] = useState(false);
+  // Set on submit; the parent only closes the modal when the save succeeded, so
+  // "closed while this is set" is our signal that the draft can go.
+  const savedRef = useRef(false);
+
   const form = useForm<FormValues>({
     resolver: zodResolver(formSchema),
-    defaultValues: {
-      title: "",
-      start: "",
-      end: "",
-      description: "",
-      location: "",
-      attendeesStr: "",
-      allDay: false,
-    },
+    defaultValues: buildDefaults(undefined),
   });
 
   const {
+    control,
     register,
     handleSubmit,
     reset,
     watch,
     setValue,
+    getValues,
     formState: { errors },
   } = form;
-  const allDay = watch("allDay");
 
-  // Reset form when modal opens or initialData changes
-  useEffect(() => {
-    if (isOpen) {
-      if (initialData) {
-        const startDt = toDateTimeLocal(initialData.start ?? "");
-        const endDt = toDateTimeLocal(initialData.end ?? "");
-        const isAllDay = initialData.allDay ?? false;
+  const [allDay, date, startTime, duration, days] = watch([
+    "allDay",
+    "date",
+    "startTime",
+    "duration",
+    "days",
+  ]);
 
-        reset({
-          title: initialData.title ?? "",
-          start: isAllDay ? startDt.slice(0, 10) : startDt,
-          end: isAllDay ? endDt.slice(0, 10) : endDt,
-          description: initialData.description ?? "",
-          location: initialData.location ?? "",
-          attendeesStr: initialData.attendees?.join(", ") ?? "",
-          allDay: isAllDay,
-        });
-      } else {
-        reset({
-          title: "",
-          start: "",
-          end: "",
-          description: "",
-          location: "",
-          attendeesStr: "",
-          allDay: false,
-        });
-      }
-    }
-  }, [isOpen, initialData, reset]);
+  // Write-through setters for the date/time controls. `shouldValidate` means an
+  // error clears as soon as the user fixes the field.
+  const setDate = useCallback((v: Date) => setValue("date", v, COMMIT), [setValue]);
+  const setStartTime = useCallback(
+    (v: string) => setValue("startTime", v, COMMIT),
+    [setValue],
+  );
+  const setDuration = useCallback(
+    (v: string) => setValue("duration", v, COMMIT),
+    [setValue],
+  );
+  const setDays = useCallback((v: string) => setValue("days", v, COMMIT), [setValue]);
 
-  // Adjust start/end format when allDay toggles
+  const applyDefaults = useCallback(() => {
+    reset(buildDefaults(initialData));
+    setDraftRestored(false);
+  }, [reset, initialData]);
+
+  // Seed on open. In create mode a stored draft supplies *what* the event is;
+  // the date and time always come from initialData, because those reflect the
+  // day or slot the user just clicked.
   useEffect(() => {
     if (!isOpen) return;
-    const s = form.getValues("start");
-    const e = form.getValues("end");
-    if (allDay) {
-      if (s && s.includes("T")) setValue("start", s.split("T")[0] ?? "");
-      if (e && e.includes("T")) setValue("end", e.split("T")[0] ?? "");
+    savedRef.current = false;
+
+    const base = buildDefaults(initialData);
+    const draft = mode === "create" ? readDraft() : null;
+
+    if (draft && hasContent(draft)) {
+      reset({
+        ...base,
+        title: draft.title,
+        duration: draft.duration || base.duration,
+        days: draft.days || base.days,
+        attendees: draft.attendees,
+        location: draft.location,
+        description: draft.description,
+      });
+      setDraftRestored(true);
     } else {
-      if (s && !s.includes("T")) setValue("start", `${s}T00:00`);
-      if (e && !e.includes("T")) setValue("end", `${e}T00:00`);
+      reset(base);
+      setDraftRestored(false);
     }
-  }, [allDay, isOpen, setValue, form]);
+  }, [isOpen, initialData, mode, reset]);
 
-  if (!isOpen) return null;
+  // Persist the draft as the user types.
+  useEffect(() => {
+    if (!isOpen || mode !== "create") return;
 
-  const onSubmit = (data: FormValues) => {
-    const attendees = (data.attendeesStr || "")
-      .split(",")
-      .map((e) => e.trim())
-      .filter((email) => z.string().email().safeParse(email).success);
+    let timer: ReturnType<typeof setTimeout> | undefined;
 
-    onSave({
-      id: initialData?.id,
-      title: data.title || "(No title)",
-      start: new Date(data.start).toISOString(),
-      end: data.end
-        ? new Date(data.end).toISOString()
-        : new Date(data.start).toISOString(),
-      description: data.description || undefined,
-      location: data.location || undefined,
-      attendees: attendees.length > 0 ? attendees : undefined,
-      allDay: data.allDay ?? false,
+    const persist = () => {
+      const values = getValues();
+      const draft: Draft = {
+        title: values.title,
+        duration: values.duration,
+        days: values.days,
+        attendees: values.attendees,
+        location: values.location,
+        description: values.description,
+      };
+      if (hasContent(draft)) writeDraft(draft);
+      else clearDraft();
+    };
+
+    const subscription = watch(() => {
+      clearTimeout(timer);
+      timer = setTimeout(persist, 300);
     });
-  };
 
-  const handleDelete = () => {
-    if (initialData?.id && onDelete) {
-      onDelete(initialData.id);
-    }
-  };
+    return () => {
+      // Flush rather than drop: closing the modal within the debounce window is
+      // exactly when the draft matters most.
+      if (timer !== undefined) {
+        clearTimeout(timer);
+        persist();
+      }
+      subscription.unsubscribe();
+    };
+  }, [isOpen, mode, watch, getValues]);
+
+  // Closed after a successful save — drop the draft. Closing any other way
+  // (Escape, backdrop, X) deliberately keeps it.
+  useEffect(() => {
+    if (isOpen || !savedRef.current) return;
+    savedRef.current = false;
+    clearDraft();
+  }, [isOpen]);
+
+  const onSubmit = useCallback(
+    (data: FormValues) => {
+      let start: string;
+      let end: string;
+
+      if (data.allDay) {
+        // Calendar dates, kept as local `yyyy-MM-dd`. Google's all-day end date
+        // is exclusive, which is also how events read back from the API.
+        start = toLocalDateKey(data.date);
+        end = allDayEndKey(data.date, Number(data.days));
+      } else {
+        const minutesOfDay = parseTimeInput(data.startTime);
+        const durationMinutes = parseDurationInput(data.duration);
+        if (minutesOfDay === null || durationMinutes === null) return;
+
+        const startDate = combineDateAndTime(data.date, minutesOfDay);
+        const endDate = new Date(startDate.getTime() + durationMinutes * 60_000);
+        start = startDate.toISOString();
+        end = endDate.toISOString();
+      }
+
+      savedRef.current = true;
+      onSave({
+        id: initialData?.id,
+        title: sanitizeText(data.title) || "(No title)",
+        start,
+        end,
+        description: sanitizeText(data.description) || undefined,
+        location: sanitizeText(data.location) || undefined,
+        attendees: data.attendees.length > 0 ? data.attendees : undefined,
+        allDay: data.allDay,
+      });
+    },
+    [initialData?.id, onSave],
+  );
+
+  const handleCancel = useCallback(() => {
+    clearDraft();
+    setDraftRestored(false);
+    onClose();
+  }, [onClose]);
+
+  const dateTimeErrors = useMemo(
+    () => ({
+      date: errors.date?.message,
+      startTime: errors.startTime?.message,
+      duration: errors.duration?.message,
+      days: errors.days?.message,
+    }),
+    [errors.date, errors.startTime, errors.duration, errors.days],
+  );
 
   return (
-    <div
-      style={{
-        position: "fixed",
-        inset: 0,
-        zIndex: 1000,
-        display: "flex",
-        alignItems: "center",
-        justifyContent: "center",
-        backgroundColor: "rgba(255, 255, 255, 0.5)",
+    <Dialog
+      open={isOpen}
+      onOpenChange={(next) => {
+        // Escape / backdrop / X: close but keep the draft.
+        if (!next) onClose();
       }}
-      onClick={onClose}
     >
-      <div
-        style={{
-          backgroundColor: "#1a1a2e",
-          borderRadius: "12px",
-          padding: "1.5rem",
-          width: "100%",
-          maxWidth: "480px",
-          border: "1px solid #333",
-          boxShadow: "0 8px 32px rgba(0, 0, 0, 0.4)",
-          maxHeight: "90vh",
-          overflowY: "auto",
-        }}
-        onClick={(e) => e.stopPropagation()}
-      >
-        <h2 style={{ margin: "0 0 1rem", fontSize: "1.25rem", color: "#e0e0e0" }}>
-          {mode === "create" ? "Create Event" : "Edit Event"}
-        </h2>
+      <DialogContent className="sm:max-w-lg">
+        <DialogHeader>
+          <DialogTitle>{mode === "create" ? "Create Event" : "Edit Event"}</DialogTitle>
+          <DialogDescription>
+            {draftRestored ? (
+              <span className="flex items-center gap-2">
+                Draft restored.
+                <button
+                  type="button"
+                  onClick={applyDefaults}
+                  className="text-foreground underline underline-offset-2"
+                >
+                  Start over
+                </button>
+              </span>
+            ) : mode === "create" ? (
+              "Add an event to your calendar."
+            ) : (
+              "Update this event."
+            )}
+          </DialogDescription>
+        </DialogHeader>
 
-        <form
-          onSubmit={handleSubmit(onSubmit)}
-          style={{ display: "flex", flexDirection: "column", gap: "0.75rem" }}
-        >
+        <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
           {/* Title */}
-          <div>
-            <label style={labelStyle}>Title</label>
-            <input
-              type="text"
-              {...register("title")}
-              placeholder="Event title"
-              style={inputStyle}
-              autoFocus
-            />
+          <div className="grid gap-2">
+            <Label htmlFor="event-title">Title</Label>
+            <Input id="event-title" placeholder="Event title" autoFocus {...register("title")} />
           </div>
 
-          {/* All Day */}
-          <div style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}>
-            <input type="checkbox" id="allDay" {...register("allDay")} />
-            <label htmlFor="allDay" style={{ color: "#ccc", fontSize: "0.875rem" }}>
-              All day
-            </label>
-          </div>
+          {/* When */}
+          <div className="grid gap-2">
+            <div className="flex items-center justify-between">
+              <Label>When</Label>
+              <div className="flex items-center gap-2">
+                <Label htmlFor="event-all-day" className="text-muted-foreground font-normal">
+                  All day
+                </Label>
+                <Controller
+                  control={control}
+                  name="allDay"
+                  render={({ field }) => (
+                    <Switch
+                      id="event-all-day"
+                      checked={field.value}
+                      onCheckedChange={field.onChange}
+                    />
+                  )}
+                />
+              </div>
+            </div>
 
-          {/* Start */}
-          <div>
-            <label style={labelStyle}>Start</label>
-            <input
-              type={allDay ? "date" : "datetime-local"}
-              {...register("start")}
-              style={inputStyle}
+            <DateTimeFields
+              date={date}
+              onDateChange={setDate}
+              startTime={startTime}
+              onStartTimeChange={setStartTime}
+              duration={duration}
+              onDurationChange={setDuration}
+              days={days}
+              onDaysChange={setDays}
+              allDay={allDay}
+              errors={dateTimeErrors}
             />
-            {errors.start && <span style={errorStyle}>{errors.start.message}</span>}
-          </div>
-
-          {/* End */}
-          <div>
-            <label style={labelStyle}>End</label>
-            <input
-              type={allDay ? "date" : "datetime-local"}
-              {...register("end")}
-              style={inputStyle}
-            />
-            {errors.end && <span style={errorStyle}>{errors.end.message}</span>}
           </div>
 
           {/* Guests */}
-          <div>
-            <label style={labelStyle}>Guests (valid emails only)</label>
-            <input
-              type="text"
-              {...register("attendeesStr")}
-              placeholder="email1@example.com, email2@example.com"
-              style={inputStyle}
+          <div className="grid gap-2">
+            <Label htmlFor="event-guests">Guests</Label>
+            <Controller
+              control={control}
+              name="attendees"
+              render={({ field }) => (
+                <GuestInput id="event-guests" value={field.value} onChange={field.onChange} />
+              )}
             />
-            {errors.attendeesStr && <span style={errorStyle}>{errors.attendeesStr.message}</span>}
           </div>
 
           {/* Location */}
-          <div>
-            <label style={labelStyle}>Location</label>
-            <input
-              type="text"
+          <div className="grid gap-2">
+            <Label htmlFor="event-location">Location</Label>
+            <Input
+              id="event-location"
+              placeholder="Meeting room or link"
               {...register("location")}
-              placeholder="Meeting room / URL"
-              style={inputStyle}
             />
           </div>
 
           {/* Description */}
-          <div>
-            <label style={labelStyle}>Description</label>
-            <textarea
-              {...register("description")}
-              placeholder="Add description..."
+          <div className="grid gap-2">
+            <Label htmlFor="event-description">Description</Label>
+            <Textarea
+              id="event-description"
+              placeholder="Add description…"
               rows={3}
-              style={{ ...inputStyle, resize: "vertical" }}
+              {...register("description")}
             />
           </div>
 
-          {/* Actions */}
-          <div
-            style={{
-              display: "flex",
-              justifyContent: "space-between",
-              marginTop: "1.25rem",
-              gap: "0.5rem",
-            }}
-          >
+          <DialogFooter className="sm:justify-between">
             <div>
-              {mode === "edit" && onDelete && (
-                <button
+              {mode === "edit" && onDelete && initialData?.id && (
+                <Button
                   type="button"
-                  onClick={handleDelete}
-                  style={deleteButtonStyle}
+                  variant="ghost"
+                  className="text-destructive hover:text-destructive hover:bg-destructive/10"
+                  onClick={() => onDelete(initialData.id!)}
                 >
+                  <Trash2Icon className="size-4" />
                   Delete
-                </button>
+                </Button>
               )}
             </div>
-            <div style={{ display: "flex", gap: "0.5rem" }}>
-              <button type="button" onClick={onClose} style={cancelButtonStyle}>
+            <div className="flex gap-2">
+              <Button type="button" variant="outline" onClick={handleCancel}>
                 Cancel
-              </button>
-              <button type="submit" style={saveButtonStyle}>
+              </Button>
+              <Button
+                type="submit"
+                className="bg-[#b08d57] text-white hover:bg-[#b08d57]/90"
+              >
                 {mode === "create" ? "Create" : "Save"}
-              </button>
+              </Button>
             </div>
-          </div>
+          </DialogFooter>
         </form>
-      </div>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }
-
-// ── Styles ───────────────────────────────────────────────────────────
-
-const labelStyle: React.CSSProperties = {
-  display: "block",
-  fontSize: "0.75rem",
-  fontWeight: 600,
-  color: "#999",
-  marginBottom: "0.25rem",
-  textTransform: "uppercase",
-  letterSpacing: "0.05em",
-};
-
-const inputStyle: React.CSSProperties = {
-  width: "100%",
-  padding: "0.5rem 0.75rem",
-  backgroundColor: "#16213e",
-  border: "1px solid #333",
-  borderRadius: "6px",
-  color: "#e0e0e0",
-  fontSize: "0.875rem",
-  outline: "none",
-  boxSizing: "border-box",
-};
-
-const baseButtonStyle: React.CSSProperties = {
-  padding: "0.5rem 1rem",
-  borderRadius: "6px",
-  fontSize: "0.875rem",
-  fontWeight: 500,
-  cursor: "pointer",
-  border: "none",
-};
-
-const saveButtonStyle: React.CSSProperties = {
-  ...baseButtonStyle,
-  backgroundColor: "#4361ee",
-  color: "#fff",
-};
-
-const cancelButtonStyle: React.CSSProperties = {
-  ...baseButtonStyle,
-  backgroundColor: "transparent",
-  color: "#999",
-  border: "1px solid #333",
-};
-
-const deleteButtonStyle: React.CSSProperties = {
-  ...baseButtonStyle,
-  backgroundColor: "#e74c3c",
-  color: "#fff",
-};
-
-const errorStyle: React.CSSProperties = {
-  color: "#e74c3c",
-  fontSize: "0.75rem",
-  marginTop: "0.25rem",
-  display: "block",
-};
