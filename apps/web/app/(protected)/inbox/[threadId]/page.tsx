@@ -24,6 +24,7 @@ import {
   AlertCircle as AlertCircleIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
+import { EmailSummaryCard } from "@web/components/email-summary-card";
 
 function parseSender(from: string) {
   if (!from) return { name: "Unknown", email: "" };
@@ -265,21 +266,21 @@ export default function ThreadDetailPage() {
         {/* Main Content Pane */}
         <div className="lg:col-span-9 space-y-6">
           
-          {/* AI Summary Card (Full Width) */}
-          <div className="bg-[#b08d57]/5 border border-[#b08d57]/15 rounded-xl p-5 relative overflow-hidden shadow-sm">
-            <div className="absolute right-4 top-4 select-none opacity-10">
-              <SparklesIcon className="size-6 text-[#b08d57]" />
-            </div>
-            <div className="flex items-center gap-2 mb-2 select-none">
-              <SparklesIcon className="size-4 text-[#b08d57] animate-pulse" />
-              <span className="text-xs font-mono uppercase tracking-widest text-[#b08d57] font-bold">
-                AI Executive Summary
-              </span>
-            </div>
-            <p className="font-serif text-sm text-foreground/90 leading-relaxed">
-              {thread.priorityReason || thread.messages[0]?.snippet}
-            </p>
-          </div>
+          {/* On-demand AI summary. Previously this card rendered
+              priorityReason (a classification rationale) or, failing that,
+              the raw Gmail snippet — neither of which was a summary, and
+              the snippet leaked whatever the email happened to contain. */}
+          <EmailSummaryCard
+            entityId={thread.messages[0]?.id}
+            threadId={thread.threadId}
+            subject={thread.subject}
+            sender={thread.messages[0]?.from}
+            receivedAt={thread.messages[0]?.date}
+            initialSummary={thread.summary}
+            initialDigest={thread.summaryDigest}
+            initialFullText={thread.summaryFullText}
+            initialFlags={thread.summaryFlags}
+          />
 
           {/* Email Messages Timeline */}
           <div className="space-y-6">

@@ -157,5 +157,82 @@ export class ToolRegistry {
       execute: (args, ctx) =>
         generateExecutiveBriefExec.execute(args as GenerateExecutiveBriefInput, ctx),
     });
+
+    // ── summarizeEmail ───────────────────────────────────────────────
+    // Lets the assistant produce the same information-dense notes the inbox
+    // card produces, so a user can ask "summarize the Drop Site email" and
+    // then keep asking questions about its contents in the same thread.
+    //
+    // SAFE/no-approval because it only reads and returns text. The guardrails
+    // are not optional extras here: the real executor runs the body through
+    // PII masking, secret redaction and prompt-injection stripping before it
+    // reaches the model, so what lands in the conversation — and therefore in
+    // every subsequent turn's context — is already scrubbed.
+    this.register({
+      name: "summarizeEmail",
+      description:
+        "Fetch and summarize a specific email into detailed reading notes the user can then ask follow-up questions about. " +
+        "ALWAYS use this tool — never summarize from a searchEmails snippet alone — whenever the user asks to fetch, open, read, summarize or discuss a specific email; the snippet is a fragment and has not been through privacy screening, this tool's output has. " +
+        "Accepts either an exact email/message id (entityId) or a natural-language description of the email (query), e.g. 'the Drop Site newsletter from today' or 'latest email from Drop Site' — when a query is given this finds the single most recent matching email, so it directly answers 'fetch my latest X email'. " +
+        "The result includes a threadId: when present, give the user a link to open it in Mailroid using markdown `[Open email](/inbox/{threadId})`.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z
+        .object({
+          entityId: z
+            .string()
+            .optional()
+            .describe("Exact message id, when known"),
+          query: z
+            .string()
+            .optional()
+            .describe("Description of the email to find and summarize"),
+        })
+        .refine((v) => Boolean(v.entityId || v.query), {
+          message: "Provide either entityId or query",
+        }),
+      outputSchema: z.object({
+        found: z.boolean(),
+        entityId: z.string().optional(),
+        threadId: z
+          .string()
+          .optional()
+          .describe("Use to build an in-app link: /inbox/{threadId}"),
+        subject: z.string().optional(),
+        sender: z.string().optional(),
+        receivedAt: z.string().optional(),
+        summary: z
+          .string()
+          .optional()
+          .describe("Full structured digest of the email — use this to answer follow-up questions"),
+        overview: z
+          .string()
+          .optional()
+          .describe("Short few-sentence overview of the same email"),
+        fullText: z
+          .string()
+          .optional()
+          .describe(
+            "Guardrailed but uncompressed body (PII masked, secrets redacted, injection stripped). " +
+              "The digest is built to preserve every fact — prefer it. Consult fullText only when the " +
+              "user asks about a specific detail (a name, figure, quote) the digest doesn't cover.",
+          ),
+        guardrails: z
+          .object({
+            injectionBlocked: z.boolean(),
+            maskedCategories: z.array(z.string()),
+            secretsRedacted: z.boolean(),
+          })
+          .optional(),
+        message: z.string().optional(),
+      }),
+      // Replaced at runtime by registerProductionExecutors. The mock keeps
+      // the registry self-contained for tests.
+      execute: async () => ({
+        found: false,
+        message: "summarizeEmail executor not registered",
+      }),
+    });
   }
 }

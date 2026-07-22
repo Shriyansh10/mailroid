@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useState, useEffect, useRef, useMemo } from "react";
+import React, { useState, useEffect, useRef, useMemo, Suspense } from "react";
 import { motion } from "framer-motion";
 import { 
   BotIcon, 
@@ -14,13 +14,14 @@ import {
   XIcon,
   Trash2Icon
 } from "lucide-react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { useConversations, useConversationMessages, useDeleteConversation } from "@web/hooks/api/assistant";
 import { useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 import { Button } from "@web/components/ui/button";
+import { consumeDobbieSeed } from "@web/lib/dobbie-seed";
 
 interface RenderableItem {
   type: "message" | "tool_call";
@@ -96,6 +97,12 @@ function getSystemPrompt(userTimeZone: string, userEmail?: string): string {
     `If information requires mailbox or calendar access, use the appropriate tool.`,
     `If tool results are empty, clearly state that no matching information was found.`,
     ``,
+    `FETCHING AND SUMMARIZING A SPECIFIC EMAIL`,
+    `When the user asks you to fetch, open, read, summarize, or discuss a specific email — e.g. "summarize my latest Drop Site email" or "what did that GitLab alert say" — call summarizeEmail. Pass entityId if you already have it (e.g. from a prior tool result or from EMAIL CONTEXT below), otherwise pass query with a short natural-language description; a query returns the single most recent matching email, so it directly answers "fetch my latest X email".`,
+    `Never summarize an email yourself from a searchEmails snippet — a snippet is a fragment and has not been through the privacy screening summarizeEmail applies. If you already called searchEmails and now need to discuss one result in depth, call summarizeEmail next.`,
+    `summarizeEmail's "summary" field is the full digest — treat it as the email's content for answering follow-up questions about what it says. Its "overview" field is a short version, useful only when the user wants a one-line answer. Its "fullText" field is the guardrailed but uncompressed body — prefer the digest, but if the user asks about a specific detail (a name, figure, quote, date) the digest doesn't cover, consult fullText before saying the information isn't available.`,
+    `When the result includes a threadId, give the user a way to open it in Mailroid: [Open email](/inbox/{threadId}).`,
+    ``,
     `APPROVAL RULES`,
     `Some actions require explicit approval.`,
     `Examples include sending emails and creating calendar events.`,
@@ -135,8 +142,19 @@ function getSystemPrompt(userTimeZone: string, userEmail?: string): string {
   ].join("\n");
 }
 
+// useSearchParams() (needed to read ?discuss=) requires a Suspense boundary
+// around any component that calls it, or the production build fails.
 export default function AssistantPage() {
+  return (
+    <Suspense fallback={null}>
+      <AssistantPageInner />
+    </Suspense>
+  );
+}
+
+function AssistantPageInner() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { data: session } = useSession();
   const userEmail = session?.user?.email;
   const [isMounted, setIsMounted] = useState(false);
@@ -145,6 +163,10 @@ export default function AssistantPage() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
+  // Which ?discuss= id has already been consumed, so re-navigating to the
+  // SAME /assistant route from a different email (a soft nav, no remount)
+  // still triggers re-seeding rather than silently doing nothing.
+  const consumedDiscussIdRef = useRef<string | null>(null);
 
   // Persistence State & Hooks
   const [currentConversationId, setCurrentConversationId] = useState<string | null>(null);
@@ -176,6 +198,7 @@ export default function AssistantPage() {
     if (name === "sendEmail") return "Sending email...";
     if (name === "createEvent") return "Creating calendar event...";
     if (name === "generateExecutiveBrief") return "Generating executive briefing...";
+    if (name === "summarizeEmail") return "Reading and summarizing email...";
     return `Executing tool ${name}...`;
   };
 
@@ -185,6 +208,7 @@ export default function AssistantPage() {
     if (name === "sendEmail") return "✓ Email sent successfully";
     if (name === "createEvent") return "✓ Event created successfully";
     if (name === "generateExecutiveBrief") return "✓ Executive briefing generated";
+    if (name === "summarizeEmail") return "✓ Email summarized";
     return `✓ Executed tool ${name}`;
   };
 
@@ -291,6 +315,15 @@ export default function AssistantPage() {
                 resultSummary = "Event created successfully";
               } else if (toolName === "generateExecutiveBrief") {
                 resultSummary = "Executive briefing generated";
+              } else if (toolName === "summarizeEmail") {
+                try {
+                  const parsed = JSON.parse(responseText);
+                  resultSummary = parsed.found
+                    ? `Summarized "${parsed.subject ?? "email"}"`
+                    : "No matching email found";
+                } catch {
+                  resultSummary = "Email summarized";
+                }
               } else {
                 resultSummary = "Completed successfully";
               }
@@ -350,16 +383,44 @@ export default function AssistantPage() {
     }
   }, [dbMessages]);
 
-  const handleSend = async (text: string) => {
-    if (!text.trim() || isLoading) return;
+  // `historyOverride` + `skipAppendingText` exist for the "Discuss with
+  // Dobbie" seed flow. Two problems that plain history-prepending doesn't
+  // solve on its own:
+  //
+  //   1. It fires from a useEffect right after setMessages(seed), and
+  //      reading the `messages` state in that same tick would still see the
+  //      stale pre-update value (state updates aren't synchronous) — so the
+  //      intended history has to be passed in explicitly.
+  //   2. The seed's user-facing starter line ("Let's discuss...") has to be
+  //      the FIRST thing rendered, with the tool-call card appearing after
+  //      it — otherwise the transcript reads as "Dobbie already fetched the
+  //      email" before the user ever asked. But the seed already includes
+  //      that starter as a real message (so the model sees the natural
+  //      user → tool-call → tool-result order); appending `text` again as a
+  //      trailing turn would duplicate it. skipAppendingText says "the
+  //      history is already complete, don't add another user turn."
+  //
+  // Every other call site omits both and behaves exactly as before.
+  const handleSend = async (
+    text: string,
+    historyOverride?: ChatMessage[],
+    skipAppendingText = false,
+  ) => {
+    if (isLoading) return;
+    if (!skipAppendingText && !text.trim()) return;
 
-    const userMessage: ChatMessage = { id: Date.now().toString(), role: "user", content: text };
+    const newMessages: ChatMessage[] = skipAppendingText
+      ? (historyOverride ?? messages)
+      : [
+          ...(historyOverride ?? messages),
+          { id: Date.now().toString(), role: "user", content: text },
+        ];
 
     if (isNewChat) {
       setIsNewChat(false);
     }
 
-    setMessages((prev) => [...prev, userMessage]);
+    setMessages(newMessages);
     setPrompt("");
     setIsLoading(true);
 
@@ -370,13 +431,12 @@ export default function AssistantPage() {
 
     const apiMessages = [
       { role: "system" as const, content: systemPrompt },
-      ...messages.map((m) => ({
+      ...newMessages.map((m) => ({
         role: m.role === "ai" ? ("assistant" as const) : m.role === "user" ? ("user" as const) : m.role,
         content: m.content,
         tool_calls: m.tool_calls,
         tool_call_id: m.tool_call_id,
       })),
-      { role: "user" as const, content: text },
     ];
 
     try {
@@ -426,6 +486,87 @@ export default function AssistantPage() {
       abortRef.current = null;
     }
   };
+
+  // "Discuss with Dobbie" hand-off. The inbox thread page stashes the
+  // guardrailed digest in sessionStorage and navigates here with
+  // ?discuss={entityId}; this effect turns that into a fresh chat.
+  //
+  // The context is injected as a SYNTHETIC completed tool round-trip — an
+  // assistant message calling summarizeEmail, immediately followed by its
+  // tool result — rather than as extra system-prompt text. That matters:
+  // it reuses the exact trust boundary already established for real tool
+  // output (untrusted, described in UNTRUSTED DATA above, rendered as an
+  // ordinary "✓ Email summarized" card) instead of opening a second, less
+  // scrutinized channel for attacker-controlled email content to reach the
+  // model. It also means this is indistinguishable from Dobbie having
+  // fetched the email itself, so no special-casing is needed anywhere else.
+  //
+  // Effect deps are keyed on the ?discuss= value (not just mount): pushing
+  // to /assistant a second time from a different email is a same-pathname
+  // navigation, which Next.js may serve by reusing this component instance
+  // rather than remounting it, so a mount-only effect would silently miss it.
+  useEffect(() => {
+    const discussId = searchParams.get("discuss");
+    if (!discussId || consumedDiscussIdRef.current === discussId) return;
+    if (session === undefined) return; // wait for auth so userEmail is ready
+
+    const seed = consumeDobbieSeed();
+    consumedDiscussIdRef.current = discussId;
+    // Strip the query param regardless of outcome — a stale/expired seed
+    // must not leave a dead ?discuss= link sitting in the address bar.
+    router.replace("/assistant", { scroll: false });
+    if (!seed || seed.entityId !== discussId) return;
+
+    setIsNewChat(false);
+    setCurrentConversationId(null);
+
+    const toolCallId = `seed-${seed.entityId}`;
+    const starterText = `Let's discuss this email: "${seed.subject}" from ${seed.sender}.`;
+    // Order matters here: the user's line comes first so the transcript
+    // reads naturally (ask → Dobbie fetches it → tool card), matching what
+    // the model itself sees. This whole array IS the complete first turn —
+    // handleSend is told (via skipAppendingText) not to append `text` again.
+    const seedHistory: ChatMessage[] = [
+      { id: `${toolCallId}-user`, role: "user", content: starterText },
+      {
+        id: `${toolCallId}-call`,
+        role: "assistant",
+        content: "",
+        tool_calls: [
+          {
+            id: toolCallId,
+            type: "function",
+            function: {
+              name: "summarizeEmail",
+              arguments: JSON.stringify({ entityId: seed.entityId }),
+            },
+          },
+        ],
+      },
+      {
+        id: `${toolCallId}-result`,
+        role: "tool",
+        tool_call_id: toolCallId,
+        content: JSON.stringify({
+          found: true,
+          entityId: seed.entityId,
+          threadId: seed.threadId,
+          subject: seed.subject,
+          sender: seed.sender,
+          receivedAt: seed.receivedAt,
+          summary: seed.digest,
+          overview: seed.overview,
+          fullText: seed.fullText,
+          guardrails: seed.guardrails ?? undefined,
+        }),
+      },
+    ];
+
+    handleSend(starterText, seedHistory, true);
+    // handleSend is stable enough across renders for this one-shot effect;
+    // re-running it on every render identity change would refire the seed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, session]);
 
   const handleOpenOldChat = (conversationId: string) => {
     setIsNewChat(false);

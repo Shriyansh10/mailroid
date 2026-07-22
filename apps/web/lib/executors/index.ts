@@ -5,6 +5,8 @@ import { CorsairGetEventsExecutor, CorsairCreateEventExecutor } from "./calendar
 import type { GetEventsInput, CreateEventInput } from "./calendar";
 import { CorsairGenerateBriefExecutor } from "./brief";
 import type { GenerateExecutiveBriefInput } from "./brief";
+import { CorsairSummarizeEmailExecutor } from "./summarize";
+import type { SummarizeEmailInput } from "./summarize";
 
 /**
  * Register production (Corsair-backed) executors into the ToolRegistry.
@@ -27,6 +29,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
   const eventsExec = new CorsairGetEventsExecutor();
   const createExec = new CorsairCreateEventExecutor();
   const briefExec = new CorsairGenerateBriefExecutor();
+  const summarizeExec = new CorsairSummarizeEmailExecutor();
 
   // Replace searchEmails with Corsair-backed executor
   const searchDef = registry.get("searchEmails");
@@ -91,6 +94,19 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ generateExecutiveBrief replaced with Corsair executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ generateExecutiveBrief NOT found in registry — mock still active");
+  }
+
+  // Replace summarizeEmail with the guardrailed executor
+  const summarizeDef = registry.get("summarizeEmail");
+  if (summarizeDef) {
+    registry.register({
+      ...summarizeDef,
+      execute: (args, ctx) =>
+        summarizeExec.execute(args as SummarizeEmailInput, ctx as ToolExecutionContext),
+    });
+    console.log("[registerProductionExecutors] ✅ summarizeEmail replaced with guardrailed executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ summarizeEmail NOT found in registry — mock still active");
   }
 }
 

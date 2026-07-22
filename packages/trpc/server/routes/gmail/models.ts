@@ -42,6 +42,19 @@ export const threadDetailOutputModel = z.object({
   priorityScore: z.number().nullable().optional(),
   priorityReason: z.string().nullable().optional(),
   isActionRequired: z.boolean().optional(),
+  // On-demand AI summary, present only once the user has paid an action for
+  // it. summaryFlags reports what the guardrails masked or stripped.
+  summary: z.string().nullable().optional(),
+  summaryDigest: z.string().nullable().optional(),
+  summaryFullText: z.string().nullable().optional(),
+  summaryFlags: z
+    .object({
+      injectionBlocked: z.boolean(),
+      maskedCategories: z.array(z.string()),
+      secretsRedacted: z.boolean(),
+    })
+    .nullable()
+    .optional(),
 });
 
 // ── Send email output ────────────────────────────────────────────────

@@ -279,6 +279,12 @@ export async function getThread(
       priorityScore: messageMetadata.priorityScore,
       priorityReason: messageMetadata.priorityReason,
       isActionRequired: messageMetadata.isActionRequired,
+      // Carried so an already-paid-for summary renders with the thread
+      // instead of needing a round trip that looks like a second charge.
+      summary: messageMetadata.summary,
+      summaryDigest: messageMetadata.summaryDigest,
+      summaryFullText: messageMetadata.summaryFullText,
+      summaryFlags: messageMetadata.summaryFlags,
     })
     .from(messageMetadata)
     .where(and(eq(messageMetadata.threadId, threadId), eq(messageMetadata.userId, tenantId)))
@@ -289,6 +295,10 @@ export async function getThread(
     result.priorityScore = meta[0].priorityScore ?? undefined;
     result.priorityReason = meta[0].priorityReason ?? undefined;
     result.isActionRequired = meta[0].isActionRequired ?? undefined;
+    result.summary = meta[0].summary ?? undefined;
+    result.summaryDigest = meta[0].summaryDigest ?? undefined;
+    result.summaryFullText = meta[0].summaryFullText ?? undefined;
+    result.summaryFlags = meta[0].summaryFlags ?? undefined;
   }
 
   logger.info("[SERVICE] getThread completed", {
