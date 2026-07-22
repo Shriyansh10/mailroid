@@ -57,6 +57,12 @@ export const messageMetadata = pgTable(
     priority: priorityEnum("priority"),
     priorityScore: real("priority_score"),
     priorityReason: text("priority_reason"),
+    // Which profile signals drove the classification, as structured
+    // { source, value } pairs (e.g. {source:"goal",value:"job_search"}).
+    // NULL for emails classified before personalization existed.
+    matchedSignals: jsonb("matched_signals").$type<
+      { source: string; value: string }[]
+    >(),
 
     sender: text("sender"),
 subject: text("subject"),
@@ -64,6 +70,40 @@ snippet: text("snippet"),
 
     isActionRequired: boolean("is_action_required").notNull().default(false),
     isReplyNeeded: boolean("is_reply_needed").notNull().default(false),
+
+    // On-demand, user-initiated one-line summary ("Summarize this mail",
+    // costs one daily action). Cached here so re-opening a thread never
+    // charges a second time. NULL = never summarized, which is the normal
+    // state — this is deliberately not generated during bulk classification.
+    // summaryFlags records what the guardrails did (PII masked, injection
+    // stripped) so the UI can disclose it; it never holds the values.
+    // Two products from one generation: `summary` is the few-sentence
+    // overview for the card, `summaryDigest` the full structured rewrite
+    // shown on open and used as the assistant's retrieval context in place
+    // of the raw email (smaller, de-boilerplated, already scrubbed).
+    summary: text("summary"),
+    summaryDigest: text("summary_digest"),
+    // Guardrailed-but-uncompressed body: PII masked, secrets redacted,
+    // injection stripped, but not rewritten into digest form. The digest
+    // aims to preserve every fact, but summarization can still drop a detail
+    // (e.g. a named entity mentioned once). This is the fallback the
+    // assistant reaches for when a follow-up question needs something the
+    // digest omitted — never the raw body itself.
+    summaryFullText: text("summary_full_text"),
+    summaryFlags: jsonb("summary_flags").$type<{
+      injectionBlocked: boolean;
+      maskedCategories: string[];
+      secretsRedacted: boolean;
+    }>(),
+    // What the document analyzer concluded — kept for tuning the pipeline
+    // against real mail rather than guesses.
+    summaryMeta: jsonb("summary_meta").$type<{
+      type: string;
+      topicCount: number;
+      complexity: string;
+      sections: number;
+    }>(),
+    summaryGeneratedAt: timestamp("summary_generated_at", { withTimezone: true }),
 
     // The checkpoint for historical bulk classification: PENDING -> DONE or
     // FAILED. No PROCESSING state — classification concurrency is 1, so

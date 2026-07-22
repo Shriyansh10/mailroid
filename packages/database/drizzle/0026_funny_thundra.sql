@@ -1,0 +1,1 @@
+ALTER TABLE "message_metadata" ADD COLUMN "summary_full_text" text;

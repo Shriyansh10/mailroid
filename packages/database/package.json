@@ -17,7 +17,8 @@
     "./models/calendar-events": "./models/calendar-events.ts",
     "./models/daily-briefs": "./models/daily-briefs.ts",
     "./models/gmail-sync-status": "./models/gmail-sync-status.ts",
-    "./models/classification-jobs": "./models/classification-jobs.ts"
+    "./models/classification-jobs": "./models/classification-jobs.ts",
+    "./models/user-priority-profile": "./models/user-priority-profile.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",
