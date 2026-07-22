@@ -13,8 +13,11 @@ export default function ProtectedLayout({ children }: { children: React.ReactNod
   const pathname = usePathname();
 
   // /onboarding is where the waiting screen lives — it must never redirect to
-  // itself, or an in-progress sync becomes an infinite loop.
-  const isOnboarding = pathname === "/onboarding";
+  // itself, or an in-progress sync becomes an infinite loop. The personalize
+  // wizard is part of the same flow and equally safe mid-sync (it only writes
+  // the profile row), so it's exempt too.
+  const isOnboarding =
+    pathname === "/onboarding" || pathname === "/onboarding/personalize";
 
   const { data: sync } = useSyncStatus({ enabled: !!data });
 

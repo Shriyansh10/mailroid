@@ -6,6 +6,9 @@ export { sanitizeText, sanitizeToolResult } from "./sanitizer.ts";
 
 export { detectPromptInjection } from "./prompt-injection.ts";
 
+export { detectPII, hasPII, maskPII, PIICategory } from "./pii.ts";
+export type { PIIMatch, PIIDetectionResult, PIIMaskResult } from "./pii.ts";
+
 export { WriteGuard, writeGuard, PhishingRisk } from "./write-guard.ts";
 export type { WriteGuardResult } from "./write-guard.ts";
 

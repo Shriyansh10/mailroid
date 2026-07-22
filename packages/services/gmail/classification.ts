@@ -1,8 +1,9 @@
 import { db, eq, and, lt, gte, inArray, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
-import { classifyEmailPriorityBatch } from "@repo/ai";
+import { classifyEmailPriorityBatch, applyProfileOverrides } from "@repo/ai";
 import type { PriorityBatchItem, PriorityBatchResult } from "@repo/ai";
+import { getClassificationContext } from "../profile/index.js";
 import { logger } from "@repo/logger";
 
 // One Inngest run processes exactly one batch of this many emails, split
@@ -136,6 +137,7 @@ async function applyBatchResults(
           priority: result.priority,
           priorityScore: result.priorityScore,
           priorityReason: result.priorityReason,
+          matchedSignals: result.matchedSignals,
           isActionRequired: result.isActionRequired,
           isReplyNeeded: result.isReplyNeeded,
           classificationStatus: "DONE",
@@ -192,6 +194,11 @@ export async function runClassificationBatch(
     return { attempted: 0, classified: 0, remaining: 0 };
   }
 
+  // One (cached) profile read covers the whole batch. Null for users who
+  // never saved a profile — classification then behaves exactly as before
+  // personalization existed.
+  const userContext = await getClassificationContext(userId);
+
   const entityIds = batch.map((row) => row.entityId);
   await incrementAttempts(entityIds);
 
@@ -206,8 +213,18 @@ export async function runClassificationBatch(
   for (let i = 0; i < items.length; i += LLM_BATCH_SIZE) {
     const chunk = items.slice(i, i + LLM_BATCH_SIZE);
     try {
-      const chunkResults = await classifyEmailPriorityBatch(chunk);
-      allResults.push(...chunkResults);
+      const chunkResults = await classifyEmailPriorityBatch(chunk, userContext?.context);
+      // Muted senders are a hard rule applied in code, whatever the LLM said.
+      allResults.push(
+        ...chunkResults.map((r) => ({
+          ...r,
+          ...applyProfileOverrides(
+            batch[r.index]?.sender ?? "",
+            r,
+            userContext ?? undefined,
+          ),
+        })),
+      );
     } catch (err) {
       // An exhausted quota is not a transient chunk failure — every remaining
       // chunk will fail the same way. Aborting the batch stops it burning an
@@ -389,6 +406,65 @@ export async function retryFailedClassifications(userId: string): Promise<RetryF
   });
 
   return { started: true, jobId: job.id, totalCount: job.totalCount, resetCount: reset.length };
+}
+
+// ── Priority-tab classify controls ───────────────────────────────────
+
+/**
+ * Everything the priority tab's classify controls need in one call.
+ *
+ * hasClassified is derived from classification_jobs rather than a stored
+ * flag: a scoped (last_week/last_month) job that is running or complete
+ * means the user has spent their one-time classification — the scope
+ * buttons never render again. A job that outright FAILED doesn't count, so
+ * a provider outage on the very first run doesn't lock the buttons forever.
+ *
+ * remainingUnclassified counts emails in the classified job's own window
+ * (its persisted `since`, not a recomputed one) that still have no
+ * priority — the signal for showing the Retry button.
+ */
+export async function getClassifyControlsStatus(userId: string): Promise<{
+  hasClassified: boolean;
+  remainingUnclassified: number;
+  failedCount: number;
+}> {
+  const [job] = await db
+    .select({
+      since: classificationJobs.since,
+    })
+    .from(classificationJobs)
+    .where(
+      and(
+        eq(classificationJobs.userId, userId),
+        inArray(classificationJobs.scope, ["last_week", "last_month"]),
+        inArray(classificationJobs.status, ["running", "complete"]),
+      ),
+    )
+    .orderBy(sql`${classificationJobs.startedAt} DESC`)
+    .limit(1);
+
+  const failedCount = await countFailedClassifications(userId);
+
+  if (!job) {
+    return { hasClassified: false, remainingUnclassified: 0, failedCount };
+  }
+
+  const [row] = await db
+    .select({ count: sql<number>`count(*)` })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        sql`${messageMetadata.priority} IS NULL`,
+        gte(messageMetadata.receivedAt, job.since),
+      ),
+    );
+
+  return {
+    hasClassified: true,
+    remainingUnclassified: Number(row?.count ?? 0),
+    failedCount,
+  };
 }
 
 export async function getLatestClassificationJob(userId: string) {

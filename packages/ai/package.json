@@ -12,6 +12,7 @@
   },
 
   "dependencies": {
+    "@repo/shared": "workspace:*",
     "dotenv": "^17.2.3",
     "openai": "^6.42.0",
     "typescript": "^6.0.3",

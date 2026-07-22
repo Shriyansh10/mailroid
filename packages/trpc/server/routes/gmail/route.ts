@@ -12,6 +12,7 @@ import {
   getLatestClassificationJob,
   countFailedClassifications,
   retryFailedClassifications,
+  getClassifyControlsStatus,
 } from "@repo/services/gmail/classification.js";
 import {
   threadListOutputModel,
@@ -298,6 +299,29 @@ export const gmailRouter = router({
         totalCount: job?.totalCount ?? 0,
         failedCount,
       };
+    }),
+
+  // Drives the priority tab's classify controls: whether the one-time scope
+  // buttons should still render (hasClassified === false), and once they're
+  // gone, whether a Retry button is warranted (unclassified emails left in
+  // the job's own window, or rows stuck at the attempt cap).
+  classifyControlsStatus: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/classify-controls-status"),
+        tags: TAGS,
+      },
+    })
+    .output(
+      z.object({
+        hasClassified: z.boolean(),
+        remainingUnclassified: z.number(),
+        failedCount: z.number(),
+      }),
+    )
+    .query(async ({ ctx }) => {
+      return getClassifyControlsStatus(ctx.user!.id);
     }),
 
   storedCount: protectedProcedure

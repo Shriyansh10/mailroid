@@ -356,6 +356,17 @@ export const useRetryFailedClassifications = () => {
 };
 
 /**
+ * Whether the one-time classify buttons should still render, and once
+ * they're spent, whether a Retry is warranted. Refetched when a job status
+ * change invalidates gmail queries.
+ */
+export const useClassifyControlsStatus = () => {
+  return trpc.gmail.classifyControlsStatus.useQuery(undefined, {
+    staleTime: 30_000,
+  });
+};
+
+/**
  * Polls the active/most-recent classification job. Same stop-polling-once-
  * settled pattern as useSyncStatus — this is a single-row read so 10s is
  * cheap, and it stops entirely once there's nothing left to watch.

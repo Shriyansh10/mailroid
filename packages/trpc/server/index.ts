@@ -6,6 +6,7 @@ import { authRouter } from "./routes/tenant/route.js";
 import { gmailRouter } from "./routes/gmail/route.js";
 import { calendarRouter } from "./routes/calendar/route.js";
 import { assistantRouter } from "./routes/assistant/route.js";
+import { profileRouter } from "./routes/profile/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
@@ -13,6 +14,7 @@ export const serverRouter = router({
   gmail: gmailRouter,
   calendar: calendarRouter,
   assistant: assistantRouter,
+  profile: profileRouter,
 });
 
 export { createContext } from "./context.js";

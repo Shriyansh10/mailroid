@@ -156,6 +156,13 @@ export default function OnboardingPage() {
     }
   }, [getCalendarOAuthUrlAsync]);
 
+  // Primary CTA: the personalization wizard (which itself lands in /inbox).
+  const handlePersonalize = useCallback(() => {
+    setProceeding(true);
+    router.push("/onboarding/personalize");
+  }, [router]);
+
+  // Secondary: skip personalization entirely and go straight to the inbox.
   const handleProceed = useCallback(() => {
     setProceeding(true);
     clearPersisted();
@@ -272,7 +279,7 @@ export default function OnboardingPage() {
 
             <Button
               size="lg"
-              onClick={handleProceed}
+              onClick={handlePersonalize}
               disabled={!bothConnected || proceeding || checkingServer || syncInProgress}
               className="mt-8 w-full h-12 text-base font-semibold shadow-sm transition-transform hover:scale-[1.01]"
             >
@@ -280,8 +287,23 @@ export default function OnboardingPage() {
                 ? "Redirecting..."
                 : syncInProgress
                   ? "Preparing your mailbox…"
-                  : "Continue to Mailroid"}
+                  : "Help us personalise your mailbox"}
             </Button>
+
+            <Button
+              variant="ghost"
+              onClick={handleProceed}
+              disabled={!bothConnected || proceeding || checkingServer || syncInProgress}
+              className="mt-2 w-full text-muted-foreground"
+            >
+              Skip for now
+            </Button>
+
+            <p className="mt-3 text-center text-xs text-muted-foreground leading-relaxed">
+              The personalization form is also available in Settings. Remember
+              to fill it once before classifying — emails can&apos;t be
+              re-classified after.
+            </p>
           </div>
         </div>
       </main>

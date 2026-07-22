@@ -2,7 +2,28 @@ import { inngest } from "../client.ts";
 import { RetryAfterError, NonRetriableError } from "inngest";
 import { db, eq } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
-import { classifyEmailPriority } from "@repo/ai";
+import { userPriorityProfile } from "@repo/database/models/user-priority-profile";
+import {
+  classifyEmailPriority,
+  buildClassificationContext,
+  applyProfileOverrides,
+  type ClassificationContext,
+} from "@repo/ai";
+import { priorityProfileModel } from "@repo/shared";
+
+// The profile read is inlined here (not via @repo/services/profile) because
+// @repo/services depends on @repo/inngest — importing it back would create a
+// package cycle. One direct row read per webhook email is fine.
+async function fetchUserProfile(userId: string) {
+  const [row] = await db
+    .select({ data: userPriorityProfile.data })
+    .from(userPriorityProfile)
+    .where(eq(userPriorityProfile.userId, userId))
+    .limit(1);
+  if (!row) return null;
+  const parsed = priorityProfileModel.safeParse(row.data);
+  return parsed.success ? parsed.data : null;
+}
 
 /**
  * classifyEmailPriority now throws instead of swallowing errors (see
@@ -14,9 +35,10 @@ async function classifyWithRetryTranslation(
   sender: string,
   subject: string,
   snippet: string,
+  context?: ClassificationContext,
 ) {
   try {
-    return await classifyEmailPriority(sender, subject, snippet);
+    return await classifyEmailPriority(sender, subject, snippet, context);
   } catch (err) {
     const status = (err as { status?: number })?.status;
     const code = (err as { code?: string })?.code;
@@ -90,17 +112,36 @@ export const emailPriority = inngest.createFunction(
       return { success: false, reason: "No content to classify" };
     }
 
-    // 2. Classify via LLM — throws on failure (rate limit, malformed output,
+    // 2. Fetch the user's priority profile (null = classify exactly as
+    // before personalization existed).
+    const profile = await step.run("fetch-profile", () => fetchUserProfile(userId));
+
+    // 3. Classify via LLM — throws on failure (rate limit, malformed output,
     // network error) so Inngest actually retries instead of silently skipping.
-    const classification = await step.run("classify-email", () =>
+    const rawClassification = await step.run("classify-email", () =>
       classifyWithRetryTranslation(
         sender || "Unknown Sender",
         subject || "No Subject",
-        snippet || "No Content"
+        snippet || "No Content",
+        profile ? buildClassificationContext({ profile }) : undefined,
       ),
     );
 
-    // 3. Update database
+    // Muted senders are a hard rule applied in code, whatever the LLM said.
+    const classification = applyProfileOverrides(
+      sender || "",
+      rawClassification,
+      profile
+        ? {
+            mutedDomains: profile.senders.mutedDomains,
+            preferences: {
+              githubNotifications: profile.preferences.githubNotifications,
+            },
+          }
+        : undefined,
+    );
+
+    // 4. Update database
     await step.run("update-metadata", async () => {
       await db
         .update(messageMetadata)
@@ -108,6 +149,7 @@ export const emailPriority = inngest.createFunction(
           priority: classification.priority,
           priorityScore: classification.priorityScore,
           priorityReason: classification.priorityReason,
+          matchedSignals: classification.matchedSignals,
           isActionRequired: classification.isActionRequired,
           isReplyNeeded: classification.isReplyNeeded,
           classificationStatus: "DONE",

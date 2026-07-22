@@ -73,6 +73,8 @@ export { SecurityFirewall, firewall } from "./security/index.ts";
 export { detectSensitive, isSensitive } from "./security/index.ts";
 export { sanitizeText, sanitizeToolResult } from "./security/index.ts";
 export { detectPromptInjection } from "./security/index.ts";
+export { detectPII, hasPII, maskPII, PIICategory } from "./security/index.ts";
+export type { PIIMatch, PIIDetectionResult, PIIMaskResult } from "./security/index.ts";
 export { SecurityEventType, SensitivityCategory } from "./security/index.ts";
 export { WriteGuard, writeGuard, PhishingRisk } from "./security/index.ts";
 export { RateLimiter, rateLimiter } from "./security/index.ts";
@@ -90,6 +92,18 @@ export type {
   PriorityClassificationResult,
   PriorityBatchItem,
   PriorityBatchResult,
+  MatchedSignal,
 } from "./prompts/priority.ts";
+export {
+  buildUserSummary,
+  buildClassificationContext,
+  renderContextBlock,
+} from "./prompts/user-summary.ts";
+export type { ClassificationContext } from "./prompts/user-summary.ts";
+export {
+  applyProfileOverrides,
+  extractSenderDomain,
+} from "./prompts/overrides.ts";
+export type { ProfileOverrideInput } from "./prompts/overrides.ts";
 export { evaluateFeedback } from "./prompts/feedback-evaluator.ts";
 export type { FeedbackEvaluationResult } from "./prompts/feedback-evaluator.ts";

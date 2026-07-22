@@ -1,4 +1,58 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { renderContextBlock, type ClassificationContext } from "./user-summary.ts";
+
+// A ceiling, not a reservation: billing counts tokens actually generated, so
+// headroom here is free and only protects against truncation. The default is
+// deepseek-chat's own 8192 limit, because sending a larger value to DeepSeek
+// is an API error — raise it per-deployment instead (gpt-4o-mini allows
+// 16384). See classifyEmailPriorityBatch for why the ceiling matters.
+const MAX_OUTPUT_TOKENS = Number(process.env.LLM_MAX_OUTPUT_TOKENS ?? 8192);
+
+// Which profile signals drove a classification — structured for analytics
+// rather than free strings. Sources mirror the profile groups; the model is
+// told the allowed set and anything else is dropped in lenient parsing.
+export interface MatchedSignal {
+  source:
+    | "goal"
+    | "topic"
+    | "sender_category"
+    | "service"
+    | "keyword"
+    | "preference"
+    | "muted_sender";
+  value: string;
+}
+
+const MATCHED_SIGNAL_SOURCES = new Set([
+  "goal",
+  "topic",
+  "sender_category",
+  "service",
+  "keyword",
+  "preference",
+  "muted_sender",
+]);
+
+// Two is what the prompt asks for; the same number is enforced here so the
+// stored data can never disagree with what was requested. This is a
+// backstop, not the budget control — trimming after generation saves no
+// output tokens, which is why the limit is stated in the prompt as well.
+const MAX_MATCHED_SIGNALS = 2;
+
+// Missing/malformed signals must never fail an otherwise valid
+// classification — they're debugging metadata, not the verdict.
+function parseMatchedSignals(raw: unknown): MatchedSignal[] {
+  if (!Array.isArray(raw)) return [];
+  const signals: MatchedSignal[] = [];
+  for (const s of raw) {
+    if (typeof s !== "object" || s === null) continue;
+    const { source, value } = s as Record<string, unknown>;
+    if (typeof source !== "string" || !MATCHED_SIGNAL_SOURCES.has(source)) continue;
+    if (typeof value !== "string" || !value || value.length > 100) continue;
+    signals.push({ source: source as MatchedSignal["source"], value });
+  }
+  return signals.slice(0, MAX_MATCHED_SIGNALS);
+}
 
 export interface PriorityClassificationResult {
   priority: "HIGH" | "MEDIUM" | "LOW";
@@ -6,7 +60,20 @@ export interface PriorityClassificationResult {
   priorityReason: string;
   isActionRequired: boolean;
   isReplyNeeded: boolean;
+  // Empty when no user context was provided (or the model returned none).
+  matchedSignals: MatchedSignal[];
 }
+
+// Appended to both system prompts only when a user context is present, so
+// profile-less classification stays byte-identical to the original prompts.
+//
+// The AT MOST 2 limit is an output-token budget, not a style preference. In
+// the batch path the model emits one result per email, so an uncapped list
+// of signals scales with batch size: at ~14 tokens per signal, ten of them
+// across 50 emails adds ~7000 output tokens and truncates the JSON
+// mid-array, which throws away the whole chunk (see classifyEmailPriorityBatch).
+const MATCHED_SIGNALS_INSTRUCTION = `
+Additionally include a "matchedSignals" array naming AT MOST 2 of the strongest parts of the user profile that influenced your decision, as objects {"source": one of "goal"|"topic"|"sender_category"|"service"|"keyword"|"preference", "value": short string}. Never return more than 2. Empty array if none applied.`;
 
 const SYSTEM_PROMPT = `
 You are an executive assistant AI tasked with triaging incoming emails.
@@ -41,12 +108,20 @@ You must output a strictly valid JSON object matching this schema, without any m
 export async function classifyEmailPriority(
   sender: string,
   subject: string,
-  snippet: string
+  snippet: string,
+  // Optional per-user context (prose summary built from the priority
+  // profile). Absent -> behavior identical to the pre-personalization prompt.
+  context?: ClassificationContext,
 ): Promise<PriorityClassificationResult> {
+  const contextBlock = renderContextBlock(context);
+  const systemPrompt = contextBlock
+    ? SYSTEM_PROMPT + contextBlock + MATCHED_SIGNALS_INSTRUCTION
+    : SYSTEM_PROMPT;
+
   const response = await deepseek.chat.completions.create({
     model: DEEPSEEK_CHAT_MODEL,
     messages: [
-      { role: "system", content: SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: `Sender: ${sender}\nSubject: ${subject}\nSnippet: ${snippet}`,
@@ -78,6 +153,7 @@ export async function classifyEmailPriority(
     priorityReason: parsed.priorityReason || "No reasoning provided.",
     isActionRequired: Boolean(parsed.isActionRequired),
     isReplyNeeded: Boolean(parsed.isReplyNeeded),
+    matchedSignals: parseMatchedSignals((parsed as Record<string, unknown>).matchedSignals),
   };
 }
 
@@ -129,9 +205,15 @@ Output a strictly valid JSON object (no markdown, no extra text) matching this s
  * NOT cut output tokens — the model still generates one result per email,
  * one token at a time. At ~80 tokens/email that's ~4000 tokens for 50
  * emails, dangerously close to deepseek-chat's 4096 default `max_tokens`;
- * capping the reason to ~8 words and setting max_tokens explicitly here
- * keeps a full batch comfortably under the ceiling instead of truncating
- * the JSON mid-array and silently losing every result in it.
+ * capping the reason to ~8 words and setting max_tokens explicitly
+ * (MAX_OUTPUT_TOKENS) keeps a full batch comfortably under the ceiling
+ * instead of truncating the JSON mid-array and silently losing every
+ * result in it.
+ *
+ * Every per-email addition to the output schema is spent 50 times over, so
+ * each one needs its own cap: matchedSignals is limited to 2 in the prompt
+ * for exactly this reason. With that cap a 50-email batch peaks near ~5400
+ * output tokens.
  *
  * Deliberately NOT all-or-nothing: results are matched back to input by the
  * echoed `index` (never by array position, so a dropped/reordered item can't
@@ -149,13 +231,21 @@ Output a strictly valid JSON object (no markdown, no extra text) matching this s
  */
 export async function classifyEmailPriorityBatch(
   items: PriorityBatchItem[],
+  // One context per request: the batch path is already per-user, so a single
+  // block covers every item. Absent -> byte-identical to the original prompt.
+  context?: ClassificationContext,
 ): Promise<PriorityBatchResult[]> {
   if (items.length === 0) return [];
+
+  const contextBlock = renderContextBlock(context);
+  const systemPrompt = contextBlock
+    ? BATCH_SYSTEM_PROMPT + contextBlock + MATCHED_SIGNALS_INSTRUCTION
+    : BATCH_SYSTEM_PROMPT;
 
   const response = await deepseek.chat.completions.create({
     model: DEEPSEEK_CHAT_MODEL,
     messages: [
-      { role: "system", content: BATCH_SYSTEM_PROMPT },
+      { role: "system", content: systemPrompt },
       {
         role: "user",
         content: JSON.stringify(
@@ -170,7 +260,7 @@ export async function classifyEmailPriorityBatch(
     ],
     response_format: { type: "json_object" },
     temperature: 0.1,
-    max_tokens: 8192,
+    max_tokens: MAX_OUTPUT_TOKENS,
   });
 
   const content = response.choices[0]?.message?.content;
@@ -217,6 +307,7 @@ export async function classifyEmailPriorityBatch(
           : "No reasoning provided.",
       isActionRequired: Boolean(row.isActionRequired),
       isReplyNeeded: Boolean(row.isReplyNeeded),
+      matchedSignals: parseMatchedSignals(row.matchedSignals),
     });
   }
 

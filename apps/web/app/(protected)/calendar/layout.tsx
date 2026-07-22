@@ -156,6 +156,10 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
                 </div>
               </DropdownMenuLabel>
               <DropdownMenuSeparator />
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/personalization")}>
+                <SparklesIcon className="mr-2 h-4 w-4" />
+                <span>Personalization</span>
+              </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/appearance")}>
                 <PaletteIcon className="mr-2 h-4 w-4" />
                 <span>Appearance</span>

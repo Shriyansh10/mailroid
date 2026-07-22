@@ -12,7 +12,9 @@ import {
   useStartClassificationJob,
   useRetryFailedClassifications,
   useClassificationJobStatus,
+  useClassifyControlsStatus,
 } from "@web/hooks/api/gmail";
+import { usePriorityProfile } from "@web/hooks/api/profile";
 import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
 import { Button } from "@web/components/ui/button";
 import { Badge } from "@web/components/ui/badge";
@@ -576,6 +578,7 @@ function DossierLayout({
   error,
   headerActions,
   pagination,
+  banner,
 }: {
   title: string;
   subtitle: string;
@@ -585,6 +588,7 @@ function DossierLayout({
   error: any;
   headerActions?: React.ReactNode;
   pagination?: React.ReactNode;
+  banner?: React.ReactNode;
 }) {
   const router = useRouter();
   const utils = trpc.useUtils();
@@ -732,6 +736,8 @@ function DossierLayout({
             {pagination}
           </div>
         </div>
+
+        {banner}
 
         {/* Content list */}
         <div className="flex-1 overflow-y-auto">
@@ -960,38 +966,33 @@ function AiSearchResults({ query }: { query: string }) {
 // "Classify Full Inbox" was deliberately dropped from the product — old
 // mail is rarely actionable and future mail is already auto-classified via
 // the webhook, so only a bounded recent window is offered here.
+//
+// Historical classification is ONE-TIME: once a scoped job has run
+// (hasClassified), the two buttons never render again — classified emails
+// cannot be re-classified. All that remains afterwards is a Retry for
+// emails the job left unclassified.
 
-function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) {
+/** Toolbar slot: job progress while running, Retry once the one-time run left stragglers. */
+function ClassifyControls() {
   const { data: job } = useClassificationJobStatus();
-  const { startClassificationJobAsync, isPending } = useStartClassificationJob();
+  const { data: controls } = useClassifyControlsStatus();
   const { retryFailedClassificationsAsync, isPending: isRetrying } =
     useRetryFailedClassifications();
+  const utils = trpc.useUtils();
 
   const jobRunning = job?.status === "running";
   const failedCount = job?.failedCount ?? 0;
 
-  const handleClassify = async (scope: "last_week" | "last_month") => {
-    const result = await startClassificationJobAsync({ scope });
-    if (result.alreadyRunning) {
-      toast.info("A classification job is already running");
-      return;
+  // When a running job settles, the controls state (hasClassified /
+  // remainingUnclassified) is stale — refresh it so the buttons swap
+  // to their post-classification form without a reload.
+  const prevRunning = React.useRef(false);
+  React.useEffect(() => {
+    if (prevRunning.current && !jobRunning) {
+      void utils.gmail.classifyControlsStatus.invalidate();
     }
-    if (result.jobId === null) {
-      // "Nothing to classify" is true but useless on its own when the
-      // Unclassified tab is showing a non-zero count — those emails hit the
-      // attempt cap and no job will ever select them again. Name that, rather
-      // than leaving the two numbers silently contradicting each other.
-      if (failedCount > 0) {
-        toast.warning(
-          `${failedCount.toLocaleString()} email${failedCount === 1 ? "" : "s"} failed classification — use Retry to clear them`,
-        );
-        return;
-      }
-      toast.info("Nothing to classify in that range");
-      return;
-    }
-    toast.success(`Classifying ${result.totalCount.toLocaleString()} emails…`);
-  };
+    prevRunning.current = jobRunning;
+  }, [jobRunning, utils]);
 
   const handleRetryFailed = async () => {
     const result = await retryFailedClassificationsAsync({});
@@ -1023,42 +1024,121 @@ function ClassifyControls({ unclassifiedCount }: { unclassifiedCount: number }) 
     );
   }
 
-  // Still render when everything unclassified is stuck at the attempt cap —
-  // hiding the controls there would leave the failed count with nowhere to show.
-  if (unclassifiedCount === 0 && failedCount === 0) return null;
+  // Retry appears only after the one-time classification, and only while its
+  // window still holds unclassified emails (or rows stuck at the attempt cap).
+  // Everything classified -> nothing renders here, permanently.
+  const showRetry =
+    controls?.hasClassified &&
+    (controls.remainingUnclassified > 0 || controls.failedCount > 0) &&
+    failedCount > 0;
+  if (!showRetry) return null;
 
   return (
-    <div className="flex items-center gap-2">
-      {failedCount > 0 && (
-        <Button
-          variant="outline"
-          size="sm"
-          disabled={isRetrying || isPending}
-          onClick={handleRetryFailed}
-          title="These emails hit the classification retry limit. Retrying clears it and classifies them again."
-          className="text-xs h-8 border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive"
-        >
-          {isRetrying ? "Retrying…" : `Retry ${failedCount.toLocaleString()} failed`}
-        </Button>
+    <Button
+      variant="outline"
+      size="sm"
+      disabled={isRetrying}
+      onClick={handleRetryFailed}
+      title="These emails hit the classification retry limit. Retrying clears it and classifies them again."
+      className="text-xs h-8 border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive"
+    >
+      {isRetrying ? "Retrying…" : `Retry ${failedCount.toLocaleString()} failed`}
+    </Button>
+  );
+}
+
+/**
+ * First-visit banner in the priority tab: the one-time Classify Last Week /
+ * Last Month choice, with a description of what each does and a nudge to
+ * fill the personalization form first. Gone forever once a job has run.
+ */
+function FirstClassifyBanner() {
+  const router = useRouter();
+  const { data: controls, isLoading } = useClassifyControlsStatus();
+  const { data: job } = useClassificationJobStatus();
+  const { data: profile } = usePriorityProfile();
+  const { startClassificationJobAsync, isPending } = useStartClassificationJob();
+  const utils = trpc.useUtils();
+
+  const jobRunning = job?.status === "running";
+  if (isLoading || !controls || controls.hasClassified || jobRunning) return null;
+
+  const profileFilled = profile?.completedOnboarding === true;
+
+  const handleClassify = async (scope: "last_week" | "last_month") => {
+    const result = await startClassificationJobAsync({ scope });
+    if (result.alreadyRunning) {
+      toast.info("A classification job is already running");
+      return;
+    }
+    if (result.jobId === null) {
+      toast.info("Nothing to classify in that range");
+      void utils.gmail.classifyControlsStatus.invalidate();
+      return;
+    }
+    toast.success(`Classifying ${result.totalCount.toLocaleString()} emails…`);
+  };
+
+  const scopeCard = (
+    scope: "last_week" | "last_month",
+    title: string,
+    description: string,
+  ) => (
+    <div className="flex-1 rounded-lg border bg-card p-4 flex flex-col justify-between gap-3">
+      <div>
+        <p className="text-sm font-semibold">{title}</p>
+        <p className="mt-1 text-xs text-muted-foreground leading-relaxed">{description}</p>
+      </div>
+      <Button
+        size="sm"
+        variant="outline"
+        disabled={isPending}
+        onClick={() => handleClassify(scope)}
+        className="w-full text-xs"
+      >
+        {title}
+      </Button>
+    </div>
+  );
+
+  return (
+    <div className="mx-4 my-4 rounded-xl border bg-card/50 p-4">
+      <div className="flex items-center gap-2 mb-1">
+        <SparklesIcon className="size-4 text-[#b08d57]" />
+        <p className="text-sm font-semibold">Classify your recent emails</p>
+      </div>
+      <p className="text-xs text-muted-foreground leading-relaxed mb-3">
+        This is a one-time run — once classified, emails can&apos;t be
+        re-classified, so pick your window carefully.
+      </p>
+
+      {!profileFilled && (
+        <div className="mb-3 rounded-lg border border-[#b08d57]/30 bg-[#b08d57]/10 p-3 text-xs leading-relaxed">
+          <span className="font-medium">Fill the personalization form first</span>{" "}
+          for classifications tailored to you — it takes 2 minutes and emails
+          can&apos;t be re-classified later.{" "}
+          <button
+            type="button"
+            onClick={() => router.push("/settings/personalization")}
+            className="font-semibold underline underline-offset-2 hover:text-foreground"
+          >
+            Open the form
+          </button>
+        </div>
       )}
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={isPending}
-        onClick={() => handleClassify("last_week")}
-        className="text-xs h-8"
-      >
-        Classify Last Week
-      </Button>
-      <Button
-        variant="outline"
-        size="sm"
-        disabled={isPending}
-        onClick={() => handleClassify("last_month")}
-        className="text-xs h-8"
-      >
-        Classify Last Month
-      </Button>
+
+      <div className="flex flex-col sm:flex-row gap-3">
+        {scopeCard(
+          "last_week",
+          "Classify Last Week",
+          "Runs AI priority classification on every email received in the last 7 days.",
+        )}
+        {scopeCard(
+          "last_month",
+          "Classify Last Month",
+          "Runs AI priority classification on every email received in the last 30 days.",
+        )}
+      </div>
     </div>
   );
 }
@@ -1131,10 +1211,11 @@ function PriorityInbox({
             );
           })}
           <div className="ml-2 pl-2 border-l border-border/40">
-            <ClassifyControls unclassifiedCount={counts.UNCLASSIFIED} />
+            <ClassifyControls />
           </div>
         </div>
       }
+      banner={<FirstClassifyBanner />}
       pagination={
         <div className="flex items-center gap-3">
           <Button
