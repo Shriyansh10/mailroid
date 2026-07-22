@@ -17,6 +17,9 @@ mailroid.in {
 	handle /api/usage {
 		reverse_proxy mailroid-web:3000
 	}
+	handle /api/summarize {
+		reverse_proxy mailroid-web:3000
+	}
 	handle /api/* {
 		reverse_proxy mailroid-api:8000
 	}
