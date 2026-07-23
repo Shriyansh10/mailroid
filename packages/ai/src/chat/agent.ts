@@ -29,43 +29,112 @@ interface AgentToolCall {
   function: { name: string; arguments: string };
 }
 
+type HealMessage = {
+  role: string;
+  tool_calls?: any[];
+  toolCalls?: any[];
+  tool_call_id?: string;
+  toolCallId?: string;
+  content?: string | null;
+};
+
+function toolCallsOf(msg: HealMessage): any[] | undefined {
+  const list = msg.tool_calls || msg.toolCalls;
+  return Array.isArray(list) && list.length > 0 ? list : undefined;
+}
+
+function toolCallIdOf(msg: HealMessage): string | undefined {
+  return msg.tool_call_id || msg.toolCallId;
+}
+
 /**
- * Heal any unresponded tool calls in history to comply with OpenAI's strict protocol.
- * If an assistant message requested tool calls but they were never approved/executed,
- * this function inserts inline dummy tool cancellations so the API request does not fail.
+ * Normalize a conversation so it complies with OpenAI/DeepSeek's strict tool
+ * protocol: every `tool` message must sit immediately after the `assistant`
+ * message whose `tool_calls` include its id, and every requested tool call must
+ * have a response. Operates on an in-memory copy only — DB rows are never
+ * mutated.
+ *
+ * Two-step heal:
+ *   1. Reverse fix (position). A `tool` message can drift out of position —
+ *      e.g. the approval flow persists its tool response with a `createdAt`
+ *      after an intervening user message, so strict `createdAt` ordering places
+ *      it outside the turn that owns it. We relocate each `tool` message to
+ *      directly follow its owning assistant tool_calls message (matched by id),
+ *      preserving the real result. A `tool` message whose id matches no
+ *      assistant tool_calls anywhere is truly orphaned and dropped.
+ *   2. Forward fix (completeness). For any assistant tool_calls that still has
+ *      no response, insert an inline dummy cancellation so the request doesn't
+ *      400.
  */
 export function healConversation<T extends { role: string; tool_calls?: any[]; toolCalls?: any[]; tool_call_id?: string; toolCallId?: string; content?: string | null }>(
   messages: T[]
 ): T[] {
-  const healed: T[] = [];
+  // ── Step 1: relocate/drop out-of-position tool messages ──────────────
+  // Map each declared tool_call id → index of the assistant message that owns it.
+  const ownerOf = new Map<string, number>();
+  for (let i = 0; i < messages.length; i++) {
+    const tcList = toolCallsOf(messages[i]!);
+    if (messages[i]!.role === "assistant" && tcList) {
+      for (const tc of tcList) {
+        if (tc?.id) ownerOf.set(tc.id, i);
+      }
+    }
+  }
+
+  // Bucket every tool message under its owning assistant index (preserving
+  // relative order). Tool messages with no owner anywhere are dropped.
+  const buckets = new Map<number, T[]>();
+  for (const msg of messages) {
+    if (msg.role !== "tool") continue;
+    const id = toolCallIdOf(msg);
+    const owner = id !== undefined ? ownerOf.get(id) : undefined;
+    if (owner === undefined) {
+      console.log(`[agent:heal] dropping orphaned tool message with no matching tool_calls: ${id ?? "<no id>"}`);
+      continue;
+    }
+    const bucket = buckets.get(owner);
+    if (bucket) bucket.push(msg);
+    else buckets.set(owner, [msg]);
+  }
+
+  // Re-emit: keep every non-tool message in its original relative order, and
+  // place each assistant's tool responses immediately after it.
+  const normalized: T[] = [];
   for (let i = 0; i < messages.length; i++) {
     const msg = messages[i]!;
+    if (msg.role === "tool") continue; // placed via buckets
+    normalized.push(msg);
+    if (msg.role === "assistant" && toolCallsOf(msg)) {
+      const bucket = buckets.get(i);
+      if (bucket) normalized.push(...bucket);
+    }
+  }
+
+  // ── Step 2: insert dummy responses for still-unresponded tool calls ──
+  const healed: T[] = [];
+  for (let i = 0; i < normalized.length; i++) {
+    const msg = normalized[i]!;
     healed.push(msg);
 
-    if (msg.role === "assistant" && (msg.tool_calls || msg.toolCalls)) {
-      const tcList = msg.tool_calls || msg.toolCalls;
-      if (Array.isArray(tcList) && tcList.length > 0) {
-        const nextToolResponses = new Set<string>();
-        let j = i + 1;
-        while (j < messages.length && messages[j]?.role === "tool") {
-          const toolMsg = messages[j] as any;
-          const toolCallId = toolMsg.tool_call_id || toolMsg.toolCallId;
-          if (toolCallId) {
-            nextToolResponses.add(toolCallId);
-          }
-          j++;
-        }
+    const tcList = toolCallsOf(msg);
+    if (msg.role === "assistant" && tcList) {
+      const nextToolResponses = new Set<string>();
+      let j = i + 1;
+      while (j < normalized.length && normalized[j]?.role === "tool") {
+        const id = toolCallIdOf(normalized[j] as HealMessage);
+        if (id) nextToolResponses.add(id);
+        j++;
+      }
 
-        for (const tc of tcList) {
-          if (!nextToolResponses.has(tc.id)) {
-            console.log(`[agent:heal] inserting dummy tool response for unresponded toolCallId: ${tc.id}`);
-            healed.push({
-              role: "tool",
-              tool_call_id: tc.id,
-              toolCallId: tc.id,
-              content: JSON.stringify({ error: "Action cancelled or ignored by user" }),
-            } as unknown as T);
-          }
+      for (const tc of tcList) {
+        if (!nextToolResponses.has(tc.id)) {
+          console.log(`[agent:heal] inserting dummy tool response for unresponded toolCallId: ${tc.id}`);
+          healed.push({
+            role: "tool",
+            tool_call_id: tc.id,
+            toolCallId: tc.id,
+            content: JSON.stringify({ error: "Action cancelled or ignored by user" }),
+          } as unknown as T);
         }
       }
     }
@@ -90,6 +159,19 @@ export interface RunAgentLoopOptions {
   userId: string;
   /** Safety limit on tool-calling iterations (default: 10). */
   maxIterations?: number;
+  /**
+   * Optional hook run after each successful tool call, before its result is
+   * pushed onto `newMessages`. Lets a caller attach app-specific metadata
+   * (e.g. "this tool result names email X") to the persisted tool message
+   * without the agent loop knowing anything about specific tools — keeps
+   * @repo/ai tool-agnostic while still letting the caller build durable,
+   * per-conversation memory (see apps/web/lib/assistant/tool-memory.ts).
+   */
+  deriveToolMessageMetadata?: (
+    toolName: string,
+    args: Record<string, unknown>,
+    result: ToolResult,
+  ) => Record<string, unknown> | undefined;
 }
 
 // ── Helpers ────────────────────────────────────────────────────────────
@@ -133,11 +215,20 @@ export interface AgentLoopNewMessage {
   content: string | null;
   toolCalls?: any;
   toolCallId?: string;
+  metadata?: Record<string, unknown>;
 }
 
 export interface AgentLoopResult {
   response: AgentResponse;
   newMessages: AgentLoopNewMessage[];
+  /**
+   * Approx. character length of the conversation actually sent to DeepSeek
+   * on the last iteration — the same rough proxy already logged as
+   * `[agent:deepseek:request] approxChars`. Powers the assistant UI's
+   * context-window indicator; not an exact token count (~4 chars/token is
+   * the standard rough-estimate ratio for English text).
+   */
+  contextChars: number;
 }
 
 export async function runAgentLoop(
@@ -150,6 +241,7 @@ export async function runAgentLoop(
     execute,
     userId: _userId,
     maxIterations = 5,
+    deriveToolMessageMetadata,
   } = options;
 
   const toolDefs = toOpenAiToolDefs(registry);
@@ -202,6 +294,10 @@ export async function runAgentLoop(
   }
 
   const start = Date.now();
+  // Tracks the size of the last thing actually sent to DeepSeek, so every
+  // return path below can report it as contextChars regardless of which
+  // branch it returns from.
+  let lastApproxChars = 0;
 
   for (let iteration = 0; iteration < maxIterations; iteration++) {
     console.log("[agent:loop]", { iteration, messageCount: conversation.length, toolCount: toolDefs.length });
@@ -217,7 +313,25 @@ export async function runAgentLoop(
         : {}),
     };
 
-    const completion = await deepseek.chat.completions.create(params);
+    const approxChars = JSON.stringify(conversation).length;
+    lastApproxChars = approxChars;
+    console.log("[agent:deepseek:request]", { iteration, approxChars });
+
+    let completion;
+    try {
+      completion = await deepseek.chat.completions.create(params);
+    } catch (err) {
+      console.error("[agent:deepseek:error]", {
+        iteration,
+        approxChars,
+        status: (err as { status?: number })?.status,
+        message: err instanceof Error ? err.message : String(err),
+        // DeepSeek's SDK error puts the API's JSON body here — this is where
+        // "context length exceeded" / rate-limit reasons actually show up.
+        body: (err as { error?: unknown })?.error,
+      });
+      throw err;
+    }
 
     const choice = completion.choices[0];
     if (!choice) {
@@ -231,7 +345,7 @@ export async function runAgentLoop(
     if (msg.content && (!msg.tool_calls || msg.tool_calls.length === 0)) {
       console.log("[agent:done]", { iteration, durationMs: Date.now() - start, contentLength: msg.content.length });
       newMessages.push({ role: "assistant", content: msg.content });
-      return { response: { role: "assistant", content: msg.content }, newMessages };
+      return { response: { role: "assistant", content: msg.content }, newMessages, contextChars: lastApproxChars };
     }
 
     // ── Tool calls: model wants to execute tools ──────────────────────
@@ -249,7 +363,7 @@ export async function runAgentLoop(
       // ever left dangling without a result. The model naturally re-requests
       // any dropped calls on its next turn once the pending one is resolved.
       const attemptedToolCalls: AgentToolCall[] = [];
-      const resultMessages: { toolCallId: string; content: string }[] = [];
+      const resultMessages: { toolCallId: string; content: string; metadata?: Record<string, unknown> }[] = [];
       let approvalResponse: Extract<AgentResponse, { approvalRequired: unknown }> | null = null;
 
       for (const tc of msg.tool_calls) {
@@ -304,7 +418,8 @@ export async function runAgentLoop(
             ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
             : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: safeResult.error ?? `Tool execution failed: ${safeResult.status}` })}\n</tool_error>`;
 
-        resultMessages.push({ toolCallId: tc.id, content: framedContent });
+        const metadata = deriveToolMessageMetadata?.(toolName, args, result);
+        resultMessages.push({ toolCallId: tc.id, content: framedContent, metadata });
       }
 
       // Push the assistant message with ONLY the tool calls actually attempted
@@ -322,12 +437,12 @@ export async function runAgentLoop(
 
       // Push results for every call that actually completed (in order)
       for (const r of resultMessages) {
-        newMessages.push({ role: "tool", toolCallId: r.toolCallId, content: r.content });
+        newMessages.push({ role: "tool", toolCallId: r.toolCallId, content: r.content, metadata: r.metadata });
         conversation.push({ role: "tool", tool_call_id: r.toolCallId, content: r.content });
       }
 
       if (approvalResponse) {
-        return { response: approvalResponse, newMessages };
+        return { response: approvalResponse, newMessages, contextChars: lastApproxChars };
       }
 
       // Loop again — DeepSeek will process the tool results
@@ -344,6 +459,7 @@ export async function runAgentLoop(
     return {
       response: { role: "assistant", content: msg.content ?? "" },
       newMessages,
+      contextChars: lastApproxChars,
     };
   }
 
@@ -366,6 +482,7 @@ export async function runAgentLoop(
       content: "I've completed the maximum number of steps (5). Please try a more specific request.",
     },
     newMessages,
+    contextChars: lastApproxChars,
   };
 }
 

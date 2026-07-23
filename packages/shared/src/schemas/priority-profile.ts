@@ -41,6 +41,16 @@ const TAG_RE = /^[\p{L}\p{N}][\p{L}\p{N}\s\-_.@#+]{0,49}$/u;
 
 const tagModel = z.string().min(1).max(50).regex(TAG_RE, "Invalid characters");
 
+// Full email address, already normalized (lowercased bare address). Used by
+// the protected-senders blocklist — mail from these addresses is withheld from
+// the assistant entirely.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+const emailModel = z
+  .string()
+  .max(254)
+  .regex(EMAIL_RE, "Enter a valid email like name@bank.com");
+
 const uniqueArray = (items: string[]) =>
   new Set(items.map((s) => s.toLowerCase())).size === items.length;
 
@@ -79,6 +89,22 @@ export const priorityProfileModel = z.object({
         .array(domainModel)
         .max(20)
         .refine(uniqueArray, "Duplicate domains"),
+      // Blocklist: mail from these addresses is withheld from the assistant
+      // entirely (never read/summarized/searched). Optional so profiles saved
+      // before this field existed still parse (treated as an empty list).
+      protectedSenders: z
+        .array(emailModel)
+        .max(50)
+        .refine(uniqueArray, "Duplicate emails")
+        .optional(),
+      // Blocklist by content: any email whose subject/body contains one of
+      // these keywords is withheld (catches sensitive mail from unknown
+      // senders, e.g. "otp", "password"). Optional for the same reason.
+      protectedKeywords: z
+        .array(tagModel)
+        .max(50)
+        .refine(uniqueArray, "Duplicate keywords")
+        .optional(),
     })
     .refine(
       (s) =>
@@ -149,7 +175,13 @@ export const DEFAULT_PRIORITY_PROFILE: PriorityProfile = {
     activeGoals: [],
     currentFocus: { items: [], expiresAt: null },
   },
-  senders: { categories: [], importantDomains: [], mutedDomains: [] },
+  senders: {
+    categories: [],
+    importantDomains: [],
+    mutedDomains: [],
+    protectedSenders: [],
+    protectedKeywords: [],
+  },
   content: { importantTopics: [], customKeywords: [] },
   context: { expectedEmailTypes: [], servicesUsed: [], customServices: [] },
   preferences: {
@@ -178,6 +210,15 @@ export function sanitizeDomainInput(raw: string): string | null {
     .replace(/^.*@/, "") // tolerate pasted addresses: a@b.com -> b.com
     .replace(/\.$/, "");
   return DOMAIN_RE.test(cleaned) && cleaned.length <= 253 ? cleaned : null;
+}
+
+// "Name <A@B.com>" / "mailto:A@B.com" / " A@B.com " -> "a@b.com"; null if the
+// result isn't a plausible email address.
+export function sanitizeEmailInput(raw: string): string | null {
+  let cleaned = raw.trim().toLowerCase().replace(/^mailto:/, "");
+  const angled = cleaned.match(/<([^>]+)>/);
+  if (angled) cleaned = angled[1]!.trim();
+  return EMAIL_RE.test(cleaned) && cleaned.length <= 254 ? cleaned : null;
 }
 
 // Strips control/special characters from a free-text tag; null if nothing
@@ -214,6 +255,11 @@ export function normalizePriorityProfile(input: PriorityProfile): PriorityProfil
       xs.map(sanitizeTagInput).filter((t): t is string => t !== null),
     ).slice(0, cap);
 
+  const emails = (xs: string[]) =>
+    dedupe(
+      xs.map(sanitizeEmailInput).filter((e): e is string => e !== null),
+    ).slice(0, 50);
+
   const importantDomains = domains(input.senders.importantDomains);
   const mutedDomains = domains(input.senders.mutedDomains).filter(
     (d) => !importantDomains.includes(d),
@@ -225,6 +271,8 @@ export function normalizePriorityProfile(input: PriorityProfile): PriorityProfil
       categories: dedupe(input.senders.categories) as typeof input.senders.categories,
       importantDomains,
       mutedDomains,
+      protectedSenders: emails(input.senders.protectedSenders ?? []),
+      protectedKeywords: tags(input.senders.protectedKeywords ?? [], 50),
     },
     interests: {
       activeGoals: dedupe(input.interests.activeGoals).slice(0, 5) as typeof input.interests.activeGoals,
@@ -248,4 +296,39 @@ export function normalizePriorityProfile(input: PriorityProfile): PriorityProfil
       customServices: tags(input.context.customServices, 10),
     },
   };
+}
+
+// ── Blocklist matching (shared by every read-path enforcement point) ──
+//
+// Senders are stored raw ("Display Name <addr@x.com>", mixed case) in the DB,
+// so a substring test against the lowercased raw string matches whether the
+// blocklist entry is the bare address or appears inside an angle-bracketed
+// "Name <addr>" header. Reused verbatim everywhere so behavior is identical
+// across search, summarize, and the daily brief.
+
+/** Returns the first protected address found in `fromRaw`, or null. */
+export function matchProtectedSender(
+  fromRaw: string | null | undefined,
+  senders: Set<string>,
+): string | null {
+  if (!fromRaw || senders.size === 0) return null;
+  const hay = fromRaw.toLowerCase();
+  for (const addr of senders) {
+    if (addr && hay.includes(addr)) return addr;
+  }
+  return null;
+}
+
+/** Returns the first protected keyword found in `text`, or null. */
+export function matchProtectedKeyword(
+  text: string | null | undefined,
+  keywords: string[],
+): string | null {
+  if (!text || keywords.length === 0) return null;
+  const hay = text.toLowerCase();
+  for (const kw of keywords) {
+    const k = kw.toLowerCase().trim();
+    if (k && hay.includes(k)) return kw;
+  }
+  return null;
 }

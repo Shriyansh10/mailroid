@@ -44,6 +44,15 @@ const LIMITS = {
     maxAttendees: 50,
     maxEventsPerRequest: 5,
   },
+  // replyToEmail has no model-supplied `to` (the recipient is derived from
+  // the original message server-side), so only its body is size-checked.
+  replyToEmail: {
+    maxBodyLength: 10_000,
+  },
+  forwardEmail: {
+    maxRecipients: 20,
+    maxNoteLength: 2_000,
+  },
 } as const;
 
 // ── Disposable email domains (flag-only) ──────────────────────────────
@@ -203,7 +212,7 @@ export class WriteGuard {
     }
 
     // ── Check 4: Bulk email ───────────────────────────────────────
-    if (toolName === "sendEmail") {
+    if (toolName === "sendEmail" || toolName === "forwardEmail") {
       const bulkCheck = this.checkBulkEmail(args);
       if (!bulkCheck.passed) {
         return { passed: false, blockReason: bulkCheck.reason, eventType: bulkCheck.eventType ?? AuditEventType.BULK_EMAIL_BLOCKED, warnings };
@@ -211,7 +220,7 @@ export class WriteGuard {
     }
 
     // ── Check 5: Domain reputation (audit only) ────────────────────
-    if (toolName === "sendEmail") {
+    if (toolName === "sendEmail" || toolName === "forwardEmail") {
       const domainCheck = this.checkDomainReputation(args);
       if (domainCheck.eventType === AuditEventType.SUSPICIOUS_RECIPIENT_DOMAIN && domainCheck.reason) {
         warnings.push({ eventType: domainCheck.eventType, reason: domainCheck.reason });
@@ -270,11 +279,28 @@ export class WriteGuard {
         return { passed: false, reason: `Event description (${description.length} chars) exceeds maximum of ${maxDescriptionLength}`, eventType: AuditEventType.WRITE_GUARD_BLOCKED };
       }
     }
+    if (toolName === "replyToEmail") {
+      const body = (args.body as string) ?? "";
+      if (body.length > LIMITS.replyToEmail.maxBodyLength) {
+        return { passed: false, reason: `Reply body (${body.length} chars) exceeds maximum of ${LIMITS.replyToEmail.maxBodyLength}`, eventType: AuditEventType.WRITE_GUARD_BLOCKED };
+      }
+    }
+    if (toolName === "forwardEmail") {
+      const toRaw = (args.to as string) ?? "";
+      const recipientCount = toRaw.split(/[\s,;]+/).filter(Boolean).length;
+      if (recipientCount > LIMITS.forwardEmail.maxRecipients) {
+        return { passed: false, reason: `Forward recipients (${recipientCount}) exceeds maximum of ${LIMITS.forwardEmail.maxRecipients}`, eventType: AuditEventType.BULK_EMAIL_BLOCKED };
+      }
+      const note = (args.note as string) ?? "";
+      if (note.length > LIMITS.forwardEmail.maxNoteLength) {
+        return { passed: false, reason: `Forward note (${note.length} chars) exceeds maximum of ${LIMITS.forwardEmail.maxNoteLength}`, eventType: AuditEventType.WRITE_GUARD_BLOCKED };
+      }
+    }
     return { passed: true };
   }
 
   private checkSecretExfiltration(args: Record<string, unknown>): CheckResult {
-    const fields = this.getStringFields(args, ["to", "subject", "body", "description"]);
+    const fields = this.getStringFields(args, ["to", "subject", "body", "description", "note"]);
     const combined = fields.join(" ");
     if (scanPatterns(combined, SECRET_PATTERNS)) {
       return { passed: false, reason: "Email or event content contains sensitive credentials (API keys, tokens, passwords, or OTPs)", eventType: AuditEventType.SECRET_EXFILTRATION_BLOCKED };
@@ -283,7 +309,7 @@ export class WriteGuard {
   }
 
   private checkFinancialData(args: Record<string, unknown>): CheckResult {
-    const fields = this.getStringFields(args, ["to", "subject", "body", "description"]);
+    const fields = this.getStringFields(args, ["to", "subject", "body", "description", "note"]);
     const combined = fields.join(" ");
     if (scanPatterns(combined, FINANCIAL_PATTERNS)) {
       return { passed: false, reason: "Content contains financial data (SSN, credit card, or bank account numbers)", eventType: AuditEventType.FINANCIAL_DATA_BLOCKED };
@@ -292,7 +318,7 @@ export class WriteGuard {
   }
 
   private checkPhishing(args: Record<string, unknown>): CheckResult {
-    const fields = this.getStringFields(args, ["subject", "body", "description"]);
+    const fields = this.getStringFields(args, ["subject", "body", "description", "note"]);
     const combined = fields.join(" ");
     const { detected, risk } = scanPhishing(combined);
     if (!detected || !risk) return { passed: true };

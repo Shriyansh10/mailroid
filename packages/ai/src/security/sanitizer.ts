@@ -5,7 +5,7 @@ import {
   type SanitizationResult,
   NO_CHANGES,
 } from "./types.ts";
-import { detectSensitive } from "./detector.ts";
+import { detectSensitive, collectContentLinkMatches } from "./detector.ts";
 import { detectPromptInjection } from "./prompt-injection.ts";
 
 // ── Replacement labels ──────────────────────────────────────────────────
@@ -17,6 +17,9 @@ const REPLACEMENTS: Record<SensitivityCategory, string> = {
   [SensitivityCategory.TOKEN]: "[REDACTED_TOKEN]",
   [SensitivityCategory.SECRET]: "[REDACTED_SECRET]",
   [SensitivityCategory.PROMPT_INJECTION]: "[PROMPT_INJECTION_REMOVED]",
+  // Never actually used — collectContentLinkMatches always sets a per-match
+  // domain-preserving `replacement`. Present only so this Record is total.
+  [SensitivityCategory.CONTENT_LINK]: "[link]",
 };
 
 const EVENT_MAP: Record<SensitivityCategory, SecurityEventType> = {
@@ -26,6 +29,7 @@ const EVENT_MAP: Record<SensitivityCategory, SecurityEventType> = {
   [SensitivityCategory.TOKEN]: SecurityEventType.TOKEN_REDACTED,
   [SensitivityCategory.SECRET]: SecurityEventType.SECRET_REDACTED,
   [SensitivityCategory.PROMPT_INJECTION]: SecurityEventType.PROMPT_INJECTION_REDACTED,
+  [SensitivityCategory.CONTENT_LINK]: SecurityEventType.CONTENT_LINK_REDACTED,
 };
 
 // ── Core sanitization ───────────────────────────────────────────────────
@@ -48,7 +52,7 @@ export function sanitizeText(text: string, field: string): SanitizationResult {
   for (const match of sorted) {
     sanitized =
       sanitized.slice(0, match.start) +
-      REPLACEMENTS[match.category] +
+      (match.replacement ?? REPLACEMENTS[match.category]) +
       sanitized.slice(match.end);
     matchCounts.set(match.category, (matchCounts.get(match.category) ?? 0) + 1);
   }
@@ -115,6 +119,41 @@ function sanitizePromptInjections(
       },
     ],
   };
+}
+
+// ── Content-link neutralization ──────────────────────────────────────────
+//
+// Deliberately NOT part of sanitizeText/detectSensitive: those run on every
+// tool's output via sanitizeToolOutput below, and stripping a calendar
+// event's Zoom/Meet link would be a real regression. This is called
+// explicitly by the email-summarization pipeline (prompts/summarize.ts)
+// only, on the body/digest text specifically. See collectContentLinkMatches.
+
+export function neutralizeContentLinks(text: string): SanitizationResult {
+  if (!text) return { ...NO_CHANGES, sanitized: text };
+
+  const matches = collectContentLinkMatches(text);
+  if (matches.length === 0) return { ...NO_CHANGES, sanitized: text };
+
+  const sorted = [...matches].sort((a, b) => b.start - a.start);
+  let sanitized = text;
+  for (const match of sorted) {
+    sanitized =
+      sanitized.slice(0, match.start) +
+      (match.replacement ?? REPLACEMENTS[match.category]) +
+      sanitized.slice(match.end);
+  }
+
+  const event: SecurityEvent = {
+    type: SecurityEventType.CONTENT_LINK_REDACTED,
+    category: SensitivityCategory.CONTENT_LINK,
+    field: "summarize.body",
+    matchCount: matches.length,
+    timestamp: new Date(),
+  };
+  console.log(`[SECURITY] ${event.type} | field=${event.field} | count=${event.matchCount}`);
+
+  return { sanitized, changed: true, events: [event] };
 }
 
 // ── Tool result sanitizer ───────────────────────────────────────────────

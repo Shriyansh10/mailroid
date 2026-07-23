@@ -31,6 +31,9 @@ export const assistantMessageModel = z.object({
   toolCallId: z.string().nullable(),
   createdAt: z.date(),
   approvalRequired: approvalRequiredModel.optional(),
+  // App-specific per-message data, e.g. { emailRef } — see
+  // apps/web/lib/assistant/tool-memory.ts. Opaque here; the client interprets it.
+  metadata: z.record(z.string(), z.unknown()).nullable().optional(),
 });
 
 export const getMessagesOutputModel = z.array(assistantMessageModel);

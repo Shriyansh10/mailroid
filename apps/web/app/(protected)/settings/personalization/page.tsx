@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
-import { ArrowLeftIcon, PencilIcon, SparklesIcon } from "lucide-react";
+import { ArrowLeftIcon, PencilIcon, SparklesIcon, ShieldIcon } from "lucide-react";
 import {
   priorityProfileModel,
   DEFAULT_PRIORITY_PROFILE,
@@ -18,6 +18,8 @@ import {
   EXPECTED_EMAIL_TYPE_LABELS,
   SERVICE_LABELS,
   PREFERENCE_LABELS,
+  sanitizeEmailInput,
+  sanitizeTagInput,
   buildProfilePreview,
   type PriorityProfile,
 } from "@repo/shared";
@@ -42,6 +44,7 @@ import {
   StepEmailWorld,
   StepPreferences,
 } from "@web/components/priority-profile/steps";
+import { TagInput } from "@web/components/priority-profile/tag-input";
 
 // ── Read-only answers view ────────────────────────────────────────────
 
@@ -154,6 +157,90 @@ function ProfileReadOnly({ profile }: { profile: PriorityProfile }) {
   );
 }
 
+// ── Standalone blocklist card (always visible, edits inline) ──────────
+
+function ProtectedCard({
+  profile,
+  completedOnboarding,
+}: {
+  profile: PriorityProfile;
+  completedOnboarding: boolean;
+}) {
+  const { upsertProfileAsync, isPending } = useUpsertPriorityProfile();
+  const savedSenders = profile.senders.protectedSenders ?? [];
+  const savedKeywords = profile.senders.protectedKeywords ?? [];
+  const [senders, setSenders] = useState<string[]>(savedSenders);
+  const [keywords, setKeywords] = useState<string[]>(savedKeywords);
+
+  const dirty =
+    JSON.stringify(senders) !== JSON.stringify(savedSenders) ||
+    JSON.stringify(keywords) !== JSON.stringify(savedKeywords);
+
+  const handleSave = async () => {
+    try {
+      await upsertProfileAsync({
+        data: {
+          ...profile,
+          senders: { ...profile.senders, protectedSenders: senders, protectedKeywords: keywords },
+        },
+        completedOnboarding,
+      });
+      toast.success("Protected list saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <ShieldIcon className="size-4" />
+          Protected from the assistant
+        </CardTitle>
+        <CardDescription>
+          Mail matching these is never read, summarized, searched, or shown to
+          the AI — use it for anything the assistant should never see, like bank
+          alerts or OTP messages.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-6">
+        <div className="flex flex-col gap-1.5">
+          <p className="text-sm font-medium">Protected senders</p>
+          <p className="text-xs text-muted-foreground">
+            Email from these addresses is hidden from the assistant. Press Enter
+            to add.
+          </p>
+          <TagInput
+            value={senders}
+            onChange={setSenders}
+            sanitize={sanitizeEmailInput}
+            placeholder="alerts@bank.com"
+            invalidMessage="Enter a valid email like name@bank.com"
+          />
+        </div>
+        <div className="flex flex-col gap-1.5">
+          <p className="text-sm font-medium">Protected keywords</p>
+          <p className="text-xs text-muted-foreground">
+            Any email whose subject or body contains one of these is withheld.
+          </p>
+          <TagInput
+            value={keywords}
+            onChange={setKeywords}
+            sanitize={sanitizeTagInput}
+            placeholder='e.g. "otp", "password"'
+          />
+        </div>
+        <div className="flex justify-end">
+          <Button onClick={handleSave} disabled={isPending || !dirty}>
+            {isPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Editable one-page form (the wizard's steps, stacked) ──────────────
 
 const SECTIONS = [
@@ -259,7 +346,9 @@ export default function PersonalizationSettingsPage() {
 
         {isLoading ? (
           <p className="text-sm text-muted-foreground">Loading…</p>
-        ) : filled && !editing ? (
+        ) : (
+          <>
+        {filled && !editing ? (
           <Card>
             <CardHeader className="flex flex-row items-start justify-between gap-4 space-y-0">
               <div>
@@ -297,6 +386,13 @@ export default function PersonalizationSettingsPage() {
               onCancel={filled ? () => setEditing(false) : undefined}
               saving={isPending}
             />
+          </>
+        )}
+
+        <ProtectedCard
+          profile={record?.data ?? DEFAULT_PRIORITY_PROFILE}
+          completedOnboarding={record?.completedOnboarding ?? false}
+        />
           </>
         )}
       </div>

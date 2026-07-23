@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
 
 import { corsair } from "@repo/corsair";
-import { db, eq, sql, and, or, ilike } from "@repo/database";
+import { db, eq, sql, and, or, ilike, gte, inArray } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
+import { getProtectedConfig } from "../profile/index.ts";
+import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
+import { partitionSearchResults } from "./model.ts";
 import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
 import type {
   ThreadSummary,
@@ -13,6 +16,8 @@ import type {
   MessageDetail,
   SendEmailInput,
   SendEmailResult,
+  ReplyToEmailInput,
+  ForwardEmailInput,
   SyncResult,
   EmailCount,
   LocalSearchResult,
@@ -30,9 +35,20 @@ interface PayloadHeader {
 
 interface MessagePart {
   mimeType?: string;
-  body?: { data?: string; size?: number };
+  filename?: string;
+  body?: { data?: string; size?: number; attachmentId?: string };
   headers?: PayloadHeader[];
   parts?: MessagePart[];
+}
+
+/** Counts parts that are attachments (Gmail: a non-empty filename). */
+function countAttachments(payload: MessagePart | undefined): number {
+  if (!payload) return 0;
+  let count = payload.filename ? 1 : 0;
+  if (payload.parts) {
+    for (const part of payload.parts) count += countAttachments(part);
+  }
+  return count;
 }
 
 /**
@@ -120,18 +136,37 @@ function stripHtml(html: string): string {
 
 /**
  * Build a base64url-encoded RFC 2822 email string for messages.send().
+ *
+ * `inReplyTo`/`references` are what make a reply thread correctly outside
+ * Gmail's own UI — the `threadId` param on messages.send() is a Gmail-only
+ * grouping hint that other mail clients ignore entirely, so a real reply
+ * needs these headers regardless of whether Gmail's threadId is also set.
  */
-function buildRawEmail(to: string, subject: string, body: string): string {
+function buildRawEmail(
+  to: string,
+  subject: string,
+  body: string,
+  extra?: { cc?: string; inReplyTo?: string; references?: string },
+): string {
   const lines = [
     `To: ${to}`,
+    extra?.cc ? `Cc: ${extra.cc}` : undefined,
     `Subject: ${subject}`,
+    extra?.inReplyTo ? `In-Reply-To: ${extra.inReplyTo}` : undefined,
+    extra?.references ? `References: ${extra.references}` : undefined,
     `Content-Type: text/plain; charset="UTF-8"`,
     `MIME-Version: 1.0`,
     "",
     body,
-  ];
+  ].filter((line): line is string => line !== undefined);
   const raw = lines.join("\r\n");
   return Buffer.from(raw).toString("base64url");
+}
+
+/** Pulls the bare address out of a "Display Name <addr@x.com>" header value. */
+function extractAddress(headerValue: string): string {
+  const match = headerValue.match(/<([^>]+)>/);
+  return (match ? match[1]! : headerValue).trim();
 }
 
 /**
@@ -338,6 +373,205 @@ export async function sendEmail(
     id: result.id ?? "",
     threadId: result.threadId ?? "",
   };
+}
+
+interface ResolvedReplyTarget {
+  recipient: string;
+  ccAddresses?: string;
+  subject: string;
+  messageId: string;
+  references: string;
+  threadId: string;
+}
+
+/**
+ * Resolves WHO and WHAT SUBJECT a reply targets, from the original message
+ * fetched fresh from Gmail — never from the model. Shared by the real send
+ * (replyToEmail) and the approval-preview builder (previewReply) so the
+ * preview the user approves and the message actually sent are derived from
+ * the exact same resolution, not two hand-kept-in-sync copies.
+ */
+async function resolveReplyTarget(
+  tenantId: string,
+  entityId: string,
+  replyAll?: boolean,
+): Promise<ResolvedReplyTarget> {
+  const tenant = corsair.withTenant(tenantId);
+  const original = (await tenant.gmail.api.messages.get({
+    id: entityId,
+    format: "full",
+  })) as Record<string, unknown>;
+
+  const headers = ((original.payload as MessagePart)?.headers ?? []) as PayloadHeader[];
+  const from = getHeader(headers, "From");
+  const replyTo = getHeader(headers, "Reply-To") || from;
+  const to = getHeader(headers, "To");
+  const cc = getHeader(headers, "Cc");
+  const subject = getHeader(headers, "Subject");
+  const messageId = getHeader(headers, "Message-ID");
+  const existingReferences = getHeader(headers, "References");
+
+  const recipient = extractAddress(replyTo);
+  if (!recipient) {
+    throw new Error("Could not determine a reply recipient from the original message");
+  }
+
+  let ccAddresses: string | undefined;
+  if (replyAll) {
+    const others = new Set<string>();
+    for (const raw of `${to},${cc}`.split(",")) {
+      const addr = extractAddress(raw.trim());
+      if (addr && addr.toLowerCase() !== recipient.toLowerCase()) others.add(addr);
+    }
+    if (others.size > 0) ccAddresses = Array.from(others).join(", ");
+  }
+
+  const replySubject = /^re:/i.test(subject) ? subject : `Re: ${subject}`;
+  const references = [existingReferences, messageId].filter(Boolean).join(" ").trim();
+
+  return {
+    recipient,
+    ccAddresses,
+    subject: replySubject,
+    messageId,
+    references,
+    threadId: (original.threadId as string) ?? "",
+  };
+}
+
+/**
+ * Reply to a specific message. Recipient, subject, and threading headers
+ * (In-Reply-To/References, built from the original's own Message-ID) are
+ * ALL derived from the original message — never from the model. This
+ * matters beyond correctness: the assistant only ever sees the sender as
+ * the literal string "[EMAIL]" (PII masking replaces every address before
+ * content reaches it — see packages/ai/src/security/pii.ts), so it could
+ * not supply a correct recipient even if asked to.
+ */
+export async function replyToEmail(
+  tenantId: string,
+  input: ReplyToEmailInput,
+): Promise<SendEmailResult> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] replyToEmail start", { tenantId, entityId: input.entityId, replyAll: input.replyAll });
+
+  const target = await resolveReplyTarget(tenantId, input.entityId, input.replyAll);
+
+  const raw = buildRawEmail(target.recipient, target.subject, input.body, {
+    cc: target.ccAddresses,
+    inReplyTo: target.messageId || undefined,
+    references: target.references || undefined,
+  });
+
+  const tenant = corsair.withTenant(tenantId);
+  const result = await tenant.gmail.api.messages.send({
+    raw,
+    threadId: target.threadId || undefined,
+  });
+
+  logger.info("[SERVICE] replyToEmail completed", {
+    tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
+  });
+
+  return { id: result.id ?? "", threadId: result.threadId ?? "" };
+}
+
+/**
+ * Read-only preview of what replyToEmail would send — for the approval card
+ * shown before the user consents. No send, no side effects.
+ */
+export async function previewReply(
+  tenantId: string,
+  entityId: string,
+  replyAll?: boolean,
+): Promise<{ to: string; cc?: string; subject: string }> {
+  const target = await resolveReplyTarget(tenantId, entityId, replyAll);
+  return { to: target.recipient, cc: target.ccAddresses, subject: target.subject };
+}
+
+interface ResolvedForwardTarget {
+  subject: string;
+  quoted: string;
+  attachmentCount: number;
+}
+
+async function resolveForwardTarget(tenantId: string, entityId: string): Promise<ResolvedForwardTarget> {
+  const tenant = corsair.withTenant(tenantId);
+  const original = (await tenant.gmail.api.messages.get({
+    id: entityId,
+    format: "full",
+  })) as Record<string, unknown>;
+
+  const payload = original.payload as MessagePart | undefined;
+  const headers = (payload?.headers ?? []) as PayloadHeader[];
+  const from = getHeader(headers, "From");
+  const to = getHeader(headers, "To");
+  const date = getHeader(headers, "Date");
+  const subject = getHeader(headers, "Subject");
+  const bodyText = extractBody(payload) || (original.snippet as string) || "";
+  const attachmentCount = countAttachments(payload);
+
+  const forwardSubject = /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
+  const quoted = [
+    "---------- Forwarded message ---------",
+    `From: ${from}`,
+    `Date: ${date}`,
+    `Subject: ${subject}`,
+    `To: ${to}`,
+    "",
+    bodyText,
+  ].join("\n");
+
+  return { subject: forwardSubject, quoted, attachmentCount };
+}
+
+/**
+ * Forward a specific message. The model supplies only the recipient and an
+ * optional covering note — the quoted original is assembled here from the
+ * message fetched fresh from Gmail, never authored by the model. This
+ * avoids the trap of forwarding a paraphrase: after fullText was dropped
+ * from summarizeEmail's tool output, the model only ever holds a digest, so
+ * a model-authored "forward" would silently send a summary instead of the
+ * actual email.
+ */
+export async function forwardEmail(
+  tenantId: string,
+  input: ForwardEmailInput,
+): Promise<SendEmailResult> {
+  const startMs = Date.now();
+  logger.info("[SERVICE] forwardEmail start", { tenantId, entityId: input.entityId, to: input.to });
+
+  const target = await resolveForwardTarget(tenantId, input.entityId);
+  // buildRawEmail is text/plain only — attachments are never carried over.
+  // Say so in the sent message itself, not just the approval preview, since
+  // the forward's recipient has no other way to know something was dropped.
+  const attachmentNote =
+    target.attachmentCount > 0
+      ? `\n\n[${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} on the original message could not be forwarded.]`
+      : "";
+  const composedBody = (input.note ? `${input.note}\n\n${target.quoted}` : target.quoted) + attachmentNote;
+  const raw = buildRawEmail(input.to, target.subject, composedBody);
+
+  const tenant = corsair.withTenant(tenantId);
+  const result = await tenant.gmail.api.messages.send({ raw });
+
+  logger.info("[SERVICE] forwardEmail completed", {
+    tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
+  });
+
+  return { id: result.id ?? "", threadId: result.threadId ?? "" };
+}
+
+/**
+ * Read-only preview of what forwardEmail would send — for the approval
+ * card. No send, no side effects.
+ */
+export async function previewForward(
+  tenantId: string,
+  entityId: string,
+): Promise<{ subject: string; attachmentCount: number }> {
+  const target = await resolveForwardTarget(tenantId, entityId);
+  return { subject: target.subject, attachmentCount: target.attachmentCount };
 }
 
 /**
@@ -701,34 +935,326 @@ export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
  *   - Only used if vector search fails (API down, no credits, etc.)
  *   - Searches bodyText, subject, from, snippet
  *
+ * Sender-filtered path (`sender` given): delegates to searchBySender, which
+ * always filters to rows whose `from` column matches `sender` — a real
+ * `WHERE ... ILIKE` filter, not a fold-into-the-embedding-text guess. This
+ * exists because plain vector search over "mails from X@gmail.com" ranks by
+ * semantic closeness to that phrase, not by actual sender, and can surface
+ * unrelated emails (e.g. other Gmail-account-security notices) ahead of ones
+ * genuinely from X. If `sender` is omitted but `query` literally contains an
+ * email address, it's extracted and treated as `sender` automatically (a
+ * safety net for when the caller didn't populate the structured field).
+ *
  * Never crashes — always returns results or empty array.
  */
 export async function searchLocalEmails(
   userId: string,
-  query: string,
+  args: {
+    query?: string;
+    sender?: string;
+    /** Only include mail received within this many days (unset = no bound). */
+    withinDays?: number;
+    /** When true, keep PROMOTIONS in the primary bucket (a "show promotions" drill-down). */
+    includePromotions?: boolean;
+    /**
+     * Apply the assistant display rules: protected-sender/keyword blocklist,
+     * primary/junk partition, and the small display cap. Only the assistant's
+     * searchEmails tool sets this — the raw tRPC UI search keeps full,
+     * unfiltered results (a user browsing their own inbox is not the AI).
+     */
+    applyAssistantRules?: boolean;
+  },
 ): Promise<LocalSearchResult> {
-  try {
-    const threads = await searchByEmbedding(userId, query, 20);
-    if (threads.length > 0) {
-        logger.info(
-        `[search] ✅ Vector search — ${threads.length} results for "${query}"`,
-        { userId, query, count: threads.length },
-      );
-      return { threads, total: threads.length };
+  let { query, sender } = args;
+  const { withinDays, includePromotions, applyAssistantRules } = args;
+
+  if (!sender) {
+    const extracted = extractEmail(query ?? "");
+    if (extracted) {
+      sender = extracted;
+      query = (query ?? "").replace(extracted, "").trim();
     }
-    // Vector search returned 0 results — try ILIKE as safety net
-    logger.info(
-      `[search] ⚠️ Vector search returned 0 results — falling back to ILIKE for "${query}"`,
-      { userId, query },
-    );
-    return searchByText(userId, query);
-  } catch (err) {
-    logger.warn(
-      `[search] ❌ Vector search failed — falling back to ILIKE for "${query}"`,
-      { userId, query, err },
-    );
-    return searchByText(userId, query);
   }
+
+  const topicGiven = !!query?.trim();
+  // Broad inbox summary: no sender, no topic, but a date window given. Fetch
+  // recent mail by recency (a semantic embed of an empty query is meaningless)
+  // and give it a larger display budget than a normal fetch.
+  const summaryMode = !sender && !topicGiven && withinDays != null;
+  const primaryCap = summaryMode ? 40 : 10;
+
+  let raw: ThreadSummary[];
+  if (sender) {
+    raw = (await searchBySender(userId, sender, query, withinDays)).threads;
+  } else if (summaryMode) {
+    raw = await searchByRecency(userId, withinDays ?? 30, 200);
+  } else {
+    const effectiveQuery = query ?? "";
+    try {
+      raw = dedupeThreads(await searchByEmbedding(userId, effectiveQuery, 20, withinDays));
+      if (raw.length === 0) {
+        logger.info(
+          `[search] ⚠️ Vector search returned 0 results — falling back to ILIKE for "${effectiveQuery}"`,
+          { userId, query: effectiveQuery },
+        );
+        raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
+      }
+    } catch (err) {
+      logger.warn(
+        `[search] ❌ Vector search failed — falling back to ILIKE for "${effectiveQuery}"`,
+        { userId, query: effectiveQuery, err },
+      );
+      raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
+    }
+  }
+
+  if (!applyAssistantRules) {
+    // Raw UI search: full results, no blocklist/partition/cap.
+    return { threads: raw, total: raw.length };
+  }
+
+  return finalizeSearch(userId, raw, { topicGiven, includePromotions: !!includePromotions, primaryCap });
+}
+
+/** Days-ago cutoff Date for a `withinDays` window, or null if unbounded. */
+function windowCutoff(withinDays?: number): Date | null {
+  if (withinDays == null || !Number.isFinite(withinDays) || withinDays <= 0) return null;
+  return new Date(Date.now() - withinDays * 24 * 60 * 60 * 1000);
+}
+
+/**
+ * Post-process raw search rows before they reach the assistant:
+ *   1. Drop protected-sender / protected-keyword mail entirely (blocklist).
+ *   2. Enrich each row with its Gmail category from message_metadata.
+ *   3. Partition into primary vs junk (PROMOTIONS/SPAM/TRASH), cap the primary
+ *      bucket, and surface the hidden counts for disclosure.
+ */
+async function finalizeSearch(
+  userId: string,
+  raw: ThreadSummary[],
+  opts: { topicGiven: boolean; includePromotions: boolean; primaryCap: number },
+): Promise<LocalSearchResult> {
+  const blocklist = await getProtectedConfig(userId);
+
+  const hiddenSenders = new Set<string>();
+  const afterProtected: ThreadSummary[] = [];
+  for (const t of raw) {
+    const matchedSender = matchProtectedSender(t.sender, blocklist.senders);
+    const matchedKeyword = matchProtectedKeyword(`${t.subject}\n${t.snippet}`, blocklist.keywords);
+    if (matchedSender || matchedKeyword) {
+      if (matchedSender) hiddenSenders.add(matchedSender);
+      continue;
+    }
+    afterProtected.push(t);
+  }
+  const hiddenProtectedCount = raw.length - afterProtected.length;
+
+  const enriched = await enrichCategories(userId, afterProtected);
+  const { primary, primaryTotal, spamCount } = partitionSearchResults(enriched, opts);
+
+  return {
+    threads: primary,
+    total: primaryTotal,
+    spamCount,
+    hiddenProtected:
+      hiddenProtectedCount > 0
+        ? { count: hiddenProtectedCount, senders: [...hiddenSenders] }
+        : undefined,
+  };
+}
+
+/** Batch-load each row's Gmail category from message_metadata (keyed by entityId). */
+async function enrichCategories(
+  userId: string,
+  threads: ThreadSummary[],
+): Promise<ThreadSummary[]> {
+  const ids = threads.map((t) => t.entityId).filter((id): id is string => !!id);
+  if (ids.length === 0) return threads;
+
+  const rows = await db
+    .select({ entityId: messageMetadata.entityId, category: messageMetadata.category })
+    .from(messageMetadata)
+    .where(and(eq(messageMetadata.userId, userId), inArray(messageMetadata.entityId, ids)));
+
+  const catById = new Map(rows.map((r) => [r.entityId, r.category]));
+  return threads.map((t) => ({
+    ...t,
+    category: (t.entityId ? catById.get(t.entityId) : undefined) ?? t.category ?? undefined,
+  }));
+}
+
+/** Recent mail within the window, newest first — the "summarize my inbox" source. */
+async function searchByRecency(
+  userId: string,
+  withinDays: number,
+  limit: number,
+): Promise<ThreadSummary[]> {
+  const cutoff = windowCutoff(withinDays);
+  const rows = await db
+    .select({
+      gmailMessageId: emails.gmailMessageId,
+      threadId: emails.threadId,
+      subject: emails.subject,
+      from: emails.from,
+      snippet: emails.snippet,
+      receivedAt: emails.receivedAt,
+    })
+    .from(emails)
+    .where(
+      cutoff
+        ? and(eq(emails.userId, userId), gte(emails.receivedAt, cutoff))
+        : eq(emails.userId, userId),
+    )
+    .orderBy(sql`${emails.receivedAt} DESC NULLS LAST`)
+    .limit(limit);
+
+  return dedupeThreads(
+    rows.map((r) => ({
+      threadId: r.threadId,
+      entityId: r.gmailMessageId,
+      sender: r.from ?? "",
+      subject: r.subject ?? "(no subject)",
+      date: r.receivedAt ? new Date(r.receivedAt).toISOString() : "",
+      snippet: r.snippet ?? "",
+    })),
+  );
+}
+
+/**
+ * Pulls a literal email address (`word@domain.tld`) out of free text.
+ * Deliberately dumb: only matches the exact shape of an address, never a
+ * display name or company — see BUGS.md for why guessing at names is unsafe.
+ */
+function extractEmail(text: string): string | undefined {
+  const match = text.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  return match?.[0];
+}
+
+/**
+ * Collapses rows with an identical (sender, subject, snippet) triple,
+ * keeping the first (best-ranked or newest, depending on caller's ORDER BY).
+ * Fixes the duplicate-row symptom from BUGS.md, where near-identical emails
+ * (e.g. repeated security alerts) all ranked back-to-back with no dedup.
+ */
+function dedupeThreads(threads: ThreadSummary[]): ThreadSummary[] {
+  const seen = new Set<string>();
+  const out: ThreadSummary[] = [];
+  for (const t of threads) {
+    const key = `${t.sender}|${t.subject}|${t.snippet}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    out.push(t);
+  }
+  return out;
+}
+
+/**
+ * Sender-filtered search (Bug 2 fix). Always applies a real `WHERE from
+ * ILIKE %sender%` filter — `from` is stored as free text ("Name <email>"),
+ * so this matches whether the user gave a display name or the bare address.
+ *
+ * Hybrid ranking: if topic text remains after the sender was identified,
+ * ranks the sender-filtered rows by vector similarity to that topic (e.g.
+ * "from X regarding invoices"). Otherwise returns them newest-first, which
+ * is what "fetch the last N emails from X" means.
+ */
+async function searchBySender(
+  userId: string,
+  sender: string,
+  query?: string,
+  withinDays?: number,
+): Promise<LocalSearchResult> {
+  const meaningfulQuery = query?.trim();
+  const pattern = `%${sender}%`;
+  const cutoff = windowCutoff(withinDays);
+  const dateClause = cutoff ? sql`AND ${emails.receivedAt} >= ${cutoff}` : sql``;
+
+  if (meaningfulQuery) {
+    try {
+      const startMs = Date.now();
+      const queryVector = await embedSearchQuery(meaningfulQuery);
+      const vectorLiteral = `[${queryVector.join(",")}]`;
+
+      const result = await db.execute<{
+        gmail_message_id: string;
+        thread_id: string;
+        subject: string | null;
+        from: string | null;
+        snippet: string | null;
+        received_at: Date | null;
+        distance: number;
+      }>(
+        sql`
+          SELECT ${emails.gmailMessageId}, ${emails.threadId}, ${emails.subject}, ${emails.from}, ${emails.snippet}, ${emails.receivedAt},
+            ${emails.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)} AS distance
+          FROM ${emails}
+          WHERE ${eq(emails.userId, userId)} AND ${ilike(emails.from, pattern)} AND ${emails.embedding} IS NOT NULL ${dateClause}
+          ORDER BY distance ASC
+          LIMIT 20
+        `,
+      );
+
+      const threads = dedupeThreads(
+        result.rows.map((r) => ({
+          threadId: r.thread_id,
+          entityId: r.gmail_message_id,
+          sender: r.from ?? "",
+          subject: r.subject ?? "(no subject)",
+          date: r.received_at ? new Date(r.received_at).toISOString() : "",
+          snippet: r.snippet ?? "",
+          score: Math.max(0, Math.min(1, 1 - Number(r.distance))),
+        })),
+      );
+
+      logger.info(
+        `[search] ✅ Sender+topic search — ${threads.length} results for sender "${sender}", topic "${meaningfulQuery}"`,
+        { userId, sender, query: meaningfulQuery, count: threads.length, durationMs: Date.now() - startMs },
+      );
+      if (threads.length > 0) return { threads, total: threads.length };
+      // No topic-ranked matches for this sender — fall through to a plain
+      // recency listing of everything from them, rather than returning empty.
+    } catch (err) {
+      logger.warn(
+        `[search] ❌ Sender+topic vector search failed — falling back to recency for sender "${sender}"`,
+        { userId, sender, query: meaningfulQuery, err },
+      );
+      // fall through to recency listing below
+    }
+  }
+
+  const rows = await db
+    .select({
+      gmailMessageId: emails.gmailMessageId,
+      threadId: emails.threadId,
+      subject: emails.subject,
+      from: emails.from,
+      snippet: emails.snippet,
+      receivedAt: emails.receivedAt,
+    })
+    .from(emails)
+    .where(
+      cutoff
+        ? and(eq(emails.userId, userId), ilike(emails.from, pattern), gte(emails.receivedAt, cutoff))
+        : and(eq(emails.userId, userId), ilike(emails.from, pattern)),
+    )
+    .orderBy(sql`${emails.receivedAt} DESC NULLS LAST`);
+
+  const threads: ThreadSummary[] = dedupeThreads(
+    rows.map((r) => ({
+      threadId: r.threadId,
+      entityId: r.gmailMessageId,
+      sender: r.from ?? "",
+      subject: r.subject ?? "(no subject)",
+      date: r.receivedAt ? new Date(r.receivedAt).toISOString() : "",
+      snippet: r.snippet ?? "",
+    })),
+  );
+
+  logger.info(
+    `[search] ✅ Sender search (recency) — ${threads.length} results for sender "${sender}"`,
+    { userId, sender, count: threads.length },
+  );
+  return { threads, total: threads.length };
 }
 
 /**
@@ -740,12 +1266,15 @@ async function searchByEmbedding(
   userId: string,
   query: string,
   limit: number,
+  withinDays?: number,
 ): Promise<ThreadSummary[]> {
   const startMs = Date.now();
   logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, query, limit });
 
   const queryVector = await embedSearchQuery(query);
   const vectorLiteral = `[${queryVector.join(",")}]`;
+  const cutoff = windowCutoff(withinDays);
+  const dateClause = cutoff ? sql`AND ${emails.receivedAt} >= ${cutoff}` : sql``;
 
   const result = await db.execute<{
     gmail_message_id: string;
@@ -754,22 +1283,28 @@ async function searchByEmbedding(
     from: string | null;
     snippet: string | null;
     received_at: Date | null;
+    distance: number;
   }>(
     sql`
-      SELECT ${emails.gmailMessageId}, ${emails.threadId}, ${emails.subject}, ${emails.from}, ${emails.snippet}, ${emails.receivedAt}
+      SELECT ${emails.gmailMessageId}, ${emails.threadId}, ${emails.subject}, ${emails.from}, ${emails.snippet}, ${emails.receivedAt},
+        ${emails.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)} AS distance
       FROM ${emails}
-      WHERE ${eq(emails.userId, userId)} AND ${emails.embedding} IS NOT NULL
-      ORDER BY ${emails.embedding} <=> ${sql.raw(`'${vectorLiteral}'::vector`)} ASC
+      WHERE ${eq(emails.userId, userId)} AND ${emails.embedding} IS NOT NULL ${dateClause}
+      ORDER BY distance ASC
       LIMIT ${limit}
     `,
   );
 
   const threads = result.rows.map((r) => ({
     threadId: r.thread_id,
+    entityId: r.gmail_message_id,
     sender: r.from ?? "",
     subject: r.subject ?? "(no subject)",
     date: r.received_at ? new Date(r.received_at).toISOString() : "",
     snippet: r.snippet ?? "",
+    // Cosine distance -> similarity. Clamp: floating point can push this
+    // fractionally past [0,1] at the extremes.
+    score: Math.max(0, Math.min(1, 1 - Number(r.distance))),
   }));
 
   logger.debug("[SEARCH] searchByEmbedding result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
@@ -783,11 +1318,13 @@ async function searchByEmbedding(
 async function searchByText(
   userId: string,
   query: string,
+  withinDays?: number,
 ): Promise<LocalSearchResult> {
   const startMs = Date.now();
   logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, query });
 
   const pattern = `%${query}%`;
+  const cutoff = windowCutoff(withinDays);
 
   const rows = await db
     .select({
@@ -808,17 +1345,21 @@ async function searchByText(
           ilike(emails.from, pattern),
           ilike(emails.snippet, pattern),
         ),
+        ...(cutoff ? [gte(emails.receivedAt, cutoff)] : []),
       ),
     )
     .orderBy(sql`${emails.receivedAt} DESC NULLS LAST`);
 
-  const threads: ThreadSummary[] = rows.map((r) => ({
-    threadId: r.threadId,
-    sender: r.from ?? "",
-    subject: r.subject ?? "(no subject)",
-    date: r.receivedAt ? new Date(r.receivedAt).toISOString() : "",
-    snippet: r.snippet ?? "",
-  }));
+  const threads: ThreadSummary[] = dedupeThreads(
+    rows.map((r) => ({
+      threadId: r.threadId,
+      entityId: r.gmailMessageId,
+      sender: r.from ?? "",
+      subject: r.subject ?? "(no subject)",
+      date: r.receivedAt ? new Date(r.receivedAt).toISOString() : "",
+      snippet: r.snippet ?? "",
+    })),
+  );
 
   logger.info("[SEARCH] searchByText (ILIKE) result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
   return { threads, total: threads.length };

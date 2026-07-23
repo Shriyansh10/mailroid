@@ -1,6 +1,6 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
-import { db, eq, asc } from "@repo/database";
+import { db, eq } from "@repo/database";
 import { conversations, assistantMessages } from "@repo/database/schema";
 import {
   ToolRegistry,
@@ -15,6 +15,9 @@ import {
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
+import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
+import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel } from "@web/lib/assistant/history";
+import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import crypto from "node:crypto";
 
 export const runtime = "nodejs";
@@ -54,7 +57,6 @@ export async function POST(request: Request) {
     // ── Parse body ─────────────────────────────────────────────────
     let body: {
       approvalId: string;
-      messages?: { role: string; content: string }[];
       reasoningContent?: string | null;
       conversationId?: string | null;
     };
@@ -119,6 +121,7 @@ export async function POST(request: Request) {
         content: result.status === "success"
           ? JSON.stringify(result.data)
           : JSON.stringify({ error: result.error ?? "Tool execution failed" }),
+        metadata: deriveToolMessageMetadata(approval.toolName, approval.args as Record<string, unknown>, result) ?? null,
       });
     }
 
@@ -127,31 +130,23 @@ export async function POST(request: Request) {
 
     if (conversationId) {
       try {
-        // Fetch complete message history from the database
-        const dbMsgs = await db
-          .select()
-          .from(assistantMessages)
-          .where(eq(assistantMessages.conversationId, conversationId))
-          .orderBy(asc(assistantMessages.createdAt));
+        // Fetch complete message history from the database, and build the
+        // system prompt server-side (same helpers /api/chat uses) — this
+        // route used to accept a client-supplied `messages[0]` system prompt
+        // verbatim, which a crafted request could use to replace the SENDER
+        // IDENTITY rules outright. Never trust it from the client again.
+        const [dbMsgs, emailContext] = await Promise.all([
+          loadConversationHistory(conversationId),
+          getActiveEmailContext(conversationId, userId),
+        ]);
 
-        // Resolve system prompt from frontend body if present, or use default fallback
-        let systemPrompt = [
-          `You are Dobbie, an AI executive assistant for email, calendar, and productivity workflows.`,
-          `Be concise, professional, accurate, and action-oriented.`,
-          `Never invent emails, events, people, dates, or tool results.`,
-          ``,
-          `SENDER IDENTITY RULES (CRITICAL):`,
-          `- You may ONLY send email from the currently authenticated Gmail account: ${session?.user?.email || "unknown"}.`,
-          `- You may ONLY create calendar events from the currently authenticated Google Calendar account: ${session?.user?.email || "unknown"}.`,
-          `- If the user explicitly requests to send an email, schedule a meeting, or perform an action "from X", "as X", or "on behalf of X" (where X is not the authenticated email "${session?.user?.email || "unknown"}"):`,
-          `  1. Do NOT call any tool under any circumstances.`,
-          `  2. Explain that you cannot impersonate another account. You MUST include this exact message or a clear variation: "I am only authorized to send/schedule on your behalf." (or for email: "I am only authorized to send a mail on your behalf.")`,
-          `  3. Ask whether they want to perform the action from their connected account instead.`,
-          `- Do NOT refuse standard requests where the user doesn't specify a different sender/organizer (e.g. "Send email to bob@example.com" or "Schedule a meeting with Bob"). These are normal actions, and you should perform them from the authenticated account.`,
-        ].join("\n");
-        if (body.messages && body.messages[0]?.role === "system") {
-          systemPrompt = body.messages[0].content;
-        }
+        const systemPrompt = buildSystemPrompt({
+          userTimeZone: userTimeZone ?? "UTC",
+          userEmail: session.user.email,
+          emailContext,
+        });
+
+        const trimmedHistory = trimHistoryForModel(dbMsgs);
 
         // Map database messages to OpenAI message format
         const rawConversation: any[] = [
@@ -159,18 +154,18 @@ export async function POST(request: Request) {
             role: "system" as const,
             content: systemPrompt,
           },
-          ...dbMsgs.map((m) => {
+          ...trimmedHistory.map((m) => {
             if (m.role === "assistant") {
               return {
                 role: "assistant" as const,
                 content: m.content || null,
-                tool_calls: m.toolCalls as any[] | undefined,
+                tool_calls: m.tool_calls as any[] | undefined,
               };
             }
             if (m.role === "tool") {
               return {
                 role: "tool" as const,
-                tool_call_id: m.toolCallId!,
+                tool_call_id: m.tool_call_id!,
                 content: m.content || "",
               };
             }
@@ -256,6 +251,7 @@ export async function POST(request: Request) {
                 content: toolResult.status === "success"
                   ? JSON.stringify(toolResult.data)
                   : JSON.stringify({ error: toolResult.error }),
+                metadata: deriveToolMessageMetadata(fn.name, args, toolResult) ?? null,
               });
             }
 

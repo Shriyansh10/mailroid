@@ -16,11 +16,17 @@ export interface ToolExecutor<TArgs = unknown, TResult = unknown> {
 // ── searchEmails ─────────────────────────────────────────────────────
 
 export interface SearchEmailsInput {
-  query: string;
+  query?: string;
+  sender?: string;
+  withinDays?: number;
+  includePromotions?: boolean;
 }
 
 export interface SearchEmailsOutput {
   emails: Array<Record<string, unknown>>;
+  primaryTotal?: number;
+  spamCount?: number;
+  hiddenProtected?: { count: number; senders: string[] };
 }
 
 export class SearchEmailsExecutor

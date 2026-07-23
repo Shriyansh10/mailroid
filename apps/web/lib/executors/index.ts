@@ -1,12 +1,21 @@
 import type { ToolRegistry, ToolExecutionContext } from "@repo/ai";
-import { CorsairSearchEmailsExecutor, CorsairSendEmailExecutor } from "./gmail";
-import type { SearchEmailsInput, SendEmailInput } from "./gmail";
+import {
+  CorsairSearchEmailsExecutor,
+  CorsairSendEmailExecutor,
+  ReplyToEmailExecutor,
+  buildReplyPreview,
+  ForwardEmailExecutor,
+  buildForwardPreview,
+} from "./gmail";
+import type { SearchEmailsInput, SendEmailInput, ReplyToEmailInput, ForwardEmailInput } from "./gmail";
 import { CorsairGetEventsExecutor, CorsairCreateEventExecutor } from "./calendar";
 import type { GetEventsInput, CreateEventInput } from "./calendar";
 import { CorsairGenerateBriefExecutor } from "./brief";
 import type { GenerateExecutiveBriefInput } from "./brief";
 import { CorsairSummarizeEmailExecutor } from "./summarize";
 import type { SummarizeEmailInput } from "./summarize";
+import { GetEmailDetailExecutor } from "./email-detail";
+import type { GetEmailDetailInput } from "./email-detail";
 
 /**
  * Register production (Corsair-backed) executors into the ToolRegistry.
@@ -30,6 +39,9 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
   const createExec = new CorsairCreateEventExecutor();
   const briefExec = new CorsairGenerateBriefExecutor();
   const summarizeExec = new CorsairSummarizeEmailExecutor();
+  const emailDetailExec = new GetEmailDetailExecutor();
+  const replyExec = new ReplyToEmailExecutor();
+  const forwardExec = new ForwardEmailExecutor();
 
   // Replace searchEmails with Corsair-backed executor
   const searchDef = registry.get("searchEmails");
@@ -107,6 +119,47 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ summarizeEmail replaced with guardrailed executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ summarizeEmail NOT found in registry — mock still active");
+  }
+
+  // Replace getEmailDetail with the guardrailed, embedding-backed executor
+  const emailDetailDef = registry.get("getEmailDetail");
+  if (emailDetailDef) {
+    registry.register({
+      ...emailDetailDef,
+      execute: (args, ctx) =>
+        emailDetailExec.execute(args as GetEmailDetailInput, ctx as ToolExecutionContext),
+    });
+    console.log("[registerProductionExecutors] ✅ getEmailDetail replaced with embedding-backed executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ getEmailDetail NOT found in registry — mock still active");
+  }
+
+  // Replace replyToEmail with the Corsair-backed executor + real preview builder
+  const replyDef = registry.get("replyToEmail");
+  if (replyDef) {
+    registry.register({
+      ...replyDef,
+      execute: (args, ctx) =>
+        replyExec.execute(args as ReplyToEmailInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildReplyPreview(args, ctx),
+    });
+    console.log("[registerProductionExecutors] ✅ replyToEmail replaced with Corsair executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ replyToEmail NOT found in registry — mock still active");
+  }
+
+  // Replace forwardEmail with the Corsair-backed executor + real preview builder
+  const forwardDef = registry.get("forwardEmail");
+  if (forwardDef) {
+    registry.register({
+      ...forwardDef,
+      execute: (args, ctx) =>
+        forwardExec.execute(args as ForwardEmailInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildForwardPreview(args, ctx),
+    });
+    console.log("[registerProductionExecutors] ✅ forwardEmail replaced with Corsair executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ forwardEmail NOT found in registry — mock still active");
   }
 }
 

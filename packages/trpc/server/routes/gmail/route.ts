@@ -361,7 +361,7 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, query: input.query });
-      const result = await searchLocalEmails(ctx.user!.id, input.query);
+      const result = await searchLocalEmails(ctx.user!.id, { query: input.query });
       logger.info("[TRPC] gmail.searchLocal result", {
         userId: ctx.user!.id, query: input.query,
         threadCount: result.threads?.length ?? 0, total: result.total,

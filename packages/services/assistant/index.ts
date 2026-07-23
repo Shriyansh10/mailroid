@@ -92,6 +92,7 @@ export async function getMessages(userId: string, conversationId: string) {
       toolCallId: msg.toolCallId,
       createdAt: msg.createdAt,
       approvalRequired,
+      metadata: msg.metadata as Record<string, unknown> | null,
     };
   });
 }

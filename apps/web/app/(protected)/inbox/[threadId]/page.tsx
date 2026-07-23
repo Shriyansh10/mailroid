@@ -5,71 +5,32 @@ import { useParams, useRouter } from "next/navigation";
 import { useThread } from "@web/hooks/api/gmail";
 import { useCreateEvent } from "@web/hooks/api/calendar";
 import Link from "next/link";
-import DOMPurify from "dompurify";
 import { toast } from "sonner";
 import { Card, CardHeader, CardTitle, CardContent } from "@web/components/ui/card";
 import { Button } from "@web/components/ui/button";
 import { Badge } from "@web/components/ui/badge";
 import { Skeleton } from "@web/components/ui/skeleton";
 import { Alert, AlertTitle, AlertDescription } from "@web/components/ui/alert";
-import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
 import { Input } from "@web/components/ui/input";
-import { 
-  ArrowLeft as ArrowLeftIcon, 
+import {
+  ArrowLeft as ArrowLeftIcon,
   Sparkles as SparklesIcon,
-  Reply as ReplyIcon, 
-  ReplyAll as ReplyAllIcon, 
-  Forward as ForwardIcon, 
+  Reply as ReplyIcon,
+  ReplyAll as ReplyAllIcon,
+  Forward as ForwardIcon,
   Calendar as CalendarIcon,
   AlertCircle as AlertCircleIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { EmailSummaryCard } from "@web/components/email-summary-card";
-
-function parseSender(from: string) {
-  if (!from) return { name: "Unknown", email: "" };
-  const match = from.match(/^([^<]+)<([^>]+)>/);
-  if (match && match[1] && match[2]) {
-    return {
-      name: match[1].replace(/"/g, "").trim(),
-      email: match[2].trim(),
-    };
-  }
-  return {
-    name: from.split("@")[0] || from,
-    email: from,
-  };
-}
-
-function formatMessageDate(dateString: string): string {
-  if (!dateString) return "";
-  try {
-    const date = new Date(dateString);
-    if (isNaN(date.getTime())) return dateString;
-    return date.toLocaleString(undefined, {
-      weekday: "short",
-      year: "numeric",
-      month: "short",
-      day: "numeric",
-      hour: "numeric",
-      minute: "2-digit",
-    });
-  } catch (e) {
-    return dateString;
-  }
-}
+import { ThreadMessageList } from "@web/components/thread-message-list";
 
 export default function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
   const { data: thread, isLoading, isError, error } = useThread(threadId);
   const router = useRouter();
 
-  const [mounted, setMounted] = useState(false);
   const [isScheduling, setIsScheduling] = useState(false);
-
-  useEffect(() => {
-    setMounted(true);
-  }, []);
   const [meetingTitle, setMeetingTitle] = useState("");
   const [meetingDate, setMeetingDate] = useState("");
   const [meetingTime, setMeetingTime] = useState("");
@@ -283,53 +244,7 @@ export default function ThreadDetailPage() {
           />
 
           {/* Email Messages Timeline */}
-          <div className="space-y-6">
-            {thread.messages.map((msg) => {
-              const { name, email } = parseSender(msg.from);
-              const initials = name.slice(0, 2).toUpperCase();
-
-              return (
-                <div key={msg.id} className="bg-card border rounded-xl shadow-sm overflow-hidden">
-                  
-                  {/* Message Header */}
-                  <div className="bg-muted/10 border-b px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
-                    <div className="flex items-center gap-3">
-                      <Avatar className="size-9 border border-border">
-                        <AvatarFallback className="bg-muted text-muted-foreground text-xs font-mono font-bold">
-                          {initials}
-                        </AvatarFallback>
-                      </Avatar>
-                      <div>
-                        <div className="text-sm font-semibold text-foreground leading-none">{name}</div>
-                        <div className="text-xs text-muted-foreground font-mono mt-1 leading-none">{email}</div>
-                      </div>
-                    </div>
-                    <div className="text-xs font-mono text-muted-foreground">
-                      {mounted ? formatMessageDate(msg.date) : msg.date}
-                    </div>
-                  </div>
-
-                  {/* Message Body */}
-                  <div className="p-6">
-                    <div className="overflow-x-auto max-w-full">
-                      {msg.htmlBody ? (
-                        <div
-                          className="max-w-full break-words text-foreground text-sm"
-                          dangerouslySetInnerHTML={{
-                            __html: DOMPurify.sanitize(msg.htmlBody),
-                          }}
-                        />
-                      ) : (
-                        <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
-                          {msg.body || msg.snippet}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
+          <ThreadMessageList messages={thread.messages} />
         </div>
 
         {/* Sidebar Actions Column */}

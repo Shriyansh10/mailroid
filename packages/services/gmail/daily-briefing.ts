@@ -3,7 +3,9 @@ import { dailyBriefs } from "@repo/database/models/daily-briefs";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "@repo/ai";
+import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { logger } from "@repo/logger";
+import { getProtectedConfig } from "../profile/index.ts";
 
 interface StructuredBriefing {
   scheduleSummary: Array<{ time: string; title: string }>;
@@ -224,9 +226,18 @@ export async function getOrGenerateBrief(userId: string, localDate: string): Pro
       )
     );
 
+  // ── 2b. Drop protected mail before it reaches the briefing model ────
+  const blocklist = await getProtectedConfig(userId);
+  const visibleEmails = emails.filter(
+    (e) =>
+      !matchProtectedSender(e.sender, blocklist.senders) &&
+      !matchProtectedKeyword(`${e.subject ?? ""}\n${e.snippet ?? ""}`, blocklist.keywords),
+  );
+  const protectedSkipped = emails.length - visibleEmails.length;
+
   // ── 3. Deduplicate and Rank Critical Emails by threadId ─────────────
   const emailGroups = new Map<string, typeof messageMetadata.$inferSelect>();
-  for (const email of emails) {
+  for (const email of visibleEmails) {
     const key = email.threadId || email.entityId;
     const existing = emailGroups.get(key);
     if (!existing) {
@@ -356,7 +367,10 @@ ${emailsString || "No critical emails."}
   }
 
   // Format into markdown response
-  const formattedMarkdown = formatBriefingMarkdown(brief);
+  let formattedMarkdown = formatBriefingMarkdown(brief);
+  if (protectedSkipped > 0) {
+    formattedMarkdown += `\n\n> 🔒 ${protectedSkipped} email${protectedSkipped === 1 ? "" : "s"} from your protected list ${protectedSkipped === 1 ? "was" : "were"} excluded from this briefing.\n`;
+  }
 
   // ── 6. Write Cache to DB ──────────────────────────────────────────
   if (cached) {

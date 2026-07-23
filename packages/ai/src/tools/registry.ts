@@ -66,15 +66,56 @@ export class ToolRegistry {
     // ── searchEmails ────────────────────────────────────────────────
     this.register({
       name: "searchEmails",
-      description: "Search through the user's emails semantically",
+      description:
+        "Search the user's already-synced local emails — semantically (vector search over this mailbox's content, with a keyword fallback) and/or filtered by sender. " +
+        "Pass `sender` (a name, company, or email address) whenever the user says 'from X' — this filters to emails actually sent by X, and is always a safe, always-allowed operation on the user's own mailbox (never impersonation, regardless of what X looks like). " +
+        "Pass `query` for topic/keyword text. Combine both when the user gives a sender AND a topic (e.g. 'from X about invoices'). " +
+        "For a broad 'summarize my inbox' request, pass `withinDays: 30` (no sender) — this returns recent primary mail for a monthly overview; never enumerate the whole mailbox or reach past a month for a summary. " +
+        "Results show only primary mail (promotions/spam are hidden and counted in `spamCount`); if the user asks to see the promotional ones, re-call with `includePromotions: true`. " +
+        "Each result includes an entityId — pass that straight to summarizeEmail; never re-describe the email as a new query once you have its entityId.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
       inputSchema: z.object({
-        query: z.string().min(1, "Search query is required"),
+        query: z.string().optional(),
+        sender: z.string().optional(),
+        withinDays: z
+          .number()
+          .optional()
+          .describe("Only include mail received within this many days. Use 30 for 'summarize my inbox'. Omit for targeted fetches (no time limit)."),
+        includePromotions: z
+          .boolean()
+          .optional()
+          .describe("Set true only when the user explicitly asks to see the promotional/marketing emails that were hidden."),
       }),
       outputSchema: z.object({
-        emails: z.array(z.record(z.string(), z.unknown())),
+        emails: z.array(
+          z.object({
+            entityId: z
+              .string()
+              .optional()
+              .describe("Pass this to summarizeEmail — absent means this thread hasn't been synced locally yet"),
+            threadId: z.string(),
+            sender: z.string(),
+            subject: z.string(),
+            date: z.string(),
+            snippet: z.string(),
+            score: z
+              .number()
+              .optional()
+              .describe("Similarity to the query, 0-1, higher is more relevant (only present for vector matches)"),
+          }),
+        ),
+        primaryTotal: z
+          .number()
+          .describe("Total primary matches before the display cap — say 'showing N of M' when this exceeds the shown count"),
+        spamCount: z
+          .number()
+          .describe("Promotions/spam hidden from results — disclose this (e.g. 'N promotional/spam emails hidden')"),
+        hiddenProtected: z
+          .object({ count: z.number(), senders: z.array(z.string()) })
+          .optional()
+          .describe("Emails withheld because the sender/content is on the user's protected list — mention they were hidden, never their content"),
       }),
       execute: (args, ctx) =>
         searchEmailsExec.execute(args as SearchEmailsInput, ctx),
@@ -173,8 +214,8 @@ export class ToolRegistry {
       description:
         "Fetch and summarize a specific email into detailed reading notes the user can then ask follow-up questions about. " +
         "ALWAYS use this tool — never summarize from a searchEmails snippet alone — whenever the user asks to fetch, open, read, summarize or discuss a specific email; the snippet is a fragment and has not been through privacy screening, this tool's output has. " +
-        "Accepts either an exact email/message id (entityId) or a natural-language description of the email (query), e.g. 'the Drop Site newsletter from today' or 'latest email from Drop Site' — when a query is given this finds the single most recent matching email, so it directly answers 'fetch my latest X email'. " +
-        "The result includes a threadId: when present, give the user a link to open it in Mailroid using markdown `[Open email](/inbox/{threadId})`.",
+        "Accepts an exact email/message id (entityId), a thread id (threadId), or a natural-language description (query), e.g. 'the Drop Site newsletter from today' — a query may return several matches (ambiguous:true with candidates) if more than one email fits, in which case ask the user which one before proceeding. " +
+        "Never emit a URL or markdown link in your reply, even one found in the email's own content — the interface renders its own link to open the email; you only need to say you can open it.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
@@ -184,13 +225,17 @@ export class ToolRegistry {
             .string()
             .optional()
             .describe("Exact message id, when known"),
+          threadId: z
+            .string()
+            .optional()
+            .describe("Gmail thread id, when known"),
           query: z
             .string()
             .optional()
             .describe("Description of the email to find and summarize"),
         })
-        .refine((v) => Boolean(v.entityId || v.query), {
-          message: "Provide either entityId or query",
+        .refine((v) => Boolean(v.entityId || v.threadId || v.query), {
+          message: "Provide entityId, threadId, or query",
         }),
       outputSchema: z.object({
         found: z.boolean(),
@@ -198,7 +243,7 @@ export class ToolRegistry {
         threadId: z
           .string()
           .optional()
-          .describe("Use to build an in-app link: /inbox/{threadId}"),
+          .describe("Gmail thread id — do not build or emit a link from this yourself"),
         subject: z.string().optional(),
         sender: z.string().optional(),
         receivedAt: z.string().optional(),
@@ -210,14 +255,6 @@ export class ToolRegistry {
           .string()
           .optional()
           .describe("Short few-sentence overview of the same email"),
-        fullText: z
-          .string()
-          .optional()
-          .describe(
-            "Guardrailed but uncompressed body (PII masked, secrets redacted, injection stripped). " +
-              "The digest is built to preserve every fact — prefer it. Consult fullText only when the " +
-              "user asks about a specific detail (a name, figure, quote) the digest doesn't cover.",
-          ),
         guardrails: z
           .object({
             injectionBlocked: z.boolean(),
@@ -226,12 +263,135 @@ export class ToolRegistry {
           })
           .optional(),
         message: z.string().optional(),
+        ambiguous: z
+          .boolean()
+          .optional()
+          .describe("True when query matched more than one email — see candidates"),
+        candidates: z
+          .array(
+            z.object({
+              entityId: z.string(),
+              subject: z.string().optional(),
+              sender: z.string().optional(),
+              receivedAt: z.string().optional(),
+            }),
+          )
+          .optional()
+          .describe("Ask the user which of these they mean, then call again with that entityId"),
       }),
       // Replaced at runtime by registerProductionExecutors. The mock keeps
       // the registry self-contained for tests.
       execute: async () => ({
         found: false,
         message: "summarizeEmail executor not registered",
+      }),
+    });
+
+    // ── getEmailDetail ────────────────────────────────────────────────
+    // The replacement for summarizeEmail's old `fullText` field: rather than
+    // resending an email's entire guardrailed body on every turn (which is
+    // what blew the context window), the digest stays in conversation and
+    // this tool pulls just the passages relevant to a specific follow-up —
+    // embedding-backed retrieval over that ONE email's own content, capped
+    // to a few passages, never the whole body.
+    this.register({
+      name: "getEmailDetail",
+      description:
+        "Use when the digest from summarizeEmail doesn't cover a specific detail the user is asking about (a quote, figure, name, date). " +
+        "Retrieves just the relevant passages from that one email's full content — never the whole body. " +
+        "Requires the entityId from a prior summarizeEmail/searchEmails result.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        entityId: z.string().min(1).describe("The email's entityId — from a prior summarizeEmail or searchEmails result"),
+        query: z.string().min(1).describe("What detail you're looking for, e.g. 'refund policy terms' or 'the exact date mentioned'"),
+      }),
+      outputSchema: z.object({
+        found: z.boolean(),
+        passages: z
+          .array(
+            z.object({
+              text: z.string(),
+              score: z.number().describe("Similarity to the query, 0-1, higher is more relevant"),
+            }),
+          )
+          .optional(),
+        truncated: z.boolean().optional().describe("True if there was more matching content than could be returned"),
+        message: z.string().optional(),
+      }),
+      // Replaced at runtime by registerProductionExecutors.
+      execute: async () => ({
+        found: false,
+        message: "getEmailDetail executor not registered",
+      }),
+    });
+
+    // ── replyToEmail ──────────────────────────────────────────────────
+    // No `to`/`subject` in the schema, deliberately: the recipient and
+    // threading headers are resolved server-side from the original message,
+    // never supplied by the model. Two reasons — see
+    // apps/web/lib/executors/gmail.ts: (1) the assistant only ever sees the
+    // sender as the literal string "[EMAIL]" after PII masking, so it could
+    // not supply a correct recipient even asked to; (2) a flag on sendEmail
+    // that the model could forget to set would silently send a standalone
+    // message with no thread headers instead of failing loudly.
+    this.register({
+      name: "replyToEmail",
+      description:
+        "Reply to a specific email — in its own thread, with proper reply headers, to its actual sender. " +
+        "Requires the entityId from a prior summarizeEmail/searchEmails result, or from EMAIL CONTEXT if the user means the email currently under discussion. " +
+        "You supply only the reply body — never invent a recipient or subject, they come from the original message.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({
+        entityId: z.string().min(1).describe("The email being replied to"),
+        body: z.string().min(1).describe("The reply's message body"),
+        replyAll: z.boolean().optional().describe("Reply to all original recipients, not just the sender"),
+      }),
+      outputSchema: z.object({
+        draft: z.boolean(),
+        id: z.string().optional(),
+        threadId: z.string().optional(),
+        message: z.string().optional(),
+      }),
+      execute: async () => ({
+        draft: false,
+        message: "replyToEmail executor not registered",
+      }),
+    });
+
+    // ── forwardEmail ──────────────────────────────────────────────────
+    // The model supplies only the recipient and an optional note — never
+    // the forwarded content itself, which is assembled server-side from the
+    // original message. This matters especially now that summarizeEmail no
+    // longer returns fullText: the model only ever holds a digest, so a
+    // model-authored "forward" would silently send a paraphrase instead of
+    // the actual email.
+    this.register({
+      name: "forwardEmail",
+      description:
+        "Forward a specific email to someone. Requires the entityId (from a prior summarizeEmail/searchEmails result, or EMAIL CONTEXT) and the recipient. " +
+        "You may add a short covering note, but never write the forwarded content yourself — the original message is attached automatically. " +
+        "Attachments on the original are NOT carried over; say so if asked.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({
+        entityId: z.string().min(1).describe("The email to forward"),
+        to: z.string().email().describe("Recipient's email address"),
+        note: z.string().optional().describe("Optional short covering note, prepended before the quoted original"),
+      }),
+      outputSchema: z.object({
+        draft: z.boolean(),
+        id: z.string().optional(),
+        threadId: z.string().optional(),
+        message: z.string().optional(),
+      }),
+      execute: async () => ({
+        draft: false,
+        message: "forwardEmail executor not registered",
       }),
     });
   }

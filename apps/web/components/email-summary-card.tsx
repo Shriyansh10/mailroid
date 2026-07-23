@@ -20,7 +20,6 @@ import {
   SheetTrigger,
 } from "@web/components/ui/sheet";
 import { cn } from "@web/lib/utils";
-import { stashDobbieSeed } from "@web/lib/dobbie-seed";
 
 interface SummaryFlags {
   injectionBlocked: boolean;
@@ -116,6 +115,7 @@ export function EmailSummaryCard({
   const [fullText, setFullText] = useState<string | null>(initialFullText ?? null);
   const [flags, setFlags] = useState<SummaryFlags | null>(initialFlags ?? null);
   const [loading, setLoading] = useState(false);
+  const [discussLoading, setDiscussLoading] = useState(false);
 
   const handleSummarize = async (force = false) => {
     if (!entityId || loading) return;
@@ -146,25 +146,33 @@ export function EmailSummaryCard({
     }
   };
 
-  // Hands this email to a fresh Dobbie chat: stash the guardrailed digest in
-  // sessionStorage (never the raw body — the chat only ever sees what already
-  // passed PII/secret/injection screening) and navigate with ?discuss=
-  // carrying just the id, which is what lets the assistant page's effect
-  // re-fire even when it's the same route being pushed to twice in a row.
-  const handleDiscuss = () => {
-    if (!entityId || !summary) return;
-    stashDobbieSeed({
-      entityId,
-      threadId,
-      subject: subject ?? "(no subject)",
-      sender: sender ?? "Unknown sender",
-      receivedAt,
-      digest: digest || summary,
-      overview: summary,
-      fullText: fullText ?? undefined,
-      guardrails: flags,
-    });
-    router.push(`/assistant?discuss=${encodeURIComponent(entityId)}`);
+  // Hands this email to a fresh Dobbie chat. The server (POST
+  // /api/chat/seed) re-derives the summary and persists the "assistant
+  // called summarizeEmail" round-trip itself — nothing about the email's
+  // content is ever passed through the client for this, only the id.
+  const handleDiscuss = async () => {
+    if (!entityId || discussLoading) return;
+    setDiscussLoading(true);
+    try {
+      const res = await fetch("/api/chat/seed", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
+        },
+        body: JSON.stringify({ entityId }),
+      });
+      const data = await res.json();
+      if (!res.ok) {
+        toast.error(data.error ?? "Could not start a chat about this email");
+        return;
+      }
+      router.push(`/assistant?conversationId=${encodeURIComponent(data.conversationId)}`);
+    } catch {
+      toast.error("Could not reach the assistant");
+    } finally {
+      setDiscussLoading(false);
+    }
   };
 
   const masked = flags?.maskedCategories ?? [];
@@ -275,9 +283,10 @@ export function EmailSummaryCard({
             <Button
               size="sm"
               onClick={handleDiscuss}
+              disabled={discussLoading}
               className="gap-1.5 bg-[#b08d57] text-white hover:bg-[#8c6f37] text-xs h-8"
             >
-              <BotIcon className="size-3.5" />
+              {discussLoading ? <Spinner className="size-3.5" /> : <BotIcon className="size-3.5" />}
               Discuss with Dobbie
             </Button>
             <button

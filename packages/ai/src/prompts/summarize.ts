@@ -1,7 +1,7 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import { detectSensitive } from "../security/detector.ts";
-import { sanitizeText } from "../security/sanitizer.ts";
+import { sanitizeText, neutralizeContentLinks } from "../security/sanitizer.ts";
 import { maskPII, type PIICategory } from "../security/pii.ts";
 import {
   analyzeDocument,
@@ -29,7 +29,14 @@ import {
 //                         blocking: real emails quote "ignore all previous
 //                         instructions" (forwarded phishing, security
 //                         newsletters) and refusing those would be its own bug.
-//   4. Delimiting       — what survives is fenced as untrusted data.
+//   4. Link neutralization — bare content URLs replaced with a domain-only
+//                         placeholder ([link: example.com]) via
+//                         neutralizeContentLinks. A sender-controlled URL
+//                         reproduced by the assistant as "open this email
+//                         here" is a phishing vector; the domain alone is
+//                         still useful ("the article links to X") without
+//                         being a clickable target.
+//   5. Delimiting       — what survives is fenced as untrusted data.
 // Scrubbing happens ONCE, before analysis and segmentation, so no stage can
 // see unscrubbed text and no pattern straddling a segment boundary is missed.
 
@@ -339,7 +346,10 @@ export async function summarizeEmail(input: {
 
   // 2. Scrub once, up front — every later stage sees only sanitized text.
   const scrubbed = sanitizeText(rawBody, "summarize.body").sanitized;
-  const { masked, categories } = maskPII(scrubbed);
+  const { masked: piiMasked, categories } = maskPII(scrubbed);
+  // Content-link neutralization runs last, on the PII-masked text, so the
+  // digest-generation model below never sees a live URL to reproduce.
+  const masked = neutralizeContentLinks(piiMasked).sanitized;
   const safeSubject = maskPII(
     sanitizeText(input.subject ?? "", "summarize.subject").sanitized,
   ).masked;
@@ -453,9 +463,11 @@ export async function summarizeEmail(input: {
   if (!quick) quick = trimToBoundary(digest, 400);
 
   // 6. Output-side guard: the model saw masked text, but output that
-  //    reconstructs an identifier must not be stored either.
+  //    reconstructs an identifier — or a URL, if a model paraphrases one back
+  //    in from context — must not be stored either.
   const guard = (t: string) =>
-    maskPII(sanitizeText(t, "summarize.output").sanitized).masked;
+    neutralizeContentLinks(maskPII(sanitizeText(t, "summarize.output").sanitized).masked)
+      .sanitized;
 
   return {
     summary: guard(quick),

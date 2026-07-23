@@ -12,10 +12,17 @@ export const ChatMessageSchema = z.object({
 export type ChatMessage = z.infer<typeof ChatMessageSchema>;
 
 // ── Chat request ─────────────────────────────────────────────────────
+//
+// Deliberately just { conversationId?, message } — no messages[] array, and
+// no system prompt. The client used to send the FULL conversation plus a
+// self-built system prompt on every turn, and the server trusted it
+// verbatim (a crafted POST could replace the SENDER IDENTITY rules). The
+// server now loads history from the database and builds the system prompt
+// itself; the client only ever contributes the one new user message.
 
 export const ChatRequestSchema = z.object({
-  messages: z.array(ChatMessageSchema).min(1),
   conversationId: z.string().optional().nullable(),
+  message: z.string().min(1),
 });
 
 export type ChatRequest = z.infer<typeof ChatRequestSchema>;

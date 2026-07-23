@@ -10,7 +10,10 @@ export {
   DEFAULT_PRIORITY_PROFILE,
   sanitizeDomainInput,
   sanitizeTagInput,
+  sanitizeEmailInput,
   normalizePriorityProfile,
+  matchProtectedSender,
+  matchProtectedKeyword,
 } from "./schemas/priority-profile.ts";
 export type {
   PriorityProfile,

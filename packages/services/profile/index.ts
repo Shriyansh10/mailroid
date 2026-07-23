@@ -112,6 +112,8 @@ export async function upsertPriorityProfile(
 export interface UserClassificationContext {
   context: ClassificationContext;
   mutedDomains: string[];
+  protectedSenders: string[];
+  protectedKeywords: string[];
   preferences: { githubNotifications: boolean };
 }
 
@@ -136,6 +138,8 @@ export async function getClassificationContext(
     ? {
         context: buildClassificationContext({ profile: record.data }),
         mutedDomains: record.data.senders.mutedDomains,
+        protectedSenders: record.data.senders.protectedSenders ?? [],
+        protectedKeywords: record.data.senders.protectedKeywords ?? [],
         preferences: {
           githubNotifications: record.data.preferences.githubNotifications,
         },
@@ -144,4 +148,27 @@ export async function getClassificationContext(
 
   contextCache.set(userId, { value, expiresAt: Date.now() + CONTEXT_TTL_MS });
   return value;
+}
+
+// ── Protected-sender/keyword blocklist (read-path enforcement) ────────
+
+export interface ProtectedConfig {
+  /** Lowercased protected sender addresses. */
+  senders: Set<string>;
+  /** Lowercased protected content keywords. */
+  keywords: string[];
+}
+
+/**
+ * The blocklist a read path checks before handing any email to the assistant.
+ * Backed by the same 60s classification-context cache, so a summarize/search
+ * batch does at most one profile read per minute. Empty when the user has no
+ * profile or an empty list.
+ */
+export async function getProtectedConfig(userId: string): Promise<ProtectedConfig> {
+  const ctx = await getClassificationContext(userId);
+  return {
+    senders: new Set((ctx?.protectedSenders ?? []).map((s) => s.toLowerCase())),
+    keywords: (ctx?.protectedKeywords ?? []).map((k) => k.toLowerCase()),
+  };
 }

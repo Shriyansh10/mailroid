@@ -23,6 +23,13 @@ const DEEPSEEK_BASE_URL =
 const DEEPSEEK_CHAT_MODEL =
   (process.env.DEEPSEEK_CHAT_MODEL ?? "deepseek-chat").trim();
 
+// gpt-4o-mini's real context window — this deployment's DEEPSEEK_CHAT_MODEL
+// is actually set to "gpt-4o-mini" against DEEPSEEK_BASE_URL=api.openai.com,
+// despite the DeepSeek-branded env var names. Powers the assistant UI's
+// context-usage indicator. Update this if DEEPSEEK_CHAT_MODEL is ever
+// pointed at a different model with a different window size.
+export const MODEL_CONTEXT_WINDOW_TOKENS = 128_000;
+
 export const deepseek = new OpenAI({
   apiKey: (process.env.DEEPSEEK_API_KEY ?? "").trim(),
   baseURL: DEEPSEEK_BASE_URL,

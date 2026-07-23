@@ -13,6 +13,8 @@ export const SecurityEventType = {
   SECRET_REDACTED: "SECRET_REDACTED",
   PROMPT_INJECTION_DETECTED: "PROMPT_INJECTION_DETECTED",
   PROMPT_INJECTION_REDACTED: "PROMPT_INJECTION_REDACTED",
+  CONTENT_LINK_DETECTED: "CONTENT_LINK_DETECTED",
+  CONTENT_LINK_REDACTED: "CONTENT_LINK_REDACTED",
 } as const;
 
 export type SecurityEventType = (typeof SecurityEventType)[keyof typeof SecurityEventType];
@@ -26,6 +28,7 @@ export const SensitivityCategory = {
   TOKEN: "TOKEN",
   SECRET: "SECRET",
   PROMPT_INJECTION: "PROMPT_INJECTION",
+  CONTENT_LINK: "CONTENT_LINK",
 } as const;
 
 export type SensitivityCategory = (typeof SensitivityCategory)[keyof typeof SensitivityCategory];
@@ -50,6 +53,8 @@ export interface DetectionResult {
     pattern: string;
     start: number;
     end: number;
+    /** Per-match replacement text, when the fixed REPLACEMENTS[category] label isn't right (e.g. a domain-preserving link placeholder). */
+    replacement?: string;
   }>;
 }
 

@@ -120,7 +120,9 @@ export class ToolOrchestrator {
           }
 
           const approvalId = crypto.randomUUID();
-          const preview = generatePreview(toolName, rawArgs, ctx.userTimeZone, ctx.userEmail);
+          const preview = tool.buildPreview
+            ? await tool.buildPreview(rawArgs, { userId, userTimeZone: ctx.userTimeZone, userEmail: ctx.userEmail })
+            : generatePreview(toolName, rawArgs, ctx.userTimeZone, ctx.userEmail);
 
           await this.approvalStore.create({
             id: approvalId,
@@ -194,7 +196,7 @@ export class ToolOrchestrator {
     }
 
     // ── 4. WriteGuard — security checks on validated data ──────────
-    if (toolName === "sendEmail" || toolName === "createEvent") {
+    if (toolName === "sendEmail" || toolName === "createEvent" || toolName === "replyToEmail" || toolName === "forwardEmail") {
       const guardResult = writeGuard.evaluate(
         toolName,
         parsedArgs.data as Record<string, unknown>,

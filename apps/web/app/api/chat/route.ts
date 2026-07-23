@@ -13,10 +13,17 @@ import {
   AuditEventType,
   deepseek,
   DEEPSEEK_CHAT_MODEL,
+  MODEL_CONTEXT_WINDOW_TOKENS,
+  type ChatMessage,
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
+import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
+import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel } from "@web/lib/assistant/history";
+import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
+import { getProtectedConfig } from "@repo/services/profile/index";
+import { matchProtectedKeyword } from "@repo/shared";
 
 export const runtime = "nodejs";
 
@@ -31,6 +38,14 @@ const orchestrator = new ToolOrchestrator(registry, permissions, audit, approval
 
 /**
  * POST /api/chat
+ *
+ * Server-authoritative: the client sends only { conversationId?, message }.
+ * Conversation history and the system prompt are both built here, from the
+ * database and the authenticated session — never from client input. The
+ * client used to send the full message array AND a self-built system
+ * prompt (as messages[0]), and both this route and /api/approvals/approve
+ * trusted it verbatim; a crafted POST could replace the SENDER IDENTITY
+ * rules or forge a fake tool result. See apps/web/lib/assistant/.
  */
 export async function POST(request: Request) {
   const start = Date.now();
@@ -63,27 +78,23 @@ export async function POST(request: Request) {
     const userId = session.user.id;
     console.log("[api:chat] authenticated userId:", userId);
 
-    // ── Jailbreak scan on user messages ───────────────────────────
-    const lastUserMessage = [...parsed.data.messages]
-      .reverse()
-      .find((m) => m.role === "user");
-    if (lastUserMessage) {
-      const injectionMatches = detectPromptInjection(lastUserMessage.content || "");
-      if (injectionMatches.length > 0) {
-        console.log(
-          `[SECURITY] ${AuditEventType.POLICY_BYPASS_ATTEMPT} | ` +
-          `user=${userId} | ` +
-          `matches=${injectionMatches.length} | ` +
-          `patterns=${injectionMatches.map((m) => m.pattern.slice(0, 40)).join(", ")}`,
-        );
-      }
+    const userMessageText = parsed.data.message;
+
+    // ── Jailbreak scan on the incoming user message ────────────────
+    const injectionMatches = detectPromptInjection(userMessageText);
+    if (injectionMatches.length > 0) {
+      console.log(
+        `[SECURITY] ${AuditEventType.POLICY_BYPASS_ATTEMPT} | ` +
+        `user=${userId} | ` +
+        `matches=${injectionMatches.length} | ` +
+        `patterns=${injectionMatches.map((m) => m.pattern.slice(0, 40)).join(", ")}`,
+      );
     }
 
     // ── Ensure conversation exists ─────────────────────────────────
     let conversationId = parsed.data.conversationId;
     if (!conversationId) {
-      const userText = lastUserMessage?.content || "New Chat";
-      const title = userText.length > 60 ? userText.slice(0, 57) + "..." : userText;
+      const title = userMessageText.length > 60 ? userMessageText.slice(0, 57) + "..." : userMessageText;
 
       const [newConv] = await db
         .insert(conversations)
@@ -135,7 +146,7 @@ export async function POST(request: Request) {
         for (const p of pending) {
           if (convToolCallIds.has(p.toolCallId)) {
             console.log(`[api:chat] Abandoned approval found: ${p.id}. Cancelling and writing terminal tool message.`);
-            
+
             await db
               .update(pendingApprovals)
               .set({
@@ -157,15 +168,44 @@ export async function POST(request: Request) {
     }
 
     // ── Persist incoming user prompt ──────────────────────────────
-    if (lastUserMessage) {
-      await db.insert(assistantMessages).values({
-        conversationId,
-        role: "user",
-        content: lastUserMessage.content || "",
-      });
-    }
+    await db.insert(assistantMessages).values({
+      conversationId,
+      role: "user",
+      content: userMessageText,
+    });
 
     const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+
+    // ── Protected-keyword short-circuit ─────────────────────────────
+    // If the user's own message mentions a protected keyword (e.g. "otp"),
+    // refuse deterministically here instead of running the agent loop —
+    // search would silently strip matching emails anyway, and relying on
+    // the model to notice and disclose that clearly is unreliable (it has
+    // padded refusals with unrelated results in the past). See BUGS.md.
+    const protectedConfig = await getProtectedConfig(userId);
+    const matchedKeyword = matchProtectedKeyword(userMessageText, protectedConfig.keywords);
+    if (matchedKeyword) {
+      const refusal =
+        "That relates to content on your protected list, so I can't search for or show it. " +
+        "You can review or edit your protected keywords in Settings → Personalization.";
+
+      await db.insert(assistantMessages).values({
+        conversationId,
+        role: "assistant",
+        content: refusal,
+      });
+
+      await db
+        .update(conversations)
+        .set({ lastMessagePreview: refusal.slice(0, 100), updatedAt: new Date() })
+        .where(eq(conversations.id, conversationId));
+
+      return NextResponse.json({
+        content: refusal,
+        conversationId,
+        newMessages: [{ role: "assistant", content: refusal }],
+      });
+    }
 
     // ── Check Daily Action Limit ───────────────────────────────────
     const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
@@ -176,14 +216,49 @@ export async function POST(request: Request) {
       );
     }
 
+    // ── Build the model's view of the conversation, server-side ────
+    const [history, emailContext] = await Promise.all([
+      loadConversationHistory(conversationId),
+      getActiveEmailContext(conversationId, userId),
+    ]);
+
+    const systemPrompt = buildSystemPrompt({ userTimeZone: userTimeZone ?? "UTC", userEmail: session.user.email, emailContext });
+    const trimmedHistory = trimHistoryForModel(history);
+
+    const agentMessages: ChatMessage[] = [
+      { role: "system", content: systemPrompt },
+      ...trimmedHistory.map((m) => ({
+        role: m.role,
+        content: m.content,
+        tool_calls: m.tool_calls as any,
+        tool_call_id: m.tool_call_id,
+      })),
+    ];
+
     // ── Run agent loop (DeepSeek + tool calling) ───────────────────
-    const { response, newMessages } = await runAgentLoop({
-      messages: parsed.data.messages,
+    const { response, newMessages, contextChars } = await runAgentLoop({
+      messages: agentMessages,
       registry,
       execute: (name, args) =>
         orchestrator.executeTool(name, args, userId, crypto.randomUUID(), false, userTimeZone, session.user.email),
       userId,
+      deriveToolMessageMetadata,
     });
+
+    // ── Context-window usage, for the assistant UI's indicator ─────
+    // Measured against the model's real context window (gpt-4o-mini, 128K
+    // tokens — see MODEL_CONTEXT_WINDOW_TOKENS). Note this is much larger
+    // than the ~60K-char budget trimHistoryForModel actually enforces, so
+    // this bar will usually read low even when older turns have already
+    // started getting trimmed from what the model sees — it answers "how
+    // full is the model's real window", not "has trimming kicked in yet".
+    // ~4 chars/token is the standard rough estimate for English text.
+    const contextUsedTokens = Math.ceil(contextChars / 4);
+    const contextUsage = {
+      usedTokens: contextUsedTokens,
+      maxTokens: MODEL_CONTEXT_WINDOW_TOKENS,
+      percentUsed: Math.min(100, Math.round((contextUsedTokens / MODEL_CONTEXT_WINDOW_TOKENS) * 100)),
+    };
 
     // ── Beautification pass: convert raw tables to natural language ──
     if (!("approvalRequired" in response) && response.content) {
@@ -205,6 +280,7 @@ export async function POST(request: Request) {
           content: m.content,
           toolCalls: m.toolCalls,
           toolCallId: m.toolCallId,
+          metadata: m.metadata ?? null,
         }))
       );
     }
@@ -223,7 +299,7 @@ export async function POST(request: Request) {
 
     console.log("[api:chat:success]", {
       durationMs: Date.now() - start,
-      messageCount: parsed.data.messages.length,
+      historyMessageCount: trimmedHistory.length,
       responseLen: response.content.length,
       approvalRequired: "approvalRequired" in response ? response.approvalRequired.toolName : undefined,
     });
@@ -267,11 +343,17 @@ export async function POST(request: Request) {
       ...response,
       conversationId,
       newMessages,
+      contextUsage,
     });
   } catch (error) {
     console.error("[api:chat:error]", {
       durationMs: Date.now() - start,
       error: error instanceof Error ? error.message : String(error),
+      stack: error instanceof Error ? error.stack : undefined,
+      // DeepSeek/OpenAI SDK errors carry the real reason (context length,
+      // rate limit, etc.) in these fields, not in `.message`.
+      status: (error as { status?: number })?.status,
+      body: (error as { error?: unknown })?.error,
     });
 
     return NextResponse.json(

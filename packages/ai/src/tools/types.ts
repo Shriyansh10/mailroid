@@ -91,6 +91,20 @@ export interface ToolDefinition<
     args: z.infer<TInput>,
     ctx: ToolExecutionContext,
   ) => Promise<z.infer<TOutput>>;
+  /**
+   * Optional per-tool approval-preview builder, checked before the generic
+   * arg-only fallback in orchestrator.ts's generatePreview(). Exists because
+   * some tools (replyToEmail, forwardEmail) don't have their real recipient
+   * in `args` at all — it's resolved from the original message at execution
+   * time, in the executor layer (apps/web), which the orchestrator
+   * (packages/ai) has no dependency on and must not acquire one just to
+   * preview a send. Registered by registerProductionExecutors alongside
+   * `execute`, same pattern as swapping in the real implementation.
+   */
+  buildPreview?: (
+    args: Record<string, unknown>,
+    ctx: { userId: string; userTimeZone?: string; userEmail?: string },
+  ) => Promise<string> | string;
 }
 
 // ── Tool call (from LLM / API) ───────────────────────────────────────

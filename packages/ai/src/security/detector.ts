@@ -7,10 +7,16 @@ import {
 // ── Regex patterns per category ────────────────────────────────────────
 
 const OTP_PATTERNS = [
+  // Keyword-before-number: "OTP: 123456", "verification code is 123456".
   /\b(?:OTP|otp)\s*(?:is|:|\s)?\s*(\d{4,8})\b/gi,
   /(?:verification|confirmation|auth(?:entication)?)\s*(?:code|pin)\s*(?:is|:|\s)?\s*(\d{4,8})\b/gi,
   /\buse\s+(\d{4,8})\s+to\s+(?:login|sign\s*in|verify|authenticate)\b/gi,
   /(?:your|the)\s*(?:one[- ]?time\s*(?:password|code|pin)|2fa\s*code)\s*(?:is|:)\s*(\d{4,8})\b/gi,
+  // Number-before-keyword: real bank/OTP mails almost always read this way
+  // ("968137 is the OTP for your txn", "use 450195 as OTP"). The keyword must
+  // stay adjacent to the digits, so plain amounts/order-ids aren't touched.
+  /\b(\d{4,8})\s+(?:is\s+)?(?:the\s+|your\s+)?(?:OTP|one[- ]?time\s*(?:password|code|pin))\b/gi,
+  /\buse\s+(\d{4,8})\s+as\s+(?:your\s+|the\s+)?(?:OTP|verification\s*code|pin)\b/gi,
 ];
 
 const RESET_LINK_PATTERNS = [
@@ -45,13 +51,19 @@ const SECRET_PATTERNS = [
   /\b(?:secret|client_secret|encryption_key)\s*=\s*[A-Za-z0-9+/=]{20,}/gi,
 ];
 
+// Any http(s) URL. Content-link detection runs AFTER reset-link detection
+// and skips spans already claimed there, so a password-reset URL is redacted
+// once, as RESET_LINK, not twice.
+const GENERIC_URL_PATTERN = /\bhttps?:\/\/[^\s<>"')\]]+/gi;
+
 // ── Match helper ───────────────────────────────────────────────────────
 
-interface Match {
+export interface Match {
   category: SensitivityCategory;
   pattern: string;
   start: number;
   end: number;
+  replacement?: string;
 }
 
 function collectMatches(
@@ -102,4 +114,56 @@ export function detectSensitive(text: string): DetectionResult {
 
 export function isSensitive(text: string): boolean {
   return detectSensitive(text).isSensitive;
+}
+
+function extractDomain(url: string): string {
+  try {
+    return new URL(url).hostname.replace(/^www\./i, "");
+  } catch {
+    return "link";
+  }
+}
+
+/**
+ * Detects bare content URLs — the email-summarization guardrail's own pass,
+ * kept separate from detectSensitive/sanitizeText deliberately: those run on
+ * EVERY tool's output (calendar, search, ...) via sanitizeToolOutput, and a
+ * calendar event's Zoom/Meet link is legitimate content Dobbie should relay,
+ * not something to strip. This only feeds the email body/digest path in
+ * prompts/summarize.ts, where an unlabeled URL from attacker-controlled
+ * email content becomes a phishing vector if presented back as a link.
+ *
+ * Each match carries a domain-preserving `replacement` (e.g. "[link:
+ * example.com]") rather than a fixed label, since the whole point is to keep
+ * "the article links to example.com" answerable without handing back a live,
+ * clickable, sender-chosen target.
+ */
+export function collectContentLinkMatches(text: string): Match[] {
+  if (!text) return [];
+
+  const claimedSpans = collectMatches(
+    text,
+    SensitivityCategory.RESET_LINK,
+    RESET_LINK_PATTERNS,
+  ).map((m) => ({ start: m.start, end: m.end }));
+
+  const results: Match[] = [];
+  const regex = new RegExp(GENERIC_URL_PATTERN.source, GENERIC_URL_PATTERN.flags);
+  let m: RegExpExecArray | null;
+  while ((m = regex.exec(text)) !== null) {
+    const start = m.index;
+    const end = start + m[0].length;
+    const overlapsClaimed = claimedSpans.some((s) => start < s.end && end > s.start);
+    if (!overlapsClaimed) {
+      results.push({
+        category: SensitivityCategory.CONTENT_LINK,
+        pattern: "generic-url",
+        start,
+        end,
+        replacement: `[link: ${extractDomain(m[0])}]`,
+      });
+    }
+    if (m[0].length === 0) regex.lastIndex++;
+  }
+  return results;
 }
