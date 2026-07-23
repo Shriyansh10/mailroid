@@ -18,7 +18,8 @@
     "./models/daily-briefs": "./models/daily-briefs.ts",
     "./models/gmail-sync-status": "./models/gmail-sync-status.ts",
     "./models/classification-jobs": "./models/classification-jobs.ts",
-    "./models/user-priority-profile": "./models/user-priority-profile.ts"
+    "./models/user-priority-profile": "./models/user-priority-profile.ts",
+    "./models/email-chunks": "./models/email-chunks.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

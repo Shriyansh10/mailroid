@@ -135,6 +135,10 @@ snippet: text("snippet"),
     ),
     index("idx_mm_user_category").on(table.userId, table.category),
     index("idx_mm_user_received").on(table.userId, table.receivedAt),
+    // Supports the summarize resolver's entityId->threadId fallback (a model
+    // sometimes hands back a thread id where a message id was expected) and
+    // searchEmails' thread->newest-message-id lookup.
+    index("idx_mm_user_thread").on(table.userId, table.threadId),
     // Supports the historical classification batch query: WHERE user_id = ?
     // AND classification_status = 'PENDING' ORDER BY received_at DESC.
     index("idx_mm_user_class_status_received").on(
