@@ -903,7 +903,6 @@ export async function ingestMessage(
     to,
     snippet,
     bodyText,
-    rawPayload: raw,
     receivedAt: isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
     lastSyncedAt: new Date(),
   };
@@ -921,7 +920,6 @@ export async function ingestMessage(
         to: emailRow.to,
         snippet: emailRow.snippet,
         bodyText: emailRow.bodyText,
-        rawPayload: emailRow.rawPayload,
         receivedAt: emailRow.receivedAt,
         lastSyncedAt: emailRow.lastSyncedAt,
         updatedAt: new Date(),
