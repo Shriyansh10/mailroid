@@ -19,7 +19,9 @@
     "./models/gmail-sync-status": "./models/gmail-sync-status.ts",
     "./models/classification-jobs": "./models/classification-jobs.ts",
     "./models/user-priority-profile": "./models/user-priority-profile.ts",
-    "./models/email-chunks": "./models/email-chunks.ts"
+    "./models/email-chunks": "./models/email-chunks.ts",
+    "./models/ai-setup-status": "./models/ai-setup-status.ts",
+    "./models/mail-templates": "./models/mail-templates.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

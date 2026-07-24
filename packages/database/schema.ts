@@ -16,3 +16,5 @@ export * from './models/gmail-sync-status';
 export * from './models/classification-jobs';
 export * from './models/user-priority-profile';
 export * from './models/email-chunks';
+export * from './models/ai-setup-status';
+export * from './models/mail-templates';

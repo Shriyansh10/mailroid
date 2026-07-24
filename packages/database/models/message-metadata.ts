@@ -133,6 +133,18 @@ snippet: text("snippet"),
     classificationStatus: text("classification_status").notNull().default("PENDING"),
     classificationAttempts: integer("classification_attempts").notNull().default(0),
 
+    // Mirrors classificationStatus/classificationAttempts above, but for the separate
+    // hydration pipeline (fetching the full body into `emails.bodyText` so it can be
+    // embedded). PENDING -> HYDRATING (claimed by a batch, before the Gmail fetch) ->
+    // DONE or FAILED. HYDRATING (not just PENDING/DONE) exists so a worker/container
+    // crash mid-fetch leaves a row distinguishable from "never picked up" — the
+    // reconciliation cron resets stale HYDRATING rows back to PENDING. FAILED means
+    // Gmail confirmed the message is permanently gone (404/410) and is never retried by
+    // the normal batch loop; it is NOT a dead end — a future retry/backfill action can
+    // reset FAILED -> PENDING (same shape as retryFailedClassifications).
+    hydrationStatus: text("hydration_status").notNull().default("PENDING"),
+    hydrationAttempts: integer("hydration_attempts").notNull().default(0),
+
     lastClassifiedAt: timestamp("last_classified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -171,6 +183,13 @@ snippet: text("snippet"),
     index("idx_mm_user_class_status_received").on(
       table.userId,
       table.classificationStatus,
+      table.receivedAt,
+    ),
+    // Same shape, for the hydration batch query: WHERE user_id = ? AND
+    // hydration_status = 'PENDING' ORDER BY received_at DESC.
+    index("idx_mm_user_hydration_status_received").on(
+      table.userId,
+      table.hydrationStatus,
       table.receivedAt,
     ),
     // Supports the cheap per-user inbox change token: max(updated_at) filtered

@@ -197,6 +197,20 @@
       "when": 1784903221958,
       "tag": "0029_new_dark_beast",
       "breakpoints": true
+    },
+    {
+      "idx": 30,
+      "version": "7",
+      "when": 1784923750191,
+      "tag": "0030_smart_flatman",
+      "breakpoints": true
+    },
+    {
+      "idx": 31,
+      "version": "7",
+      "when": 1784931472125,
+      "tag": "0031_fluffy_jack_murdock",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, jsonb, customType } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, customType } from "drizzle-orm/pg-core";
 
 /**
  * Custom vector type for pgvector PostgreSQL extension.
@@ -29,7 +29,6 @@ export const emails = pgTable("emails", {
   to: text("to"),
   snippet: text("snippet"),
   bodyText: text("body_text"),
-  rawPayload: jsonb("raw_payload"),
   receivedAt: timestamp("received_at", { withTimezone: true }),
   embedding: vector("embedding"),
   lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
