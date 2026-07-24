@@ -1,6 +1,7 @@
 import { corsair } from "@repo/corsair";
-import { db, eq } from "@repo/database";
+import { db, eq, and, inArray } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
+import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 import { generateMissingEmbeddings, ingestMessage } from "./index.js";
@@ -95,6 +96,48 @@ async function ingestAllOrThrow(
   }
 }
 
+/**
+ * Mirror a Gmail deletion into an archive flag instead of a delete.
+ *
+ * Gmail empties its own Bin after ~30 days and emits `messagesDeleted` for
+ * each purged message. Mailroid deliberately does NOT follow it into oblivion:
+ * we flip `is_archived`, which removes the row from every view (Bin included)
+ * while keeping the content, so mail that has aged out of Gmail is still ours
+ * to search and summarise. This is why there is no local retention timer —
+ * Gmail's purge IS the trigger.
+ *
+ * Chunked because a single emptied Bin can name thousands of ids at once, and
+ * Postgres has a bind-parameter ceiling.
+ */
+async function archiveDeletedMessages(
+  tenantId: string,
+  messageIds: string[],
+): Promise<void> {
+  const CHUNK = 500;
+  let archived = 0;
+
+  for (let i = 0; i < messageIds.length; i += CHUNK) {
+    const chunk = messageIds.slice(i, i + CHUNK);
+    const result = await db
+      .update(messageMetadata)
+      .set({ isArchived: true, updatedAt: new Date() })
+      .where(
+        and(
+          eq(messageMetadata.userId, tenantId),
+          inArray(messageMetadata.entityId, chunk),
+        ),
+      )
+      .returning({ entityId: messageMetadata.entityId });
+    archived += result.length;
+  }
+
+  logger.info("[WEBHOOK_SYNC] archived messages deleted in Gmail", {
+    tenantId,
+    reported: messageIds.length,
+    archived,
+  });
+}
+
 export type SyncHistoryOutcome =
   | "no-mapping"
   | "bootstrapped"
@@ -183,6 +226,9 @@ export async function syncHistoryForTenant(
   // with tens of thousands of runs carrying *distinct* historyIds.
   const newMessageIds = new Set<string>();
   const changedMessageIds = new Set<string>();
+  // Messages Gmail has permanently removed — chiefly its ~30-day Trash purge.
+  // These are archived locally, never deleted (see archiveDeletedMessages).
+  const deletedMessageIds = new Set<string>();
   let nextPageToken: string | undefined;
 
   do {
@@ -216,6 +262,8 @@ export async function syncHistoryForTenant(
       history?: Array<{
         messagesAdded?: Array<{ message?: { id?: string } }>;
         labelsAdded?: Array<{ message?: { id?: string } }>;
+        labelsRemoved?: Array<{ message?: { id?: string } }>;
+        messagesDeleted?: Array<{ message?: { id?: string } }>;
       }>;
       nextPageToken?: string;
     };
@@ -227,6 +275,15 @@ export async function syncHistoryForTenant(
       for (const labelRecord of record.labelsAdded ?? []) {
         if (labelRecord.message?.id) changedMessageIds.add(labelRecord.message.id);
       }
+      // Label REMOVALS matter as much as additions now that state is two-way:
+      // un-starring or restoring from Bin in Gmail is a removal, and ignoring
+      // it left Mailroid showing a star Gmail no longer has.
+      for (const labelRecord of record.labelsRemoved ?? []) {
+        if (labelRecord.message?.id) changedMessageIds.add(labelRecord.message.id);
+      }
+      for (const deleted of record.messagesDeleted ?? []) {
+        if (deleted.message?.id) deletedMessageIds.add(deleted.message.id);
+      }
     }
 
     nextPageToken = data.nextPageToken;
@@ -236,6 +293,14 @@ export async function syncHistoryForTenant(
   // diff). It is new mail in that case, so drop it from the label-only group
   // rather than ingesting it twice.
   for (const id of newMessageIds) changedMessageIds.delete(id);
+
+  // A message deleted later in the same diff must not be ingested first — the
+  // fetch would 404 and (per ingestMessage's isMessageGone guard) be skipped
+  // anyway, so this just avoids the wasted round trips.
+  for (const id of deletedMessageIds) {
+    newMessageIds.delete(id);
+    changedMessageIds.delete(id);
+  }
 
   // Store every email FIRST — both calls throw (and therefore skip the cursor
   // advance below) if any message failed to ingest. This is the fix for the
@@ -254,6 +319,12 @@ export async function syncHistoryForTenant(
   // by the batch classifier from PENDING.
   if (changedMessageIds.size > 0) {
     await ingestAllOrThrow(tenantId, Array.from(changedMessageIds), incomingHistoryId, false);
+  }
+
+  // Before the cursor advances, like the ingests above: if this throws, the
+  // diff is retried rather than the deletion being silently missed.
+  if (deletedMessageIds.size > 0) {
+    await archiveDeletedMessages(tenantId, Array.from(deletedMessageIds));
   }
 
   await db

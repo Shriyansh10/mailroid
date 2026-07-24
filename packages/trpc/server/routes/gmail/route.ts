@@ -4,6 +4,20 @@ import { generatePath } from "../../utils/path-generator.js";
 import { logger } from "@repo/logger";
 
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
+import {
+  trashThread,
+  untrashThread,
+  setThreadStarred,
+  replyToEmail,
+  forwardEmail,
+} from "@repo/services/gmail/index.js";
+import {
+  getDraft,
+  createDraft,
+  updateDraft,
+  sendDraft,
+  discardDraft,
+} from "@repo/services/gmail/drafts.js";
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
 import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
@@ -99,6 +113,155 @@ export const gmailRouter = router({
         durationMs: Date.now() - startMs,
       });
       return result;
+    }),
+
+  // Entity-id based, unlike `send`: recipient and threading headers
+  // (In-Reply-To/References) are derived server-side from the actual message
+  // fetched fresh from Gmail — see resolveReplyTarget in
+  // packages/services/gmail/index.ts. This is what keeps a reply in the same
+  // Gmail conversation; the generic `send` mutation only carries `threadId`,
+  // which Gmail treats as a grouping hint, not the header a client (or
+  // another mail client entirely) needs to see the thread stay together.
+  replyToEmail: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/reply"), tags: TAGS } })
+    .input(
+      z.object({
+        entityId: z.string(),
+        body: z.string(),
+        replyAll: z.boolean().optional(),
+      }),
+    )
+    .output(sendEmailOutputModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.replyToEmail called", {
+        userId: ctx.user!.id, entityId: input.entityId, replyAll: input.replyAll,
+      });
+      return await replyToEmail(ctx.user!.id, input);
+    }),
+
+  // `to` is client-supplied (unlike reply, forwarding has no original
+  // recipient to derive) but the quoted original body and subject are always
+  // rebuilt server-side from the fetched message — see resolveForwardTarget.
+  forwardEmail: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/forward"), tags: TAGS } })
+    .input(
+      z.object({
+        entityId: z.string(),
+        to: z.string(),
+        note: z.string().optional(),
+      }),
+    )
+    .output(sendEmailOutputModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.forwardEmail called", {
+        userId: ctx.user!.id, entityId: input.entityId, to: input.to,
+      });
+      return await forwardEmail(ctx.user!.id, input);
+    }),
+
+  // ── Mailbox actions (Bin / Star) ───────────────────────────────────
+  //
+  // Thread-scoped, matching the UI: the list shows threads, so binning or
+  // starring applies to the conversation. Each writes to Gmail first and
+  // mirrors locally, so a Gmail failure surfaces as a failed mutation and the
+  // client rolls its optimistic update back.
+
+  trash: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/trash"), tags: TAGS } })
+    .input(z.object({ threadId: z.string() }))
+    .output(z.object({ success: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.trash called", { userId: ctx.user!.id, threadId: input.threadId });
+      await trashThread(ctx.user!.id, input.threadId);
+      return { success: true };
+    }),
+
+  untrash: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/untrash"), tags: TAGS } })
+    .input(z.object({ threadId: z.string() }))
+    .output(z.object({ success: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.untrash called", { userId: ctx.user!.id, threadId: input.threadId });
+      await untrashThread(ctx.user!.id, input.threadId);
+      return { success: true };
+    }),
+
+  setStarred: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-starred"), tags: TAGS } })
+    .input(z.object({ threadId: z.string(), starred: z.boolean() }))
+    .output(z.object({ success: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setStarred called", {
+        userId: ctx.user!.id, threadId: input.threadId, starred: input.starred,
+      });
+      await setThreadStarred(ctx.user!.id, input.threadId, input.starred);
+      return { success: true };
+    }),
+
+  // ── Drafts ─────────────────────────────────────────────────────────
+
+  getDraft: protectedProcedure
+    .meta({ openapi: { method: "GET", path: getPath("/draft"), tags: TAGS } })
+    .input(z.object({ draftId: z.string() }))
+    .output(
+      z.object({
+        draftId: z.string(),
+        messageId: z.string(),
+        to: z.string(),
+        subject: z.string(),
+        body: z.string(),
+        threadId: z.string().optional(),
+        isReplyToExisting: z.boolean(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.getDraft called", { userId: ctx.user!.id, draftId: input.draftId });
+      return await getDraft(ctx.user!.id, input.draftId);
+    }),
+
+  saveDraft: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/draft/save"), tags: TAGS } })
+    .input(
+      z.object({
+        to: z.string(),
+        subject: z.string(),
+        body: z.string(),
+        threadId: z.string().optional(),
+        /** Present when editing an existing draft; absent creates a new one. */
+        draftId: z.string().optional(),
+        /** The message being replied to — set for reply/reply-all drafts so In-Reply-To/References get derived, same as replyToEmail. */
+        entityId: z.string().optional(),
+        replyAll: z.boolean().optional(),
+      }),
+    )
+    .output(z.object({ draftId: z.string() }))
+    .mutation(async ({ ctx, input }) => {
+      const { draftId, ...draft } = input;
+      logger.info("[TRPC] gmail.saveDraft called", {
+        userId: ctx.user!.id, draftId: draftId ?? null, subject: draft.subject,
+      });
+      return draftId
+        ? await updateDraft(ctx.user!.id, draftId, draft)
+        : await createDraft(ctx.user!.id, draft);
+    }),
+
+  sendDraft: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/draft/send"), tags: TAGS } })
+    .input(z.object({ draftId: z.string() }))
+    .output(sendEmailOutputModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.sendDraft called", { userId: ctx.user!.id, draftId: input.draftId });
+      return await sendDraft(ctx.user!.id, input.draftId);
+    }),
+
+  discardDraft: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/draft/discard"), tags: TAGS } })
+    .input(z.object({ draftId: z.string() }))
+    .output(z.object({ success: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.discardDraft called", { userId: ctx.user!.id, draftId: input.draftId });
+      await discardDraft(ctx.user!.id, input.draftId);
+      return { success: true };
     }),
 
   search: protectedProcedure

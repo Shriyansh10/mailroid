@@ -7,6 +7,8 @@
     "dev": "dotenv -- turbo dev",
     "db:generate": "dotenv -- turbo db:generate",
     "db:migrate": "dotenv -- turbo db:migrate",
+    "admin": "dotenv -e .env -v LOGGER_LEVEL=error -- tsx packages/scripts/src/cli.ts",
+    "admin:verbose": "dotenv -e .env -- tsx packages/scripts/src/cli.ts",
     "lint": "turbo run lint",
     "format": "prettier --write \"**/*.{ts,tsx,md}\"",
     "check-types": "turbo run check-types"

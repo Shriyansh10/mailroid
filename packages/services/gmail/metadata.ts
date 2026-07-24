@@ -1,11 +1,26 @@
-import { db, eq, and, sql, desc, inArray } from "@repo/database";
+import { db, eq, and, sql, desc, inArray, notInArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import type { ThreadSummary } from "./model.ts";
 
+// Everything the full-mailbox sync walks, in order. SPAM/TRASH/DRAFT are
+// listed by label id rather than a `category:` search term (see
+// CATEGORY_TO_GMAIL_QUERY below and syncCategoryPage) — Gmail excludes all
+// three from ordinary listings, so they only arrive if asked for by name.
+// STARRED is absent on purpose: starred mail already syncs inside its real
+// category and is picked up by deriveFlags' isStarred.
 export const ALL_CATEGORIES = [
   "PRIMARY", "PROMOTIONS", "SOCIAL", "UPDATES", "FORUMS", "SENT",
+  "SPAM", "TRASH", "DRAFT",
 ];
+
+/** Categories fetched by Gmail label id instead of a `category:` search term. */
+export const CATEGORY_TO_GMAIL_LABEL: Record<string, string> = {
+  SENT: "SENT",
+  SPAM: "SPAM",
+  TRASH: "TRASH",
+  DRAFT: "DRAFT",
+};
 
 /**
  * Gmail uses CATEGORY_PERSONAL for the Primary tab, not CATEGORY_PRIMARY.
@@ -43,6 +58,26 @@ function resolveCategories(category: string): string[] {
 }
 
 /**
+ * "STARRED" is a pseudo-category: a starred email still lives in its real
+ * category (a starred promo is still PROMOTIONS), so the view filters on the
+ * is_starred flag instead of the category column. Spam and Bin are excluded —
+ * Gmail's own Starred view doesn't surface them either.
+ */
+const STARRED_VIEW = "STARRED";
+
+/**
+ * Row-level filter shared by every view: never show mail that Gmail has
+ * permanently deleted. The row is deliberately retained (see is_archived on the
+ * model) — this is what keeps it out of sight.
+ */
+function visibilityFilter(userId: string) {
+  return and(
+    eq(messageMetadata.userId, userId),
+    eq(messageMetadata.isArchived, false),
+  );
+}
+
+/**
  * Cheap per-user change token for the inbox. Returns the newest `updatedAt`
  * across the user's message metadata (in epoch ms), or 0 when the user has no
  * rows yet. `updatedAt` is bumped on every ingest and on async priority
@@ -75,6 +110,16 @@ export async function getEmailsByCategory(
   });
 
   const categories = resolveCategories(category);
+  const isStarredView = category === STARRED_VIEW;
+
+  // Starred filters on the flag across every real category; everything else
+  // filters on the category column itself.
+  const viewFilter = isStarredView
+    ? and(
+        eq(messageMetadata.isStarred, true),
+        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
+      )
+    : inArray(messageMetadata.category, categories as any[]);
 
   // Browsing the inbox never triggers a sync — see docs/architecture-plan.md Stage 0.
   // The list is served straight from the local DB; missing history is only backfilled
@@ -95,6 +140,9 @@ export async function getEmailsByCategory(
     isActionRequired: messageMetadata.isActionRequired,
     isReplyNeeded: messageMetadata.isReplyNeeded,
     isUnread: messageMetadata.isUnread,
+    isStarred: messageMetadata.isStarred,
+    category: messageMetadata.category,
+    draftId: messageMetadata.draftId,
     rn: sql<number>`
       ROW_NUMBER() OVER(
         PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -103,12 +151,7 @@ export async function getEmailsByCategory(
     `.as("rn"),
   })
   .from(messageMetadata)
-  .where(
-    and(
-      eq(messageMetadata.userId, userId),
-      inArray(messageMetadata.category, categories as any[]),
-    ),
-  )
+  .where(and(visibilityFilter(userId), viewFilter))
   .as("sq");
 
   const rows = await db
@@ -125,6 +168,9 @@ export async function getEmailsByCategory(
     isActionRequired: sq.isActionRequired,
     isReplyNeeded: sq.isReplyNeeded,
     isUnread: sq.isUnread,
+    isStarred: sq.isStarred,
+    category: sq.category,
+    draftId: sq.draftId,
   })
   .from(sq)
   .where(eq(sq.rn, 1))
@@ -146,6 +192,12 @@ export async function getEmailsByCategory(
   isActionRequired: row.isActionRequired,
   isReplyNeeded: row.isReplyNeeded,
   isUnread: row.isUnread,
+  isStarred: row.isStarred,
+  category: row.category ?? undefined,
+  // Carried so a Draft row can be reopened for editing without a second
+  // round trip to resolve its Gmail draft id.
+  draftId: row.draftId ?? undefined,
+  entityId: row.entityId,
 }));
 
 logger.info("[SERVICE]", "getEmailsByCategory completed", {
@@ -175,24 +227,37 @@ export async function getCategoryCounts(
     SOCIAL: 0,
     FORUMS: 0,
     SENT: 0,
+    SPAM: 0,
+    TRASH: 0,
+    DRAFT: 0,
+    STARRED: 0,
   };
 
   const start = Date.now();
 
-  const rows = await db
-    .select({
-      category: messageMetadata.category,
-      count: sql<number>`
+  const threadCount = sql<number>`
   count(
     distinct coalesce(
       ${messageMetadata.threadId},
       ${messageMetadata.entityId}
     )
   )
-`,
+`;
+
+  const rows = await db
+    .select({
+      category: messageMetadata.category,
+      count: threadCount,
     })
     .from(messageMetadata)
-    .where(eq(messageMetadata.userId, userId))
+    // Archived (Gmail-purged) rows are retained but must not inflate any
+    // badge — the user can't see them in any view.
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.isArchived, false),
+      ),
+    )
     .groupBy(messageMetadata.category);
 
   for (const row of rows) {
@@ -206,6 +271,21 @@ export async function getCategoryCounts(
       counts[row.category] = Number(row.count);
     }
   }
+
+  // Starred cuts across categories, so it needs its own query rather than a
+  // group-by bucket. Same exclusions as the Starred view itself.
+  const starredRows = await db
+    .select({ count: threadCount })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.isArchived, false),
+        eq(messageMetadata.isStarred, true),
+        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
+      ),
+    );
+  counts["STARRED"] = Number(starredRows[0]?.count ?? 0);
 
   logger.info("[SERVICE] getCategoryCounts completed", {
     requestId,
@@ -251,6 +331,10 @@ export async function getPriorityEmails(
     eq(messageMetadata.userId, userId),
     priorityFilter,
     sql`${messageMetadata.receivedAt} >= ${thresholdDate}`,
+    // Priority triage is about live mail: purged rows are invisible everywhere,
+    // and spam/bin/drafts would otherwise compete for the HIGH bucket.
+    eq(messageMetadata.isArchived, false),
+    notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
   ];
 
   if (unreadOnly) {
@@ -340,7 +424,11 @@ export async function getPriorityCounts(
     .where(
       and(
         eq(messageMetadata.userId, userId),
-        sql`${messageMetadata.receivedAt} >= ${thresholdDate}`
+        sql`${messageMetadata.receivedAt} >= ${thresholdDate}`,
+        // Must mirror getPriorityEmails' filters exactly, or the tab badges
+        // promise rows the list itself refuses to show.
+        eq(messageMetadata.isArchived, false),
+        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
       )
     )
     .groupBy(messageMetadata.priority);

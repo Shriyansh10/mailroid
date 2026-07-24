@@ -1,4 +1,4 @@
-import { db, eq, and, lt, gte, inArray, sql } from "@repo/database";
+import { db, eq, and, lt, gte, inArray, notInArray, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
 import { classifyEmailPriorityBatch, applyProfileOverrides } from "@repo/ai";
@@ -20,6 +20,31 @@ export const LLM_BATCH_SIZE = 50;
 // PROCESSING state between PENDING and DONE/FAILED.
 export const MAX_CLASSIFICATION_ATTEMPTS = 3;
 
+/**
+ * Categories that are never worth an LLM call.
+ *
+ * Spam and Bin are mail the user has already (or Gmail has already) judged,
+ * and a draft is the user's own unsent text — none of them can be "high
+ * priority correspondence", and none of them appear in the priority inbox.
+ * This matters beyond taste: these folders are large (tens of thousands of
+ * spam messages is normal), they sync as PENDING like everything else, and
+ * without this filter the batch classifier would work through the entire spam
+ * folder one paid LLM call at a time.
+ */
+const UNCLASSIFIABLE_CATEGORIES = ["SPAM", "TRASH", "DRAFT"] as any[];
+
+/** Shared by the batch selection query and the job-sizing count, so the number
+ *  the UI promises and the rows the classifier actually takes cannot drift. */
+function classifiablePredicate(userId: string, since: Date) {
+  return and(
+    eq(messageMetadata.userId, userId),
+    eq(messageMetadata.classificationStatus, "PENDING"),
+    lt(messageMetadata.classificationAttempts, MAX_CLASSIFICATION_ATTEMPTS),
+    gte(messageMetadata.receivedAt, since),
+    notInArray(messageMetadata.category, UNCLASSIFIABLE_CATEGORIES),
+  );
+}
+
 // "retry_failed" has no fixed window — its date range comes from where the
 // failed rows actually sit, so it always carries an explicit `since`.
 export type ClassificationScope = "last_week" | "last_month" | "retry_failed";
@@ -36,14 +61,7 @@ export async function countPendingForScope(userId: string, since: Date): Promise
   const [row] = await db
     .select({ count: sql<number>`count(*)` })
     .from(messageMetadata)
-    .where(
-      and(
-        eq(messageMetadata.userId, userId),
-        eq(messageMetadata.classificationStatus, "PENDING"),
-        lt(messageMetadata.classificationAttempts, MAX_CLASSIFICATION_ATTEMPTS),
-        gte(messageMetadata.receivedAt, since),
-      ),
-    );
+    .where(classifiablePredicate(userId, since));
   return Number(row?.count ?? 0);
 }
 
@@ -91,14 +109,7 @@ async function selectPendingBatch(
       snippet: messageMetadata.snippet,
     })
     .from(messageMetadata)
-    .where(
-      and(
-        eq(messageMetadata.userId, userId),
-        eq(messageMetadata.classificationStatus, "PENDING"),
-        lt(messageMetadata.classificationAttempts, MAX_CLASSIFICATION_ATTEMPTS),
-        gte(messageMetadata.receivedAt, since),
-      ),
-    )
+    .where(classifiablePredicate(userId, since))
     .orderBy(sql`${messageMetadata.receivedAt} DESC`)
     .limit(limit);
 }

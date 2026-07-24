@@ -28,12 +28,12 @@ import { createEmbedding, createEmbeddingsBatch, embedSearchQuery } from "@repo/
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-interface PayloadHeader {
+export interface PayloadHeader {
   name?: string;
   value?: string;
 }
 
-interface MessagePart {
+export interface MessagePart {
   mimeType?: string;
   filename?: string;
   body?: { data?: string; size?: number; attachmentId?: string };
@@ -54,7 +54,7 @@ function countAttachments(payload: MessagePart | undefined): number {
 /**
  * Extract a header value from payload.headers by name (case-insensitive).
  */
-function getHeader(headers: PayloadHeader[] | undefined, name: string): string {
+export function getHeader(headers: PayloadHeader[] | undefined, name: string): string {
   if (!headers) return "";
   const h = headers.find((h) => h.name?.toLowerCase() === name.toLowerCase());
   return h?.value ?? "";
@@ -64,7 +64,7 @@ function getHeader(headers: PayloadHeader[] | undefined, name: string): string {
  * Extract plain text body from a nested MIME payload.
  * Prefers text/plain, falls back to text/html with tags stripped.
  */
-function extractBody(payload: MessagePart | undefined): string {
+export function extractBody(payload: MessagePart | undefined): string {
   if (!payload) return "";
 
   // Direct body on the part itself
@@ -142,7 +142,7 @@ function stripHtml(html: string): string {
  * grouping hint that other mail clients ignore entirely, so a real reply
  * needs these headers regardless of whether Gmail's threadId is also set.
  */
-function buildRawEmail(
+export function buildRawEmail(
   to: string,
   subject: string,
   body: string,
@@ -203,6 +203,7 @@ function transformThreadDetail(thread: Record<string, unknown>): ThreadDetail {
   const detailedMessages: MessageDetail[] = messages.map((msg) => {
     const payload = msg.payload as MessagePart | undefined;
     const headers = (payload?.headers ?? []) as PayloadHeader[];
+    const labelIds = (msg.labelIds as string[] | undefined) ?? [];
 
     return {
       id: (msg.id as string) ?? "",
@@ -213,6 +214,7 @@ function transformThreadDetail(thread: Record<string, unknown>): ThreadDetail {
       body: extractBody(payload),
       htmlBody: extractHtml(payload),
       snippet: (msg.snippet as string) ?? "",
+      isDraft: labelIds.includes("DRAFT"),
     };
   });
 
@@ -336,6 +338,23 @@ export async function getThread(
     result.summaryFlags = meta[0].summaryFlags ?? undefined;
   }
 
+  // A thread message flagged DRAFT (via its Gmail labelIds) carries no draft
+  // resource id of its own — Gmail's own draft id is a separate resource,
+  // only recoverable from message_metadata (synced by syncDraftsPage keyed by
+  // entityId = the underlying message id). Without it the UI can't call
+  // updateDraft/sendDraft/discardDraft on the message it's showing.
+  const draftEntityIds = result.messages.filter((m) => m.isDraft).map((m) => m.id);
+  if (draftEntityIds.length > 0) {
+    const draftRows = await db
+      .select({ entityId: messageMetadata.entityId, draftId: messageMetadata.draftId })
+      .from(messageMetadata)
+      .where(and(eq(messageMetadata.userId, tenantId), inArray(messageMetadata.entityId, draftEntityIds)));
+    const draftIdByEntity = new Map(draftRows.map((r) => [r.entityId, r.draftId]));
+    result.messages = result.messages.map((m) =>
+      m.isDraft ? { ...m, draftId: draftIdByEntity.get(m.id) ?? undefined } : m,
+    );
+  }
+
   logger.info("[SERVICE] getThread completed", {
     tenantId, threadId, messageCount: result.messages?.length ?? 0,
     totalDurationMs: Date.now() - startMs,
@@ -391,7 +410,7 @@ interface ResolvedReplyTarget {
  * preview the user approves and the message actually sent are derived from
  * the exact same resolution, not two hand-kept-in-sync copies.
  */
-async function resolveReplyTarget(
+export async function resolveReplyTarget(
   tenantId: string,
   entityId: string,
   replyAll?: boolean,
@@ -442,11 +461,19 @@ async function resolveReplyTarget(
 /**
  * Reply to a specific message. Recipient, subject, and threading headers
  * (In-Reply-To/References, built from the original's own Message-ID) are
- * ALL derived from the original message — never from the model. This
+ * ALL derived from the original message — never from the caller. This
  * matters beyond correctness: the assistant only ever sees the sender as
  * the literal string "[EMAIL]" (PII masking replaces every address before
  * content reaches it — see packages/ai/src/security/pii.ts), so it could
  * not supply a correct recipient even if asked to.
+ *
+ * Also the tRPC `replyToEmail` mutation's implementation for the plain inbox
+ * UI (packages/trpc/server/routes/gmail/route.ts) — there the caller isn't
+ * masked and could in principle derive a recipient client-side, but doing so
+ * anyway is what keeps the reply in the same Gmail conversation: a client-
+ * built raw email has no way to set In-Reply-To/References from data it
+ * never fetched, and `threadId` alone is a Gmail-only grouping hint, not
+ * something other mail clients (or Gmail itself, in every case) honor.
  */
 export async function replyToEmail(
   tenantId: string,
@@ -574,6 +601,104 @@ export async function previewForward(
   return { subject: target.subject, attachmentCount: target.attachmentCount };
 }
 
+// ── Mailbox write actions (Bin / Star) ───────────────────────────────
+//
+// All three below write to Gmail FIRST and mirror locally second. If the Gmail
+// call throws, the local row is untouched and the UI's optimistic update is
+// rolled back by the caller — the alternative (local-first) would leave
+// Mailroid showing a state Gmail never accepted.
+//
+// They operate on a whole thread, matching the UI: the inbox lists threads, so
+// "move this to Bin" means the conversation, not one message inside it.
+
+/**
+ * Move a thread to Bin. Gmail keeps trashed mail for ~30 days and then purges
+ * it; we never run our own timer — see the is_archived purge mirror in
+ * webhook-sync.ts for what happens at that point.
+ */
+export async function trashThread(tenantId: string, threadId: string): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.trash({ id: threadId });
+
+  await db
+    .update(messageMetadata)
+    .set({ category: "TRASH", isInInbox: false, updatedAt: new Date() })
+    .where(
+      and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+    );
+
+  logger.info("[SERVICE] trashThread completed", {
+    tenantId, threadId, durationMs: Date.now() - startMs,
+  });
+}
+
+/**
+ * Restore a thread out of Bin. The category it should return to depends on
+ * labels only Gmail knows, so rather than guessing we re-read the thread and
+ * recompute category/flags through the same deriveCategory path the sync uses.
+ */
+export async function untrashThread(tenantId: string, threadId: string): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.untrash({ id: threadId });
+
+  const thread = (await tenant.gmail.api.threads.get({
+    id: threadId,
+    format: "metadata",
+  })) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
+
+  for (const msg of thread.messages ?? []) {
+    if (!msg.id) continue;
+    const labels = msg.labelIds ?? [];
+    const flags = deriveFlags(labels);
+    await db
+      .update(messageMetadata)
+      .set({
+        category: deriveCategory(labels) as any,
+        gmailLabels: labels,
+        isInInbox: flags.isInInbox,
+        isStarred: flags.isStarred,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.entityId, msg.id)),
+      );
+  }
+
+  logger.info("[SERVICE] untrashThread completed", {
+    tenantId, threadId, durationMs: Date.now() - startMs,
+  });
+}
+
+/** Star or unstar a whole thread. */
+export async function setThreadStarred(
+  tenantId: string,
+  threadId: string,
+  starred: boolean,
+): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.modify({
+    id: threadId,
+    ...(starred ? { addLabelIds: ["STARRED"] } : { removeLabelIds: ["STARRED"] }),
+  });
+
+  await db
+    .update(messageMetadata)
+    .set({ isStarred: starred, updatedAt: new Date() })
+    .where(
+      and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+    );
+
+  logger.info("[SERVICE] setThreadStarred completed", {
+    tenantId, threadId, starred, durationMs: Date.now() - startMs,
+  });
+}
+
 /**
  * Search emails by query string (uses Gmail search syntax).
  * Returns ThreadSummary[] matching the query.
@@ -590,14 +715,19 @@ export async function searchEmails(
 
   const tenant = corsair.withTenant(tenantId);
 
+  // Sent mail matching the query is otherwise indistinguishable from a real
+  // received result in this list — `-in:sent` is Gmail's own search syntax
+  // for excluding it, so no post-filtering step is needed.
+  const searchQuery = `${query} -in:sent`;
+
   const gmailStart = Date.now();
   const result = await tenant.gmail.api.threads.list({
-    q: query,
+    q: searchQuery,
     maxResults: opts?.maxResults ?? 20,
     pageToken: opts?.pageToken,
   });
   logger.info("[GMAIL] threads.list (searchEmails)", {
-    tenantId, query,
+    tenantId, query: searchQuery,
     threadCount: (result.threads ?? []).length,
     nextPageToken: result.nextPageToken ?? null,
     gmailDurationMs: Date.now() - gmailStart,
@@ -812,8 +942,13 @@ export async function ingestMessage(
     threadId,
   });
 
-  // Trigger priority classification for unread emails (commit success before emitting event)
-  if (flags.isUnread && triggerClassification) {
+  // Trigger priority classification for unread emails (commit success before
+  // emitting event). Spam/Bin/Draft are skipped for the same reason the batch
+  // classifier skips them (see UNCLASSIFIABLE_CATEGORIES in classification.ts):
+  // incoming spam is overwhelmingly unread, so without this every spam
+  // delivery would spend an LLM call ranking mail nothing will ever display.
+  const isClassifiable = !["SPAM", "TRASH", "DRAFT"].includes(category);
+  if (flags.isUnread && triggerClassification && isClassifiable) {
     const { inngest } = await import("@repo/inngest");
     void inngest
       .send({
@@ -1008,12 +1143,26 @@ export async function searchLocalEmails(
     }
   }
 
+  // Sent mail matching a search is a copy of what the user wrote, not
+  // something they're looking for — exclude it unconditionally, before either
+  // return path. Deliberately NOT folded into ALWAYS_HIDDEN/ spamCount in
+  // model.ts: that field is narrated to the user by the assistant's system
+  // prompt specifically as "promotions/spam" (apps/web/lib/assistant/
+  // system-prompt.ts), so counting Sent mail into it would have the
+  // assistant call the user's own sent messages "spam". Enrichment runs once
+  // here for both branches — the raw-UI branch needs it regardless (it never
+  // reaches `finalizeSearch`, the only other place that enriches), and paying
+  // it up front for the assistant branch too avoids a second, separate
+  // exclusion mechanism for the exact same rule.
+  const enriched = await enrichCategories(userId, raw);
+  const withoutSent = enriched.filter((t) => t.category !== "SENT");
+
   if (!applyAssistantRules) {
-    // Raw UI search: full results, no blocklist/partition/cap.
-    return { threads: raw, total: raw.length };
+    // Raw UI search: full results (minus Sent), no blocklist/partition/cap.
+    return { threads: withoutSent, total: withoutSent.length };
   }
 
-  return finalizeSearch(userId, raw, { topicGiven, includePromotions: !!includePromotions, primaryCap });
+  return finalizeSearch(userId, withoutSent, { topicGiven, includePromotions: !!includePromotions, primaryCap });
 }
 
 /** Days-ago cutoff Date for a `withinDays` window, or null if unbounded. */
@@ -1551,4 +1700,9 @@ export async function getPendingEmbeddingsCount(
 }
 
 export { getOrGenerateBrief, formatBriefingMarkdown } from "./daily-briefing.ts";
+
+// NOTE: drafts.ts is deliberately NOT re-exported here. It imports this module
+// for buildRawEmail/getHeader/extractBody, so re-exporting it back would make
+// the two files a static import cycle. Import from
+// "@repo/services/gmail/drafts.js" directly instead.
 

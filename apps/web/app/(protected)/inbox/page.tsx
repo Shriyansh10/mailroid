@@ -9,6 +9,9 @@ import {
   usePriorityEmails,
   usePriorityCounts,
   useThread,
+  useTrashThread,
+  useUntrashThread,
+  useSetStarred,
   useStartClassificationJob,
   useRetryFailedClassifications,
   useClassificationJobStatus,
@@ -32,7 +35,9 @@ import {
   RefreshCwIcon,
   MoreVerticalIcon,
   InboxIcon,
-  ArrowUpRightIcon
+  ArrowUpRightIcon,
+  Trash2Icon,
+  ArchiveRestoreIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { trpc } from "@web/trpc/client";
@@ -45,6 +50,21 @@ const CATEGORIES = [
   { key: "SOCIAL", label: "Social" },
   { key: "FORUMS", label: "Forums" },
 ] as const;
+
+/**
+ * Headings for the sidebar-reached views. Without these every one of them
+ * renders as "Correspondence Archive / Spam category dossier record", which
+ * reads as a bug — Bin in particular is not a category at all.
+ */
+const VIEW_META: Record<string, { title: string; subtitle: string }> = {
+  STARRED: { title: "Starred", subtitle: "Correspondence you have flagged" },
+  DRAFT: { title: "Drafts", subtitle: "Unsent messages — open one to keep editing" },
+  SPAM: { title: "Spam", subtitle: "Classified as spam by Gmail" },
+  TRASH: {
+    title: "Bin",
+    subtitle: "Gmail clears binned mail after about 30 days; Mailroid keeps its own copy",
+  },
+};
 
 const PAGE_SIZE = 50;
 // Fetch a large window from the DB in one query and slice it into PAGE_SIZE
@@ -579,6 +599,7 @@ function DossierLayout({
   headerActions,
   pagination,
   banner,
+  category,
 }: {
   title: string;
   subtitle: string;
@@ -589,9 +610,17 @@ function DossierLayout({
   headerActions?: React.ReactNode;
   pagination?: React.ReactNode;
   banner?: React.ReactNode;
+  /** Which view this list is showing — decides which row actions apply. */
+  category?: string;
 }) {
   const router = useRouter();
   const utils = trpc.useUtils();
+  const { trashThreadAsync } = useTrashThread();
+  const { untrashThreadAsync } = useUntrashThread();
+  const { setStarredAsync } = useSetStarred();
+
+  const isBin = category === "TRASH";
+  const isDraftView = category === "DRAFT";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [archivedIds, setArchivedIds] = useState<string[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
@@ -675,7 +704,7 @@ function DossierLayout({
     };
 
     const handleArchiveSelected = () => {
-      if (selectedThreadId) handleArchiveThread(selectedThreadId);
+      if (selectedThreadId) void handleArchiveThread(selectedThreadId);
     };
 
     window.addEventListener("mailroid-select-next", handleNext);
@@ -703,12 +732,75 @@ function DossierLayout({
     setMobileView("detail");
   };
 
-  const handleArchiveThread = (threadId: string) => {
+  /**
+   * Move a thread to Bin. Hides the row immediately and un-hides it if Gmail
+   * rejects the call — previously this was optimistic-only and never actually
+   * trashed anything, so the row reappeared on the next refetch.
+   */
+  const handleArchiveThread = async (threadId: string) => {
     setArchivedIds((prev) => [...prev, threadId]);
-    toast.success("Dossier archived", {
-      description: "Dossier has been moved to communications archive.",
-    });
     setMobileView("list");
+    try {
+      await trashThreadAsync({ threadId });
+      toast.success("Moved to Bin", {
+        description: "Gmail keeps binned mail for about 30 days.",
+      });
+    } catch (err) {
+      setArchivedIds((prev) => prev.filter((id) => id !== threadId));
+      toast.error("Couldn't move to Bin", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    }
+  };
+
+  /** Restore a thread out of Bin, back to wherever its labels put it. */
+  const handleRestoreThread = async (threadId: string) => {
+    setArchivedIds((prev) => [...prev, threadId]);
+    try {
+      await untrashThreadAsync({ threadId });
+      toast.success("Restored from Bin");
+    } catch (err) {
+      setArchivedIds((prev) => prev.filter((id) => id !== threadId));
+      toast.error("Couldn't restore", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    }
+  };
+
+  const handleToggleStar = async (threadId: string, starred: boolean) => {
+    try {
+      await setStarredAsync({ threadId, starred });
+    } catch (err) {
+      toast.error(starred ? "Couldn't star" : "Couldn't unstar", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    }
+  };
+
+  /**
+   * Resume a draft. A reply-in-progress (isReplyToExisting) navigates to its
+   * original conversation, where the thread page auto-opens the inline reply
+   * box pre-filled — losing that context by dropping straight into a bare
+   * compose modal was the whole problem this fixes. A fresh (non-reply)
+   * compose draft has no conversation to land on, so it keeps opening the
+   * existing compose modal, unchanged.
+   */
+  const handleEditDraft = async (thread: any) => {
+    if (!thread.draftId) return;
+    try {
+      const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId });
+      if (draft.isReplyToExisting && draft.threadId) {
+        router.push(`/inbox/${draft.threadId}?draftId=${draft.draftId}`);
+        return;
+      }
+      window.dispatchEvent(
+        new CustomEvent("mailroid-compose-email", { detail: draft }),
+      );
+    } catch (err) {
+      toast.error("Couldn't open draft", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    }
   };
 
   return (
@@ -788,6 +880,12 @@ function DossierLayout({
                     key={thread.threadId}
                     variants={itemVariants}
                     onClick={() => {
+                      // A draft has no thread to read — clicking it resumes
+                      // editing, which is the only thing you can do with one.
+                      if (isDraftView && thread.draftId) {
+                        void handleEditDraft(thread);
+                        return;
+                      }
                       router.push(`/inbox/${thread.threadId}`);
                     }}
                     className={cn(
@@ -813,27 +911,91 @@ function DossierLayout({
 
                     {/* Right: Actions, Badge, Date */}
                     <div className="flex items-center gap-4 shrink-0">
-                      {/* Hover Actions */}
-                      <div className="hidden group-hover:flex items-center gap-1">
-                        <Button 
-                          variant="ghost" 
-                          size="icon" 
-                          className="h-8 w-8 text-muted-foreground hover:text-foreground"
-                          onClick={(e) => {
-                            e.stopPropagation();
-                            window.dispatchEvent(
-                              new CustomEvent("mailroid-compose-email", {
-                                detail: {
-                                  to: thread.sender,
-                                  subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
-                                  body: `\n\n--- On Original Thread ---\nFrom: ${thread.sender}\nSubject: ${thread.subject}\nSnippet: ${thread.snippet}`,
-                                },
-                              })
-                            );
-                          }}
+                      {/*
+                        A starred row keeps its star visible at rest — hiding it
+                        behind hover would make the Starred view's own defining
+                        state invisible. Everything else appears on hover.
+                      */}
+                      {!isDraftView && (
+                        <div
+                          className={cn(
+                            "items-center gap-1",
+                            thread.isStarred ? "flex" : "hidden group-hover:flex",
+                          )}
                         >
-                          <SendIcon className="size-3.5 rotate-[-45deg]" />
-                        </Button>
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title={thread.isStarred ? "Unstar" : "Star"}
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleToggleStar(thread.threadId, !thread.isStarred);
+                            }}
+                          >
+                            <StarIcon
+                              className={cn(
+                                "size-3.5",
+                                thread.isStarred && "fill-amber-400 text-amber-400",
+                              )}
+                            />
+                          </Button>
+                        </div>
+                      )}
+
+                      <div className="hidden group-hover:flex items-center gap-1">
+                        {!isDraftView && (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Reply"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              window.dispatchEvent(
+                                new CustomEvent("mailroid-compose-email", {
+                                  detail: {
+                                    to: thread.sender,
+                                    subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
+                                    body: `\n\n--- On Original Thread ---\nFrom: ${thread.sender}\nSubject: ${thread.subject}\nSnippet: ${thread.snippet}`,
+                                    threadId: thread.threadId,
+                                  },
+                                })
+                              );
+                            }}
+                          >
+                            <SendIcon className="size-3.5 -rotate-45" />
+                          </Button>
+                        )}
+
+                        {/* In the Bin the useful action is the inverse one. */}
+                        {isBin ? (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Restore from Bin"
+                            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleRestoreThread(thread.threadId);
+                            }}
+                          >
+                            <ArchiveRestoreIcon className="size-3.5" />
+                          </Button>
+                        ) : (
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            title="Move to Bin"
+                            className="h-8 w-8 text-muted-foreground hover:text-destructive"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              void handleArchiveThread(thread.threadId);
+                            }}
+                          >
+                            <Trash2Icon className="size-3.5" />
+                          </Button>
+                        )}
                       </div>
 
                       {thread.priority && <PrioritySeal priority={thread.priority} score={thread.priorityScore} />}
@@ -872,30 +1034,46 @@ function CategoryInbox({
   const windowThreads = data?.threads ?? [];
   const threads = windowThreads.slice(startInWindow, startInWindow + PAGE_SIZE);
 
+  // The tabs only make sense for the four inbox categories they switch between.
+  // Starred/Draft/Spam/Bin are reached from the sidebar, and showing the tabs
+  // there would imply the current view is one of them when none is selected.
+  const isTabbedCategory = CATEGORIES.some((c) => c.key === category);
+  const meta = VIEW_META[category];
+
   return (
     <DossierLayout
-      title="Correspondence Archive"
-      subtitle={`${category.charAt(0) + category.slice(1).toLowerCase()} category dossier record`}
+      title={meta?.title ?? "Correspondence Archive"}
+      subtitle={
+        meta?.subtitle ??
+        `${category.charAt(0) + category.slice(1).toLowerCase()} category dossier record`
+      }
       threads={threads}
       isLoading={isLoading}
       isError={isError}
       error={error}
+      category={category}
       headerActions={
-        <div className="flex items-center gap-2 px-2">
-          {CATEGORIES.map(({ key, label }) => (
-            <button
-              key={key}
-              onClick={() => onNavigate(key, 1)}
-              className={`px-4 py-3 text-[13px] font-medium transition-all cursor-pointer border-b-2 ${
-                category === key
-                  ? "border-primary text-primary"
-                  : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/30 rounded-t-sm"
-              }`}
-            >
-              {label}
-            </button>
-          ))}
-        </div>
+        isTabbedCategory ? (
+          <div className="flex items-center gap-2 px-2">
+            {CATEGORIES.map(({ key, label }) => (
+              <button
+                key={key}
+                onClick={() => onNavigate(key, 1)}
+                className={`px-4 py-3 text-[13px] font-medium transition-all cursor-pointer border-b-2 ${
+                  category === key
+                    ? "border-primary text-primary"
+                    : "border-transparent text-muted-foreground hover:text-foreground hover:bg-muted/30 rounded-t-sm"
+                }`}
+              >
+                {label}
+              </button>
+            ))}
+          </div>
+        ) : (
+          <div className="px-4 py-3 text-[13px] font-medium text-foreground">
+            {meta?.title ?? category}
+          </div>
+        )
       }
       pagination={
         <div className="flex items-center gap-3">

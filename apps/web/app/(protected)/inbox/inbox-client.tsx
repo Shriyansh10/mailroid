@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon, SparklesIcon, InboxIcon, SendIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon, SparklesIcon, InboxIcon, SendIcon, StarIcon, FileTextIcon, ShieldAlertIcon, Trash2Icon, ChevronDownIcon } from "lucide-react";
 import Image from "next/image";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -19,6 +19,8 @@ import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
 import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
+import type { ComposePrefill } from "@web/components/inbox/compose-dialog";
+import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@web/components/ui/collapsible";
 import { authClient, useSession } from "@web/lib/auth-client";
 import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
 import { useCalendarSync } from "@web/hooks/api/calendar";
@@ -29,12 +31,37 @@ const DEBOUNCE_MS = 300;
 
 type SearchMode = "gmail" | "ai";
 
+/**
+ * The Gmail-style tab categories. These are rendered as tabs ABOVE the list
+ * (see inbox/page.tsx) — deliberately NOT in the sidebar, where they used to be
+ * duplicated. Kept here only so the sidebar can tell whether the current
+ * category is one of them (which means "Inbox" is the active nav item).
+ */
 const INBOX_CATEGORIES = [
   { key: "PRIMARY", label: "Primary" },
   { key: "PROMOTIONS", label: "Promotions" },
   { key: "SOCIAL", label: "Social" },
   { key: "FORUMS", label: "Forums" },
 ] as const;
+
+/**
+ * The collapsible "More" group, mirroring Gmail's own secondary nav. These are
+ * views the tabs can't express: STARRED cuts across every category, and
+ * DRAFT/SPAM/TRASH are separate Gmail folders excluded from normal listings.
+ */
+const MORE_VIEWS = [
+  { key: "STARRED", label: "Starred", Icon: StarIcon },
+  { key: "DRAFT", label: "Draft", Icon: FileTextIcon },
+  { key: "SPAM", label: "Spam", Icon: ShieldAlertIcon },
+  { key: "TRASH", label: "Bin", Icon: Trash2Icon },
+] as const;
+
+/** Categories that own a dedicated sidebar entry rather than falling under Inbox. */
+const STANDALONE_CATEGORIES: string[] = [
+  "PRIORITY",
+  "SENT",
+  ...MORE_VIEWS.map((v) => v.key),
+];
 
 function getInitials(name: string): string {
   return name.split(/\s+/).filter((p) => p.length > 0).slice(0, 2).map((p) => p[0]!.toUpperCase()).join("");
@@ -50,6 +77,12 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     : (searchParams.get("aiq") ?? "");
   const [localValue, setLocalValue] = useState(currentQuery);
   const [composeOpen, setComposeOpen] = useState(false);
+  // Starts open when the user is already inside one of the More views (e.g. a
+  // direct link to /inbox?category=SPAM), so the active item is never hidden.
+  const [moreOpen, setMoreOpen] = useState(() =>
+    MORE_VIEWS.some((v) => v.key === category),
+  );
+  const [composePrefill, setComposePrefill] = useState<ComposePrefill | undefined>();
   const debounceRef = useRef<ReturnType<typeof setTimeout>>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const { data: session } = useSession();
@@ -170,6 +203,26 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [composeOpen]);
 
+  /**
+   * Opens compose with content supplied by another view. Reply/reply-all/
+   * forward buttons and the Draft list all dispatch this event rather than
+   * reaching into this layout's state, since the dialog lives here but the
+   * things that open it live in the routed page below.
+   */
+  useEffect(() => {
+    const handleComposeRequest = (e: Event) => {
+      const detail = (e as CustomEvent<ComposePrefill>).detail ?? {};
+      frontendLogger.info("[INBOX_UI]", "compose requested", {
+        hasDraftId: !!detail.draftId, hasThreadId: !!detail.threadId,
+      });
+      setComposePrefill(detail);
+      setComposeOpen(true);
+    };
+
+    window.addEventListener("mailroid-compose-email", handleComposeRequest);
+    return () => window.removeEventListener("mailroid-compose-email", handleComposeRequest);
+  }, []);
+
   return (
     <div className="flex h-screen bg-background text-foreground">
       {/* ── Sidebar ─────────────────────────────────────────── */}
@@ -191,7 +244,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           <button
             onClick={() => navigateTo({ category: "PRIMARY", q: undefined })}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-              category === "PRIMARY" || (!["PRIORITY", "SENT"].includes(category) && !INBOX_CATEGORIES.some(c => c.key === category))
+              !STANDALONE_CATEGORIES.includes(category)
                 ? "bg-accent text-foreground"
                 : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
             }`}
@@ -210,22 +263,6 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             <span className="flex-1 text-left">Priority</span>
           </button>
 
-          {/* Inbox Sub-categories */}
-          <div className="mt-1 mb-2 space-y-0.5">
-            {INBOX_CATEGORIES.map(({ key, label }) => (
-              <button
-                key={key}
-                onClick={() => navigateTo({ category: key, q: undefined })}
-                className={`w-full flex items-center gap-3 px-3 py-1.5 rounded-lg text-sm pl-10 transition-colors ${
-                  category === key ? "text-foreground font-medium bg-accent/40" : "hover:bg-accent/30 text-muted-foreground"
-                }`}
-              >
-                <span className="flex-1 text-left">{label}</span>
-                <span className="text-xs text-muted-foreground opacity-60 tabular-nums">{count(key)}</span>
-              </button>
-            ))}
-          </div>
-
           <button
             onClick={() => navigateTo({ category: "SENT", q: undefined })}
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
@@ -236,6 +273,41 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             <span className="flex-1 text-left">Sent</span>
             <span className="text-xs text-muted-foreground opacity-60 tabular-nums">{count("SENT")}</span>
           </button>
+
+          {/*
+            More / Less — Gmail's secondary nav. Collapsed by default to keep
+            the sidebar short, but forced open when one of its views is the
+            active one, so the current location is never hidden behind a
+            collapsed section.
+          */}
+          <Collapsible open={moreOpen} onOpenChange={setMoreOpen}>
+            <CollapsibleTrigger className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors">
+              <ChevronDownIcon
+                className={`size-4 transition-transform ${moreOpen ? "" : "-rotate-90"}`}
+              />
+              <span className="flex-1 text-left">{moreOpen ? "Less" : "More"}</span>
+            </CollapsibleTrigger>
+
+            <CollapsibleContent className="mt-0.5 space-y-0.5">
+              {MORE_VIEWS.map(({ key, label, Icon }) => (
+                <button
+                  key={key}
+                  onClick={() => navigateTo({ category: key, q: undefined })}
+                  className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm transition-colors ${
+                    category === key
+                      ? "bg-accent text-foreground font-medium"
+                      : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+                  }`}
+                >
+                  <Icon className="size-4" />
+                  <span className="flex-1 text-left">{label}</span>
+                  <span className="text-xs text-muted-foreground opacity-60 tabular-nums">
+                    {count(key)}
+                  </span>
+                </button>
+              ))}
+            </CollapsibleContent>
+          </Collapsible>
         </div>
 
         <div className="my-3 border-t border-border/40" />
@@ -372,7 +444,16 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           </DropdownMenu>
         </div>
 
-        <ComposeDialog open={composeOpen} onOpenChange={setComposeOpen} />
+        <ComposeDialog
+          open={composeOpen}
+          onOpenChange={(next) => {
+            setComposeOpen(next);
+            // Drop the prefill on close so the next plain "Compose" opens
+            // blank instead of resurrecting the last reply or draft.
+            if (!next) setComposePrefill(undefined);
+          }}
+          prefill={composePrefill}
+        />
         
         <div className="flex-1 overflow-auto bg-background">{children}</div>
       </div>

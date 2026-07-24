@@ -3,7 +3,7 @@ import { db, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
-import {CATEGORY_TO_GMAIL_QUERY, ALL_CATEGORIES, extractHeader} from './metadata.ts';
+import {CATEGORY_TO_GMAIL_QUERY, CATEGORY_TO_GMAIL_LABEL, ALL_CATEGORIES, extractHeader} from './metadata.ts';
 import { withGmailRetry } from './retry.ts';
 import {
   markSyncQueued,
@@ -20,30 +20,43 @@ const UPSERT_BATCH_SIZE = 100;
 
 // ── Category mapping ──────────────────────────────────────────────────
 
-const LABEL_TO_CATEGORY: Record<string, string> = {
-  SENT: "SENT",
-  DRAFT: "DRAFT",
-  SPAM: "SPAM",
-  TRASH: "TRASH",
+/**
+ * Label → category, in PRECEDENCE order (first match wins).
+ *
+ * The order is the whole point. Gmail returns labelIds in no guaranteed order,
+ * and a message routinely carries several of these at once — a spam message is
+ * very often ["UNREAD", "CATEGORY_PROMOTIONS", "SPAM"]. Scanning the message's
+ * own label array and taking the first hit therefore filed the same email as
+ * PROMOTIONS or SPAM depending on the order Gmail happened to serialise it in,
+ * which is why the Spam view could stay empty while Gmail showed 48 messages.
+ *
+ * Location labels (DRAFT/SPAM/TRASH/SENT) beat the CATEGORY_* tabs because they
+ * describe which folder the message is *in*; the tab is only meaningful for
+ * mail that is actually in the inbox.
+ */
+const CATEGORY_PRECEDENCE: Array<[label: string, category: string]> = [
+  ["DRAFT", "DRAFT"],
+  ["SPAM", "SPAM"],
+  ["TRASH", "TRASH"],
+  ["SENT", "SENT"],
 
-  CATEGORY_PERSONAL: "PRIMARY",
-
-  CATEGORY_PROMOTIONS: "PROMOTIONS",
-  CATEGORY_SOCIAL: "SOCIAL",
-  CATEGORY_UPDATES: "UPDATES",
-  CATEGORY_FORUMS: "FORUMS",
-};
+  ["CATEGORY_PERSONAL", "PRIMARY"],
+  ["CATEGORY_PROMOTIONS", "PROMOTIONS"],
+  ["CATEGORY_SOCIAL", "SOCIAL"],
+  ["CATEGORY_UPDATES", "UPDATES"],
+  ["CATEGORY_FORUMS", "FORUMS"],
+];
 
 export function deriveCategory(labels: string[]): string {
   if (!Array.isArray(labels) || labels.length === 0) {
     logger.debug("[CATEGORY] deriveCategory - no labels, returning OTHER");
     return "OTHER";
   }
-  for (const label of labels) {
-    const match = LABEL_TO_CATEGORY[label];
-    if (match) {
-      return match;
-    }
+  // Iterate OUR precedence list against the message's labels — never the
+  // message's label array against our map (see the comment above).
+  const set = new Set(labels);
+  for (const [label, category] of CATEGORY_PRECEDENCE) {
+    if (set.has(label)) return category;
   }
   logger.debug("[CATEGORY] deriveCategory - no match in known labels, returning OTHER", { labels });
   return "OTHER";
@@ -69,7 +82,7 @@ export function deriveFlags(labels: string[]): {
 
 // ── Upsert ────────────────────────────────────────────────────────────
 
-interface MetadataInput {
+export interface MetadataInput {
   entityId: string;
   userId: string;
   gmailLabels: string[];
@@ -83,6 +96,8 @@ snippet?: string;
   isImportant: boolean;
   receivedAt?: Date;
   threadId?: string;
+  /** Gmail draft resource id. Only the drafts sync path sets this. */
+  draftId?: string;
 }
 
 export async function upsertMessageMetadata(input: MetadataInput): Promise<void> {
@@ -118,6 +133,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           isImportant: input.isImportant,
           receivedAt: input.receivedAt,
           threadId: input.threadId,
+          draftId: input.draftId,
         })),
       )
       .onConflictDoUpdate({
@@ -135,6 +151,11 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           isImportant: sql`excluded.is_important`,
           receivedAt: sql`excluded.received_at`,
           threadId: sql`excluded.thread_id`,
+          // COALESCE, not a plain overwrite: a draft's message can also be
+          // seen by a label/thread sync that knows nothing about draft ids,
+          // and a bare `excluded.draft_id` would null out the id we need to
+          // edit or send that draft later.
+          draftId: sql`coalesce(excluded.draft_id, ${messageMetadata.draftId})`,
           updatedAt: new Date(),
         },
       });
@@ -249,9 +270,16 @@ export async function syncCategoryPage(
   category: string,
   pageToken?: string,
 ): Promise<{ processed: number; nextPageToken?: string }> {
+  // Drafts are a separate Gmail resource, not a label query — they need the
+  // draft id (which is not the message id) to be editable later.
+  if (category === "DRAFT") {
+    const { syncDraftsPage } = await import("./drafts.ts");
+    return syncDraftsPage(userId, pageToken);
+  }
+
   const tenant = corsair.withTenant(userId);
   const gmailQueryTerm = CATEGORY_TO_GMAIL_QUERY[category];
-  const isSent = category === "SENT";
+  const labelId = CATEGORY_TO_GMAIL_LABEL[category];
 
   const result = await withGmailRetry<{
     threads?: Array<{ id?: string }>;
@@ -259,8 +287,16 @@ export async function syncCategoryPage(
   }>(`threads.list ${category}`, () =>
     tenant.gmail.api.threads.list({
       maxResults: 100,
-      ...(isSent
-        ? { labelIds: ["SENT"] }
+      ...(labelId
+        ? {
+            labelIds: [labelId],
+            // Gmail omits SPAM/TRASH from every listing unless asked. Without
+            // this the Spam and Bin views come back permanently empty even
+            // though the label filter is correct.
+            ...(labelId === "SPAM" || labelId === "TRASH"
+              ? { includeSpamTrash: true }
+              : {}),
+          }
         : gmailQueryTerm
           ? { q: `category:${gmailQueryTerm}` }
           : { labelIds: ["INBOX"] }),

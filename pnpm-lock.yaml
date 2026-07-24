@@ -545,6 +545,40 @@ importers:
         specifier: ^5.9.3
         version: 5.9.3
 
+  packages/scripts:
+    dependencies:
+      '@repo/corsair':
+        specifier: workspace:*
+        version: link:../corsair
+      '@repo/database':
+        specifier: workspace:*
+        version: link:../database
+      '@repo/logger':
+        specifier: workspace:*
+        version: link:../logger
+      '@repo/services':
+        specifier: workspace:*
+        version: link:../services
+    devDependencies:
+      '@repo/eslint-config':
+        specifier: workspace:*
+        version: link:../eslint-config
+      '@repo/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: ^22.15.3
+        version: 22.15.3
+      dotenv-cli:
+        specifier: ^11.0.0
+        version: 11.0.0
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
+      typescript:
+        specifier: ^5.9.3
+        version: 5.9.3
+
   packages/services:
     dependencies:
       '@repo/ai':

@@ -31,6 +31,8 @@
     "./gmail/backfill-priority.js": "./gmail/backfill-priority.ts",
     "./gmail/daily-briefing": "./gmail/daily-briefing.ts",
     "./gmail/daily-briefing.js": "./gmail/daily-briefing.ts",
+    "./gmail/drafts": "./gmail/drafts.ts",
+    "./gmail/drafts.js": "./gmail/drafts.ts",
      "./calendar/index": "./calendar/index.ts",
     "./calendar/index.js": "./calendar/index.ts",
     "./calendar/watch": "./calendar/watch.ts",

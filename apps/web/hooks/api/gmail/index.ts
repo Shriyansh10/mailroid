@@ -405,6 +405,123 @@ export const useCategoryCounts = () => {
   return result;
 };
 
+// ── Mailbox actions (Bin / Star) ────────────────────────────────────
+//
+// Every mutation here invalidates the same set: the thread moved between two
+// views, so both the list it left and the badge counts are now wrong. They all
+// share one helper rather than each remembering the full list.
+
+const useInboxInvalidate = () => {
+  const utils = trpc.useUtils();
+  return () => {
+    void utils.gmail.listByCategory.invalidate();
+    void utils.gmail.categoryCounts.invalidate();
+    void utils.gmail.listPriority.invalidate();
+    void utils.gmail.priorityCounts.invalidate();
+  };
+};
+
+/** Move a thread to Bin (Gmail TRASH). */
+export const useTrashThread = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.trash.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useTrashThread error", { error: error.message }),
+  });
+  return { trashThread: result.mutate, trashThreadAsync: result.mutateAsync, ...result };
+};
+
+/** Restore a thread out of Bin. */
+export const useUntrashThread = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.untrash.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useUntrashThread error", { error: error.message }),
+  });
+  return { untrashThread: result.mutate, untrashThreadAsync: result.mutateAsync, ...result };
+};
+
+/** Star / unstar a thread. */
+export const useSetStarred = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setStarred.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetStarred error", { error: error.message }),
+  });
+  return { setStarred: result.mutate, setStarredAsync: result.mutateAsync, ...result };
+};
+
+/**
+ * Reply/reply-all to a message. Unlike `useSendEmail`, this is entity-id
+ * based — the server derives the recipient and In-Reply-To/References
+ * headers from the actual message, which is what keeps the reply in the same
+ * Gmail conversation. Invalidates the same set as the mailbox actions above,
+ * since a sent reply can change unread/priority state on the thread.
+ */
+export const useReplyToEmail = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.replyToEmail.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useReplyToEmail error", { error: error.message }),
+  });
+  return { replyToEmail: result.mutate, replyToEmailAsync: result.mutateAsync, ...result };
+};
+
+/** Forward a message. `to` is caller-supplied; the quoted body is always rebuilt server-side. */
+export const useForwardEmail = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.forwardEmail.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useForwardEmail error", { error: error.message }),
+  });
+  return { forwardEmail: result.mutate, forwardEmailAsync: result.mutateAsync, ...result };
+};
+
+// ── Drafts ──────────────────────────────────────────────────────────
+
+/** Full draft contents, fetched only when a draft is actually being opened. */
+export const useDraft = (draftId?: string) =>
+  trpc.gmail.getDraft.useQuery(
+    { draftId: draftId ?? "" },
+    { enabled: !!draftId, staleTime: 0 },
+  );
+
+/** Create or update a draft — `draftId` present means update. */
+export const useSaveDraft = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.saveDraft.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSaveDraft error", { error: error.message }),
+  });
+  return { saveDraft: result.mutate, saveDraftAsync: result.mutateAsync, ...result };
+};
+
+export const useSendDraft = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.sendDraft.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSendDraft error", { error: error.message }),
+  });
+  return { sendDraft: result.mutate, sendDraftAsync: result.mutateAsync, ...result };
+};
+
+export const useDiscardDraft = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.discardDraft.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useDiscardDraft error", { error: error.message }),
+  });
+  return { discardDraft: result.mutate, discardDraftAsync: result.mutateAsync, ...result };
+};
+
 /**
  * Per-user realtime freshness. Polls the cheap `gmail.inboxVersion` token and,
  * when it grows (i.e. a webhook touched THIS user's mail), invalidates the

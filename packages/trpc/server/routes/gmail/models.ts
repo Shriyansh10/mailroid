@@ -4,6 +4,8 @@ import { z } from "zod";
 
 export const threadSummaryOutputModel = z.object({
   threadId: z.string(),
+  /** Gmail message id for this row — needed by row-level actions. */
+  entityId: z.string().optional(),
   sender: z.string(),
   subject: z.string(),
   date: z.string(),
@@ -14,6 +16,11 @@ export const threadSummaryOutputModel = z.object({
   isActionRequired: z.boolean().optional(),
   isReplyNeeded: z.boolean().optional(),
   isUnread: z.boolean().optional(),
+  isStarred: z.boolean().optional(),
+  /** PRIMARY/PROMOTIONS/SPAM/TRASH/DRAFT/… — lets rows render view-specific actions. */
+  category: z.string().optional(),
+  /** Gmail draft resource id; DRAFT rows only. Required to reopen or send the draft. */
+  draftId: z.string().optional(),
 });
 
 export const threadListOutputModel = z.object({
@@ -32,6 +39,10 @@ export const messageDetailOutputModel = z.object({
   body: z.string(),
   htmlBody: z.string(),
   snippet: z.string(),
+  /** True when this message is an unsent draft (Gmail groups drafts into their reply thread by threadId). */
+  isDraft: z.boolean().optional(),
+  /** Gmail draft resource id, present only when isDraft is true — needed to edit/send it. */
+  draftId: z.string().optional(),
 });
 
 export const threadDetailOutputModel = z.object({

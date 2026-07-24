@@ -94,6 +94,11 @@ const CATEGORY_TO_GMAIL_LABEL_ID: Record<string, string> = {
   UPDATES: "CATEGORY_UPDATES",
   FORUMS: "CATEGORY_FORUMS",
   SENT: "SENT",
+  // Now that the sync walks these too, they belong in the estimate — otherwise
+  // the progress bar's denominator is short by a whole mailbox's worth of spam.
+  SPAM: "SPAM",
+  TRASH: "TRASH",
+  DRAFT: "DRAFT",
 };
 
 /**

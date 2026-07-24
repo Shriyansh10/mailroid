@@ -18,8 +18,11 @@ export const threadSummarySchema = z.object({
   isActionRequired: z.boolean().optional(),
   isReplyNeeded: z.boolean().optional(),
   isUnread: z.boolean().optional(),
+  isStarred: z.boolean().optional(),
   /** Gmail-style category (PRIMARY/UPDATES/PROMOTIONS/SPAM/…), enriched from message_metadata for display bucketing. */
   category: z.string().optional(),
+  /** Gmail draft resource id — present only on DRAFT rows, needed to reopen/send the draft. */
+  draftId: z.string().optional(),
 });
 
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
@@ -42,6 +45,10 @@ export const messageDetailSchema = z.object({
   body: z.string(),
   htmlBody: z.string(),
   snippet: z.string(),
+  /** True when this message is an unsent draft (Gmail groups drafts into their reply thread by threadId). */
+  isDraft: z.boolean().optional(),
+  /** Gmail draft resource id, present only when isDraft is true — needed to edit/send it. */
+  draftId: z.string().optional(),
 });
 
 export type MessageDetail = z.infer<typeof messageDetailSchema>;

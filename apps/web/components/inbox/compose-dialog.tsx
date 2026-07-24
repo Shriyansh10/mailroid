@@ -1,10 +1,10 @@
 "use client";
 
-import React, { useCallback } from "react";
+import React, { useCallback, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
-import { PencilIcon, SendIcon, Loader2Icon } from "lucide-react";
+import { PencilIcon, SendIcon, Loader2Icon, SaveIcon, Trash2Icon } from "lucide-react";
 import { toast } from "sonner";
 
 import {
@@ -26,7 +26,12 @@ import {
   FormControl,
   FormMessage,
 } from "@web/components/ui/form";
-import { useSendEmail } from "@web/hooks/api/gmail";
+import {
+  useSendEmail,
+  useSaveDraft,
+  useSendDraft,
+  useDiscardDraft,
+} from "@web/hooks/api/gmail";
 
 // ── Schema ───────────────────────────────────────────────────────────
 
@@ -41,32 +46,63 @@ const composeSchema = z.object({
 
 // ── Props ────────────────────────────────────────────────────────────
 
+/** What the dialog opens with — a blank compose, a reply, or an existing draft. */
+export interface ComposePrefill {
+  to?: string;
+  subject?: string;
+  body?: string;
+  /** Keeps a reply in its original Gmail thread. */
+  threadId?: string;
+  /** Present when editing an existing draft: saving updates it in place. */
+  draftId?: string;
+}
+
 interface ComposeDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onSent?: () => void;
+  prefill?: ComposePrefill;
 }
+
+const EMPTY = { to: "", subject: "", body: "" };
 
 // ── Component ────────────────────────────────────────────────────────
 
-export function ComposeDialog({ open, onOpenChange, onSent }: ComposeDialogProps) {
+export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDialogProps) {
   const { sendEmailAsync } = useSendEmail();
+  const { saveDraftAsync } = useSaveDraft();
+  const { sendDraftAsync } = useSendDraft();
+  const { discardDraftAsync } = useDiscardDraft();
 
   const form = useForm({
     resolver: zodResolver(composeSchema),
-    defaultValues: { to: "", subject: "", body: "" },
+    defaultValues: EMPTY,
   });
 
   const { isSubmitting } = form.formState;
+  const draftId = prefill?.draftId;
+  const threadId = prefill?.threadId;
+
+  // Load the prefill when the dialog opens. Keyed on `open` as well as the
+  // prefill itself so reopening on the same draft re-seeds the fields the user
+  // may have edited and abandoned last time.
+  useEffect(() => {
+    if (!open) return;
+    form.reset({
+      to: prefill?.to ?? "",
+      subject: prefill?.subject ?? "",
+      body: prefill?.body ?? "",
+    });
+  }, [open, prefill?.to, prefill?.subject, prefill?.body, prefill?.draftId, form]);
 
   const resetAndClose = useCallback(() => {
-    form.reset();
+    form.reset(EMPTY);
     onOpenChange(false);
   }, [form, onOpenChange]);
 
   const handleOpenChange = useCallback(
     (next: boolean) => {
-      if (!next) form.reset();
+      if (!next) form.reset(EMPTY);
       onOpenChange(next);
     },
     [form, onOpenChange],
@@ -75,17 +111,24 @@ export function ComposeDialog({ open, onOpenChange, onSent }: ComposeDialogProps
   const onSubmit = useCallback(
     async (values: { to: string; subject: string; body: string }) => {
       try {
-        await sendEmailAsync({
-          to: values.to.trim(),
-          subject: values.subject.trim(),
-          body: values.body,
-        });
+        // An open draft is sent via drafts.send so Gmail consumes the draft
+        // itself. Sending a fresh copy instead would leave the draft behind.
+        if (draftId) {
+          await sendDraftAsync({ draftId });
+        } else {
+          await sendEmailAsync({
+            to: values.to.trim(),
+            subject: values.subject.trim(),
+            body: values.body,
+            ...(threadId ? { threadId } : {}),
+          });
+        }
 
         toast.success("Email sent!", {
           description: `Message sent to ${values.to.trim()}`,
         });
 
-        form.reset();
+        form.reset(EMPTY);
         onOpenChange(false);
         onSent?.();
       } catch (err) {
@@ -94,8 +137,51 @@ export function ComposeDialog({ open, onOpenChange, onSent }: ComposeDialogProps
         toast.error("Failed to send", { description: message });
       }
     },
-    [sendEmailAsync, form, onOpenChange, onSent],
+    [sendEmailAsync, sendDraftAsync, draftId, threadId, form, onOpenChange, onSent],
   );
+
+  /**
+   * Save without sending. Deliberately does NOT run the zod resolver: a draft
+   * is by definition unfinished, and refusing to save one because the recipient
+   * isn't a valid address yet is exactly the moment you most want it saved.
+   */
+  const handleSaveDraft = useCallback(async () => {
+    const values = form.getValues();
+    try {
+      await saveDraftAsync({
+        to: values.to.trim(),
+        subject: values.subject.trim(),
+        // getValues() returns the pre-resolver input shape, where the zod
+        // `.default("")` hasn't been applied yet — an untouched body is
+        // genuinely undefined here.
+        body: values.body ?? "",
+        ...(threadId ? { threadId } : {}),
+        ...(draftId ? { draftId } : {}),
+      });
+      toast.success(draftId ? "Draft updated" : "Draft saved");
+      form.reset(EMPTY);
+      onOpenChange(false);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to save draft";
+      toast.error("Couldn't save draft", { description: message });
+    }
+  }, [form, saveDraftAsync, draftId, threadId, onOpenChange]);
+
+  /** Discard: deletes the draft in Gmail when editing one, else just closes. */
+  const handleDiscard = useCallback(async () => {
+    if (!draftId) {
+      resetAndClose();
+      return;
+    }
+    try {
+      await discardDraftAsync({ draftId });
+      toast.success("Draft discarded");
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Failed to discard draft";
+      toast.error("Couldn't discard draft", { description: message });
+    }
+    resetAndClose();
+  }, [draftId, discardDraftAsync, resetAndClose]);
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
@@ -105,9 +191,13 @@ export function ComposeDialog({ open, onOpenChange, onSent }: ComposeDialogProps
             style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
           >
             <PencilIcon className="size-4" />
-            New Message
+            {draftId ? "Edit Draft" : "New Message"}
           </DialogTitle>
-          <DialogDescription>Compose and send a new email.</DialogDescription>
+          <DialogDescription>
+            {draftId
+              ? "Changes are saved back to this draft in Gmail."
+              : "Compose and send a new email."}
+          </DialogDescription>
         </DialogHeader>
 
         <Form {...form}>
@@ -175,12 +265,22 @@ export function ComposeDialog({ open, onOpenChange, onSent }: ComposeDialogProps
 
             <DialogFooter>
               <Button
-                variant="outline"
+                variant="ghost"
                 type="button"
-                onClick={resetAndClose}
+                onClick={handleDiscard}
                 disabled={isSubmitting}
               >
+                <Trash2Icon className="size-4" />
                 Discard
+              </Button>
+              <Button
+                variant="outline"
+                type="button"
+                onClick={handleSaveDraft}
+                disabled={isSubmitting}
+              >
+                <SaveIcon className="size-4" />
+                {draftId ? "Update draft" : "Save as draft"}
               </Button>
               <Button type="submit" disabled={isSubmitting}>
                 {isSubmitting ? (

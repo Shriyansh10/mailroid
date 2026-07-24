@@ -12,7 +12,7 @@
     "declaration": false,
     "sourceMap": false
   },
-  "include": ["src", "src/scripts/create-instance.ts"],
+  "include": ["src"],
   "ts-node": {
     "swc": true
   }
