@@ -190,6 +190,13 @@
       "when": 1784757386579,
       "tag": "0028_add_vector_indexes",
       "breakpoints": true
+    },
+    {
+      "idx": 29,
+      "version": "7",
+      "when": 1784903221958,
+      "tag": "0029_new_dark_beast",
+      "breakpoints": true
     }
   ]
 }
