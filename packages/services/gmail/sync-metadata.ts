@@ -329,15 +329,22 @@ export async function syncCategoryPage(
 }
 
 /**
- * `onPage` is invoked after each page with the running total so the in-process
- * path can report progress the same way gmailInitialSync does — without it the
- * onboarding waiting screen sits at "Imported 0 emails" for the entire sync.
+ * `onPage` is invoked after each page so the in-process path can report
+ * progress the same way gmailInitialSync does — without it the onboarding
+ * waiting screen sits at "Imported 0 emails" for the entire sync. It takes no
+ * arguments: the progress number is counted from the DB by updateSyncProgress,
+ * not accumulated here.
+ *
+ * The returned total is the sum of per-page `processed` counts, which counts
+ * thread expansions and therefore double-counts messages shared between
+ * categories (see countSyncedMessages). It is a work-done figure for logs and
+ * the resync CLI — never show it to a user as a mailbox size.
  */
 export async function syncAllEmails(
   userId: string,
   category: string,
   runningTotal = 0,
-  onPage?: (total: number) => Promise<void>,
+  onPage?: () => Promise<unknown>,
 ): Promise<number> {
   let pageToken: string | undefined;
   let total = runningTotal;
@@ -351,7 +358,7 @@ export async function syncAllEmails(
     pageToken = nextPageToken;
     total += processed;
     logger.debug("[SYNC] page complete", { category, processed, total, hasNext: Boolean(pageToken) });
-    if (onPage) await onPage(total);
+    if (onPage) await onPage();
   } while (pageToken);
 
   return total;
@@ -380,12 +387,14 @@ export async function triggerGmailSync(userId: string): Promise<void> {
   await markSyncRunning(userId, estimatedTotal);
   try {
     // Report progress per page so the waiting screen moves on this path too.
-    // The cursor stays null here, honestly: unlike gmailInitialSync this path
-    // genuinely cannot resume — a restart mid-sync starts over.
-    const total = await syncMailbox(userId, (processed) =>
-      updateSyncProgress(userId, { categoryIndex: 0, pageToken: null }, processed),
+    // categoryIndex is real (the waiting screen renders a "step N of 9" stage
+    // from it); the page token stays null, honestly, because unlike
+    // gmailInitialSync this path genuinely cannot resume — a restart mid-sync
+    // starts over.
+    await syncMailbox(userId, (categoryIndex) =>
+      updateSyncProgress(userId, { categoryIndex, pageToken: null }),
     );
-    await markSyncComplete(userId, total);
+    await markSyncComplete(userId);
   } catch (err) {
     await markSyncFailed(userId);
     throw err;
@@ -394,14 +403,16 @@ export async function triggerGmailSync(userId: string): Promise<void> {
 
 export async function syncMailbox(
   userId: string,
-  onPage?: (total: number) => Promise<void>,
+  onPage?: (categoryIndex: number) => Promise<unknown>,
 ): Promise<number> {
   let total = 0;
-  for (const category of ALL_CATEGORIES) {
+  for (const [index, category] of ALL_CATEGORIES.entries()) {
     // Isolate each category so an exhausted-retry failure in one (e.g. a
     // large PROMOTIONS folder) doesn't abort the remaining categories.
     try {
-      total = await syncAllEmails(userId, category, total, onPage);
+      // Report the index of the category being worked on, so a stalled or
+      // failed category still leaves the waiting screen's stage label correct.
+      total = await syncAllEmails(userId, category, total, onPage && (() => onPage(index)));
     } catch (err) {
       logger.error("[SYNC] syncAllEmails category failed, continuing", {
         userId, category, error: String(err),

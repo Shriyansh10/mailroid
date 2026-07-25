@@ -18,11 +18,20 @@ import { pgTable, text, integer, jsonb, timestamp } from "drizzle-orm/pg-core";
 // category index and the Gmail page token — a single value would resume on
 // the right page of the wrong category.
 //
+// `processed` is a COUNT of this user's message_metadata rows (see
+// countSyncedMessages), recomputed on every progress write — not a running sum
+// of per-page counts. The sync lists threads and expands them to messages, so
+// a summed counter counts the same email once per category its thread touches
+// and overshoots the real mailbox by ~30%; the rows themselves are deduped on
+// entityId, so counting them is both correct and free of drift across resumes.
+//
 // `estimatedTotal` comes from Gmail's labels.get (messagesTotal) and is
 // display-only. Completion is always nextPageToken == null; label totals use
 // search semantics that drift from the sync's own query by a few percent, so
 // gating completion on `processed >= estimatedTotal` could leave the UI
-// waiting on a total that's never exactly reached.
+// waiting on a total that's never exactly reached. The waiting screen covers
+// that drift by also driving its bar off `cursor.categoryIndex`, which is
+// exact and always reaches the last category.
 export const gmailSyncStatus = pgTable("gmail_sync_status", {
   userId: text("user_id").primaryKey(),
   status: text("status").notNull().default("queued"),

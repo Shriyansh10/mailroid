@@ -1,6 +1,7 @@
 import { corsair } from "@repo/corsair";
-import { db, eq } from "@repo/database";
+import { db, eq, sql } from "@repo/database";
 import { gmailSyncStatus } from "@repo/database/models/gmail-sync-status";
+import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 import { ALL_CATEGORIES } from "./metadata.ts";
@@ -48,24 +49,63 @@ export async function markSyncRunning(userId: string, estimatedTotal: number | n
     });
 }
 
-/** Called after every page. Never touches `status` — only the run that exhausts pagination does. */
+/**
+ * How many distinct emails this user actually has, counted from the rows the
+ * sync wrote.
+ *
+ * This exists because the sync's own page counter cannot be trusted as a
+ * progress number. syncCategoryPage lists *threads* but counts *messages*
+ * (`processed: messages.length`), and threads.get returns every message in a
+ * thread regardless of which label it carries — so a conversation you replied
+ * to is counted once under PRIMARY and again under SENT, and a thread that
+ * merely contains one personal message drags its promo/update siblings into
+ * the PRIMARY tally too. Summed across nine categories that overshot the real
+ * mailbox by ~30%, which is how the waiting screen ended up rendering
+ * "Imported 1,998 / ~1,561 emails".
+ *
+ * The DB never had that problem — upsertMessageMetadataBatch dedupes on
+ * entityId — so counting rows gives the deduped truth in the same unit as
+ * estimateMailboxTotal's denominator (distinct messages, not thread
+ * expansions). One indexed count per page is negligible beside the 100-thread
+ * threads.get fan-out that precedes it.
+ *
+ * Archived rows are included on purpose: they are emails we hold and imported,
+ * and excluding them would make the number visibly walk backwards when a
+ * Gmail purge lands mid-sync.
+ */
+export async function countSyncedMessages(userId: string): Promise<number> {
+  const [row] = await db
+    .select({ count: sql<string>`count(*)` })
+    .from(messageMetadata)
+    .where(eq(messageMetadata.userId, userId));
+  return Number(row?.count ?? 0);
+}
+
+/**
+ * Called after every page. Never touches `status` — only the run that exhausts
+ * pagination does. Returns the freshly counted total so callers can log the
+ * real number rather than their own inflated accumulator.
+ */
 export async function updateSyncProgress(
   userId: string,
   cursor: SyncCursor,
-  processed: number,
-): Promise<void> {
+): Promise<number> {
+  const processed = await countSyncedMessages(userId);
   await db
     .update(gmailSyncStatus)
     .set({ cursor, processed, updatedAt: new Date() })
     .where(eq(gmailSyncStatus.userId, userId));
+  return processed;
 }
 
 /** Written only by the run whose while-loop exits with nextPageToken == null on every category. */
-export async function markSyncComplete(userId: string, processed: number): Promise<void> {
+export async function markSyncComplete(userId: string): Promise<number> {
+  const processed = await countSyncedMessages(userId);
   await db
     .update(gmailSyncStatus)
     .set({ status: "complete", processed, cursor: null, updatedAt: new Date() })
     .where(eq(gmailSyncStatus.userId, userId));
+  return processed;
 }
 
 /** Written by onFailure once Inngest's retries are exhausted. */

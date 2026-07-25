@@ -62,8 +62,11 @@ export const gmailInitialSync = inngest.createFunction(
     const isFirstRun = event.data.categoryIndex === undefined;
     let categoryIndex: number = event.data.categoryIndex ?? 0;
     let pageToken: string | undefined = event.data.pageToken ?? undefined;
-    let syncedTotal: number = event.data.syncedTotal ?? 0;
     let pagesThisRun = 0;
+    // Deduped row count from the last progress write. Not carried across
+    // continuation events — updateSyncProgress recounts from the DB, so a
+    // continuation picks up the correct total without being told it.
+    let syncedTotal = 0;
 
     if (isFirstRun) {
       const estimatedTotal = await step.run("sync-status-estimate", () =>
@@ -77,12 +80,11 @@ export const gmailInitialSync = inngest.createFunction(
 
       // pagesThisRun increments across the whole run (not reset per category),
       // so this step id is unique within the run and deterministic on replay.
-      const { processed, nextPageToken } = await step.run(
+      const { nextPageToken } = await step.run(
         `sync-${category}-page-${pagesThisRun}`,
         () => syncCategoryPage(userId, category, pageToken),
       );
 
-      syncedTotal += processed;
       pagesThisRun += 1;
 
       if (nextPageToken) {
@@ -92,12 +94,11 @@ export const gmailInitialSync = inngest.createFunction(
         pageToken = undefined;
       }
 
-      await step.run(`sync-status-progress-${pagesThisRun}`, () =>
-        updateSyncProgress(
-          userId,
-          { categoryIndex, pageToken: pageToken ?? null },
-          syncedTotal,
-        ),
+      // The page's own `processed` is deliberately discarded — it counts
+      // thread expansions, which double-count across categories (see
+      // countSyncedMessages). The DB row count is the progress number.
+      syncedTotal = await step.run(`sync-status-progress-${pagesThisRun}`, () =>
+        updateSyncProgress(userId, { categoryIndex, pageToken: pageToken ?? null }),
       );
 
       if (
@@ -106,14 +107,14 @@ export const gmailInitialSync = inngest.createFunction(
       ) {
         await step.sendEvent("continue-gmail-sync", {
           name: "gmail/sync.requested",
-          data: { userId, categoryIndex, pageToken, syncedTotal },
+          data: { userId, categoryIndex, pageToken },
         });
         return { userId, syncedTotal, continued: true };
       }
     }
 
-    await step.run("sync-status-complete", () => markSyncComplete(userId, syncedTotal));
+    const total = await step.run("sync-status-complete", () => markSyncComplete(userId));
 
-    return { userId, syncedTotal, done: true };
+    return { userId, syncedTotal: total, done: true };
   },
 );

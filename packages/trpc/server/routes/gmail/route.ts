@@ -21,6 +21,7 @@ import {
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
 import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
+import { ALL_CATEGORIES } from "@repo/services/gmail/metadata.js";
 import {
   startClassificationJob,
   getLatestClassificationJob,
@@ -352,14 +353,29 @@ export const gmailRouter = router({
         status: z.enum(["queued", "running", "complete", "failed"]).nullable(),
         processed: z.number(),
         estimatedTotal: z.number().nullable(),
+        // Which category the sync is on, derived from the resume cursor. This
+        // is the waiting screen's second progress signal: `processed /
+        // estimatedTotal` depends on a Gmail label estimate that drifts, but
+        // the stage is exact and always ends at totalCategories — so the bar
+        // keeps moving even when the estimate is wrong.
+        stage: z.string().nullable(),
+        stageIndex: z.number(),
+        totalStages: z.number(),
       }),
     )
     .query(async ({ ctx }) => {
       const row = await getSyncStatus(ctx.user!.id);
+      const stageIndex = Math.min(
+        row?.cursor?.categoryIndex ?? 0,
+        ALL_CATEGORIES.length - 1,
+      );
       return {
         status: (row?.status as "queued" | "running" | "complete" | "failed" | undefined) ?? null,
         processed: row?.processed ?? 0,
         estimatedTotal: row?.estimatedTotal ?? null,
+        stage: ALL_CATEGORIES[stageIndex] ?? null,
+        stageIndex,
+        totalStages: ALL_CATEGORIES.length,
       };
     }),
 

@@ -12,11 +12,25 @@ import { Button } from "@web/components/ui/button";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 
 // ── mailbox sync waiting screen ───────────────────────────────────────
+
+/** Sync category names → what the user calls that part of their mailbox. */
+const STAGE_LABELS: Record<string, string> = {
+  PRIMARY: "Primary",
+  PROMOTIONS: "Promotions",
+  SOCIAL: "Social",
+  UPDATES: "Updates",
+  FORUMS: "Forums",
+  SENT: "Sent",
+  SPAM: "Spam",
+  TRASH: "Bin",
+  DRAFT: "Drafts",
+};
+
 function SyncProgress({ enabled }: { enabled: boolean }) {
   const { data } = useSyncStatus({ enabled });
   if (!enabled || !data || !data.status || data.status === "complete") return null;
 
-  const { status, processed, estimatedTotal } = data;
+  const { status, processed, estimatedTotal, stage, stageIndex, totalStages } = data;
 
   if (status === "failed") {
     return (
@@ -26,23 +40,42 @@ function SyncProgress({ enabled }: { enabled: boolean }) {
     );
   }
 
-  const label = status === "queued"
-    ? "Waiting to start — another mailbox is syncing first…"
-    : estimatedTotal
-      ? `Imported ${processed.toLocaleString()} / ~${estimatedTotal.toLocaleString()} emails…`
-      : `Imported ${processed.toLocaleString()} emails…`;
+  // `estimatedTotal` is a sum of Gmail label totals and drifts by a few percent
+  // from what the sync actually writes, so the count can finish a little over
+  // or under it. Clamping keeps the copy sane in the over case; the stage
+  // fallback below keeps the bar moving in the under case.
+  const shown = estimatedTotal ? Math.min(processed, estimatedTotal) : processed;
 
+  const countPct = estimatedTotal
+    ? Math.round((shown / estimatedTotal) * 100)
+    : 0;
+  // Exact and guaranteed to reach 100 — unlike countPct it cannot stall on a
+  // bad estimate. Taking the max of the two means the bar advances on whichever
+  // signal is ahead, and since both only ever increase it never walks backwards.
+  const stagePct = Math.round((stageIndex / totalStages) * 100);
+  // Held below 100 while running: the sync is done when `status` says so, not
+  // when a label estimate happens to be reached.
   const progress = status === "queued"
     ? 0
+    : Math.min(99, Math.max(countPct, stagePct));
+
+  const heading = status === "queued"
+    ? "Waiting to start…"
+    : stage
+      ? `Importing ${STAGE_LABELS[stage] ?? stage.toLowerCase()}… (${stageIndex + 1} of ${totalStages})`
+      : "Preparing your mailbox…";
+
+  const detail = status === "queued"
+    ? "Another mailbox is syncing first — yours starts as soon as it finishes."
     : estimatedTotal
-      ? Math.min(100, Math.round((processed / estimatedTotal) * 100))
-      : undefined;
+      ? `${shown.toLocaleString()} of ~${estimatedTotal.toLocaleString()} emails imported`
+      : `${shown.toLocaleString()} emails imported`;
 
   return (
     <div className="mt-6 rounded-xl border bg-card/50 p-4">
-      <p className="text-sm font-medium text-foreground/90 mb-2">Preparing your mailbox…</p>
-      <Progress value={progress ?? 0} className="h-2" />
-      <p className="mt-2 text-xs text-muted-foreground">{label}</p>
+      <p className="text-sm font-medium text-foreground/90 mb-2">{heading}</p>
+      <Progress value={progress} className="h-2" />
+      <p className="mt-2 text-xs text-muted-foreground">{detail}</p>
     </div>
   );
 }
