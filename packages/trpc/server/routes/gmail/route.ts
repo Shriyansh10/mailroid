@@ -28,6 +28,7 @@ import {
   retryFailedClassifications,
   getClassifyControlsStatus,
 } from "@repo/services/gmail/classification.js";
+import { getAiReadiness } from "@repo/services/gmail/ai-readiness.js";
 import {
   threadListOutputModel,
   threadDetailOutputModel,
@@ -487,6 +488,36 @@ export const gmailRouter = router({
       return getClassifyControlsStatus(ctx.user!.id);
     }),
 
+  // Gates Dobbie/semantic search. `ready` is a write-once latch — true
+  // forever once a user's first-ever classify window has fully classified,
+  // hydrated, AND indexed. `setup` is only populated while ready === false
+  // and drives the setup progress bar; see ai-readiness.ts for why this is
+  // NOT a live "drained right now" check (that would flicker Dobbie off on
+  // every new webhook email).
+  aiReadiness: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/ai-readiness"),
+        tags: TAGS,
+      },
+    })
+    .output(
+      z.object({
+        ready: z.boolean(),
+        setup: z
+          .object({
+            classification: z.object({ done: z.number(), total: z.number() }),
+            hydration: z.object({ done: z.number(), total: z.number() }),
+            indexing: z.object({ done: z.number(), total: z.number() }),
+          })
+          .nullable(),
+      }),
+    )
+    .query(async ({ ctx }) => {
+      return getAiReadiness(ctx.user!.id);
+    }),
+
   storedCount: protectedProcedure
     .meta({
       openapi: {
@@ -524,6 +555,14 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, query: input.query });
+      // Belt-and-braces alongside the client-side disabled search input:
+      // `ready` is a one-time latch (see ai-readiness.ts), so this only ever
+      // blocks a user's first-ever setup window, never an established user.
+      const readiness = await getAiReadiness(ctx.user!.id);
+      if (!readiness.ready) {
+        logger.info("[TRPC] gmail.searchLocal short-circuited: AI setup not ready", { userId: ctx.user!.id });
+        return { threads: [], total: 0 };
+      }
       const result = await searchLocalEmails(ctx.user!.id, { query: input.query });
       logger.info("[TRPC] gmail.searchLocal result", {
         userId: ctx.user!.id, query: input.query,

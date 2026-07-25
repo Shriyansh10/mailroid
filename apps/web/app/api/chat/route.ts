@@ -23,6 +23,7 @@ import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
 import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel } from "@web/lib/assistant/history";
 import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import { getProtectedConfig } from "@repo/services/profile/index";
+import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
 import { matchProtectedKeyword } from "@repo/shared";
 
 export const runtime = "nodejs";
@@ -175,6 +176,37 @@ export async function POST(request: Request) {
     });
 
     const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+
+    // ── AI setup gate ────────────────────────────────────────────────
+    // Belt-and-braces alongside the client-side disabled state: `ready` is a
+    // one-time latch (see ai-readiness.ts) that only ever blocks a user's
+    // FIRST-EVER classify window — once set it stays true forever, so this
+    // never re-triggers for an established user just because a webhook email
+    // hasn't finished indexing yet.
+    const readiness = await getAiReadiness(userId);
+    if (!readiness.ready) {
+      const notReadyMessage =
+        "Dobbie is still finishing your inbox's one-time setup — classifying and indexing your " +
+        "mail so answers here are grounded in it. This won't take long, and you won't need to do " +
+        "this again once it's done.";
+
+      await db.insert(assistantMessages).values({
+        conversationId,
+        role: "assistant",
+        content: notReadyMessage,
+      });
+
+      await db
+        .update(conversations)
+        .set({ lastMessagePreview: notReadyMessage.slice(0, 100), updatedAt: new Date() })
+        .where(eq(conversations.id, conversationId));
+
+      return NextResponse.json({
+        content: notReadyMessage,
+        conversationId,
+        newMessages: [{ role: "assistant", content: notReadyMessage }],
+      });
+    }
 
     // ── Protected-keyword short-circuit ─────────────────────────────
     // If the user's own message mentions a protected keyword (e.g. "otp"),

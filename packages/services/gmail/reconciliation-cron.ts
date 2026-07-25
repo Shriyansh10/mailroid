@@ -1,7 +1,8 @@
 import { inngest } from "@repo/inngest";
-import { db, eq, and, lt } from "@repo/database";
+import { db, eq, and, lt, sql } from "@repo/database";
 import { gmailSyncStatus } from "@repo/database/models/gmail-sync-status";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
+import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
@@ -74,6 +75,52 @@ export const reconciliationCron = inngest.createFunction(
       });
     }
 
-    return { stalledSyncs: stalledSyncs.length, stalledJobs: stalledJobs.length };
+    // Hydration has no separate job-bookkeeping table (unlike sync/classify) —
+    // message_metadata.hydration_status IS the checkpoint. A row stuck at
+    // HYDRATING (claimed, then the worker/container died before ingestMessage
+    // resolved) is indistinguishable from "still fetching" without the
+    // updatedAt staleness check, since PENDING alone can't tell "never picked
+    // up" from "worker died mid-fetch" apart — that's the whole reason
+    // HYDRATING exists as its own state. Grouped by user so one re-kick event
+    // resumes every stale row for that user, using the earliest stale row's
+    // receivedAt as the resumption `since` (hydration keeps no persisted job
+    // row to read a `since` back from, unlike classification_jobs).
+    const stalledHydrations = await step.run("find-stalled-hydrations", () =>
+      db
+        .select({
+          userId: messageMetadata.userId,
+          minReceivedAt: sql<string>`min(${messageMetadata.receivedAt})`,
+        })
+        .from(messageMetadata)
+        .where(and(eq(messageMetadata.hydrationStatus, "HYDRATING"), lt(messageMetadata.updatedAt, staleBefore)))
+        .groupBy(messageMetadata.userId),
+    );
+
+    for (const row of stalledHydrations) {
+      await step.run(`reset-hydrating-${row.userId}`, () =>
+        db
+          .update(messageMetadata)
+          .set({ hydrationStatus: "PENDING", updatedAt: new Date() })
+          .where(
+            and(
+              eq(messageMetadata.userId, row.userId),
+              eq(messageMetadata.hydrationStatus, "HYDRATING"),
+              lt(messageMetadata.updatedAt, staleBefore),
+            ),
+          ),
+      );
+
+      await step.sendEvent(`rekick-hydration-${row.userId}`, {
+        name: "email/hydrate.requested",
+        data: { userId: row.userId, since: new Date(row.minReceivedAt).toISOString() },
+      });
+      logger.warn("[RECONCILE] re-kicked stalled hydration", { userId: row.userId });
+    }
+
+    return {
+      stalledSyncs: stalledSyncs.length,
+      stalledJobs: stalledJobs.length,
+      stalledHydrations: stalledHydrations.length,
+    };
   },
 );

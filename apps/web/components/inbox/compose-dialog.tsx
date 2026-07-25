@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -15,6 +15,15 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@web/components/ui/dialog";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@web/components/ui/alert-dialog";
 import { Button } from "@web/components/ui/button";
 import { Input } from "@web/components/ui/input";
 import { Textarea } from "@web/components/ui/textarea";
@@ -32,6 +41,16 @@ import {
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
+import { useCreateEvent } from "@web/hooks/api/calendar";
+import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
+import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
+import {
+  MeetingInviteFields,
+  emptyMeetingState,
+  meetingStateFromTemplate,
+  buildEventInput,
+  type MeetingState,
+} from "@web/components/inbox/meeting-invite-fields";
 
 // ── Schema ───────────────────────────────────────────────────────────
 
@@ -73,6 +92,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const { saveDraftAsync } = useSaveDraft();
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
+  const { createEventAsync } = useCreateEvent();
 
   const form = useForm({
     resolver: zodResolver(composeSchema),
@@ -82,6 +102,13 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const { isSubmitting } = form.formState;
   const draftId = prefill?.draftId;
   const threadId = prefill?.threadId;
+
+  const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
+  // A pending template/AI apply awaiting overwrite confirmation.
+  const [pendingApply, setPendingApply] = useState<null | {
+    kind: "body" | "meeting";
+    run: () => void;
+  }>(null);
 
   // Load the prefill when the dialog opens. Keyed on `open` as well as the
   // prefill itself so reopening on the same draft re-seeds the fields the user
@@ -93,7 +120,61 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
       subject: prefill?.subject ?? "",
       body: prefill?.body ?? "",
     });
+    setMeetingState(emptyMeetingState());
   }, [open, prefill?.to, prefill?.subject, prefill?.body, prefill?.draftId, form]);
+
+  // ── Template / AI apply, with overwrite confirmation ────────────────
+  //
+  // Picking a template or generating replaces the body (and maybe subject /
+  // meeting). When there's already content, confirm first so a stray click
+  // can't wipe a half-written message or a configured meeting time.
+
+  const applyTemplate = useCallback(
+    (template: MailTemplate) => {
+      const applyBody = () => {
+        form.setValue("subject", template.subject);
+        form.setValue("body", template.body);
+      };
+      const applyMeeting = () => {
+        if (template.includesMeeting) {
+          setMeetingState(meetingStateFromTemplate(template));
+        }
+      };
+
+      const bodyDirty = Boolean(form.getValues("body")?.trim());
+      const meetingDirty = meetingState.enabled;
+      const meetingConflict = template.includesMeeting && meetingDirty;
+
+      if (bodyDirty || meetingConflict) {
+        setPendingApply({
+          kind: meetingConflict ? "meeting" : "body",
+          run: () => {
+            applyBody();
+            applyMeeting();
+          },
+        });
+        return;
+      }
+      applyBody();
+      applyMeeting();
+    },
+    [form, meetingState.enabled],
+  );
+
+  const applyGenerated = useCallback(
+    (result: { subject?: string; body: string }) => {
+      const run = () => {
+        form.setValue("body", result.body);
+        if (result.subject !== undefined) form.setValue("subject", result.subject);
+      };
+      if (form.getValues("body")?.trim()) {
+        setPendingApply({ kind: "body", run });
+        return;
+      }
+      run();
+    },
+    [form],
+  );
 
   const resetAndClose = useCallback(() => {
     form.reset(EMPTY);
@@ -128,16 +209,41 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           description: `Message sent to ${values.to.trim()}`,
         });
 
+        // Build the event input BEFORE resetting form/meeting state — the
+        // retry closure below must capture a concrete value, since the reset
+        // right after wipes meetingState/values.
+        const eventInput = buildEventInput(
+          meetingState,
+          values.subject.trim(),
+          values.to.trim() ? [values.to.trim()] : [],
+        );
+
         form.reset(EMPTY);
+        setMeetingState(emptyMeetingState());
         onOpenChange(false);
         onSent?.();
+
+        // Calendar invite is independent of the send: never block or roll back
+        // an email that already went out. On failure, offer a Retry that only
+        // re-attempts the event.
+        if (eventInput) {
+          const createEvent = () =>
+            createEventAsync(eventInput)
+              .then(() => toast.success("Calendar invite created"))
+              .catch(() =>
+                toast.error("Email sent, but the calendar invite couldn't be created", {
+                  action: { label: "Retry", onClick: createEvent },
+                }),
+              );
+          void createEvent();
+        }
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Failed to send email";
         toast.error("Failed to send", { description: message });
       }
     },
-    [sendEmailAsync, sendDraftAsync, draftId, threadId, form, onOpenChange, onSent],
+    [sendEmailAsync, sendDraftAsync, createEventAsync, meetingState, draftId, threadId, form, onOpenChange, onSent],
   );
 
   /**
@@ -205,6 +311,11 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
             onSubmit={form.handleSubmit(onSubmit)}
             style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
           >
+            <div className="flex flex-wrap items-center gap-2">
+              <TemplatePicker onSelect={applyTemplate} disabled={isSubmitting} />
+              <AiGeneratePanel mode="compose" onGenerated={applyGenerated} disabled={isSubmitting} />
+            </div>
+
             <FormField
               control={form.control}
               name="to"
@@ -263,6 +374,12 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
               )}
             />
 
+            <MeetingInviteFields
+              value={meetingState}
+              onChange={setMeetingState}
+              disabled={isSubmitting}
+            />
+
             <DialogFooter>
               <Button
                 variant="ghost"
@@ -299,6 +416,38 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           </form>
         </Form>
       </DialogContent>
+
+      <AlertDialog
+        open={!!pendingApply}
+        onOpenChange={(next) => !next && setPendingApply(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingApply?.kind === "meeting"
+                ? "Replace your current meeting details?"
+                : "Replace your current draft text?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingApply?.kind === "meeting"
+                ? "This template has its own meeting settings, which will overwrite the ones you've set."
+                : "Your current message will be replaced with the template or generated text."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              onClick={() => {
+                pendingApply?.run();
+                setPendingApply(null);
+              }}
+            >
+              Replace
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </Dialog>
   );
 }

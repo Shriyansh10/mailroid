@@ -107,6 +107,8 @@ export {
 export type { ProfileOverrideInput } from "./prompts/overrides.ts";
 export { summarizeEmail } from "./prompts/summarize.ts";
 export type { EmailSummaryResult } from "./prompts/summarize.ts";
+export { generateEmailContent } from "./prompts/generate-email.ts";
+export type { GenerateEmailInput, GenerateEmailResult } from "./prompts/generate-email.ts";
 export { analyzeDocument, DocumentType } from "./prompts/analyze-document.ts";
 export type { DocumentAnalysis } from "./prompts/analyze-document.ts";
 export { evaluateFeedback } from "./prompts/feedback-evaluator.ts";

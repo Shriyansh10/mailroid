@@ -18,6 +18,7 @@ import { Avatar, AvatarImage, AvatarFallback } from "@web/components/ui/avatar";
 import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import { authClient, useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
+import { useAiReadiness } from "@web/hooks/api/gmail";
 
 function getInitials(name: string): string {
   return name
@@ -32,6 +33,10 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
   const router = useRouter();
   const [composeOpen, setComposeOpen] = useState(false);
   const { data: session } = useSession();
+  // Gates the Dobbie nav link — a one-time latch (see ai-readiness.ts), so
+  // this only ever disables it during a user's first-ever setup window.
+  const { data: aiReadiness } = useAiReadiness();
+  const aiReady = aiReadiness?.ready ?? false;
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -119,8 +124,14 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
           </button>
 
           <button
-            onClick={() => router.push("/assistant")}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/15"
+            onClick={() => { if (aiReady) router.push("/assistant"); }}
+            disabled={!aiReady}
+            title={aiReady ? undefined : "Dobbie is still finishing your inbox's one-time setup"}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              aiReady
+                ? "bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/15"
+                : "bg-muted/40 text-muted-foreground opacity-60 cursor-not-allowed"
+            }`}
           >
             <BotIcon className="size-4" />
             <span className="flex-1 text-left">Dobbie</span>

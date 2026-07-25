@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { db, eq, and, lt, gte, inArray, notInArray, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
@@ -24,14 +25,17 @@ export const MAX_CLASSIFICATION_ATTEMPTS = 3;
  * Categories that are never worth an LLM call.
  *
  * Spam and Bin are mail the user has already (or Gmail has already) judged,
- * and a draft is the user's own unsent text — none of them can be "high
- * priority correspondence", and none of them appear in the priority inbox.
- * This matters beyond taste: these folders are large (tens of thousands of
- * spam messages is normal), they sync as PENDING like everything else, and
- * without this filter the batch classifier would work through the entire spam
- * folder one paid LLM call at a time.
+ * a draft is the user's own unsent text, and Sent is a copy of what the user
+ * themselves wrote — none of them can be "high priority correspondence", and
+ * none of them belong in the priority inbox (getPriorityEmails/
+ * getPriorityCounts in metadata.ts also exclude SENT from what's displayed,
+ * so this list must match that exclusion or classification just burns LLM
+ * calls on mail the UI would hide anyway). This matters beyond taste: spam
+ * folders are large (tens of thousands of messages is normal), they sync as
+ * PENDING like everything else, and without this filter the batch classifier
+ * would work through the entire spam folder one paid LLM call at a time.
  */
-const UNCLASSIFIABLE_CATEGORIES = ["SPAM", "TRASH", "DRAFT"] as any[];
+const UNCLASSIFIABLE_CATEGORIES = ["SPAM", "TRASH", "DRAFT", "SENT"] as any[];
 
 /** Shared by the batch selection query and the job-sizing count, so the number
  *  the UI promises and the rows the classifier actually takes cannot drift. */
@@ -317,12 +321,29 @@ export type StartClassificationJobResult =
  * Creates the job row and fires its first batch event, mirroring
  * triggerGmailSync's own pattern of owning its trigger rather than leaving
  * the caller (tRPC route) to send the event itself.
+ *
+ * Also fires email/hydrate.requested for the SAME window, independently of
+ * classification's own alreadyRunning/totalCount guards — hydration is
+ * decoupled on purpose (see hydrate-batch.ts): it has its own PENDING rows
+ * to check regardless of whether classification has anything left to
+ * classify. One correlationId ties classification, hydration, and the
+ * indexing it triggers back to this single click, purely for tracing —
+ * none of the three pipelines depend on it functionally.
  */
 export async function startClassificationJob(
   userId: string,
   scope: ClassificationScope,
 ): Promise<StartClassificationJobResult> {
-  const job = await createClassificationJob(userId, scope);
+  const since = scopeToSinceDate(scope);
+  const correlationId = randomUUID();
+
+  const { inngest } = await import("@repo/inngest");
+  await inngest.send({
+    name: "email/hydrate.requested",
+    data: { userId, since: since.toISOString(), correlationId },
+  });
+
+  const job = await createClassificationJob(userId, scope, since);
   if ("alreadyRunning" in job) {
     return { started: false, reason: "already_running" };
   }
@@ -332,12 +353,11 @@ export async function startClassificationJob(
     return { started: true, jobId: null, totalCount: 0 };
   }
 
-  const { inngest } = await import("@repo/inngest");
   await inngest.send({
     name: "classification/batch.requested",
-    data: { jobId: job.id, userId, since: job.since.toISOString() },
+    data: { jobId: job.id, userId, since: job.since.toISOString(), correlationId },
   });
-  logger.info("[CLASSIFY] job started", { userId, scope, jobId: job.id, totalCount: job.totalCount });
+  logger.info("[CLASSIFY] job started", { userId, scope, jobId: job.id, totalCount: job.totalCount, correlationId });
 
   return { started: true, jobId: job.id, totalCount: job.totalCount };
 }

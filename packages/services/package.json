@@ -18,6 +18,14 @@
     "./gmail/classification.js": "./gmail/classification.ts",
     "./gmail/classification-batch": "./gmail/classification-batch.ts",
     "./gmail/classification-batch.js": "./gmail/classification-batch.ts",
+    "./gmail/hydration": "./gmail/hydration.ts",
+    "./gmail/hydration.js": "./gmail/hydration.ts",
+    "./gmail/hydration-batch": "./gmail/hydration-batch.ts",
+    "./gmail/hydration-batch.js": "./gmail/hydration-batch.ts",
+    "./gmail/index-batch": "./gmail/index-batch.ts",
+    "./gmail/index-batch.js": "./gmail/index-batch.ts",
+    "./gmail/ai-readiness": "./gmail/ai-readiness.ts",
+    "./gmail/ai-readiness.js": "./gmail/ai-readiness.ts",
     "./gmail/reconciliation-cron": "./gmail/reconciliation-cron.ts",
     "./gmail/reconciliation-cron.js": "./gmail/reconciliation-cron.ts",
     "./gmail/webhook-sync": "./gmail/webhook-sync.ts",
@@ -51,7 +59,9 @@
     "./clients/index": "./clients/index.ts",
     "./clients/index.js": "./clients/index.ts",
     "./assistant/index": "./assistant/index.ts",
-    "./assistant/index.js": "./assistant/index.ts"
+    "./assistant/index.js": "./assistant/index.ts",
+    "./mail-templates/index": "./mail-templates/index.ts",
+    "./mail-templates/index.js": "./mail-templates/index.ts"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

@@ -14,6 +14,15 @@ import { toast } from "sonner";
 import { Button } from "@web/components/ui/button";
 import { Input } from "@web/components/ui/input";
 import { Textarea } from "@web/components/ui/textarea";
+import {
+  AlertDialog,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@web/components/ui/alert-dialog";
 import { cn } from "@web/lib/utils";
 import {
   useReplyToEmail,
@@ -22,6 +31,16 @@ import {
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
+import { useCreateEvent } from "@web/hooks/api/calendar";
+import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
+import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
+import {
+  MeetingInviteFields,
+  emptyMeetingState,
+  meetingStateFromTemplate,
+  buildEventInput,
+  type MeetingState,
+} from "@web/components/inbox/meeting-invite-fields";
 
 export type InlineReplyMode = "reply" | "replyAll" | "forward";
 
@@ -142,6 +161,7 @@ export function InlineReplyBox({
   const { saveDraftAsync } = useSaveDraft();
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
+  const { createEventAsync } = useCreateEvent();
 
   // `to` is editable whenever there's no fixed recipient to derive: forwarding
   // always needs one supplied, and resuming a draft edits whatever Gmail has
@@ -153,6 +173,63 @@ export function InlineReplyBox({
   const [to, setTo] = useState(initialTo ?? "");
   const [body, setBody] = useState(initialBody ?? "");
   const [submitting, setSubmitting] = useState(false);
+  const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
+  const [pendingApply, setPendingApply] = useState<null | {
+    kind: "body" | "meeting";
+    run: () => void;
+  }>(null);
+
+  // The sender's bare address, for seeding calendar attendees on a reply.
+  // Parsed from the display `from` the same way [threadId]/page.tsx does.
+  const senderEmail = (() => {
+    const match = quoted.from.match(/<([^>]+)>/);
+    return match ? match[1]! : quoted.from;
+  })();
+
+  // ── Template / AI apply, with overwrite confirmation ────────────────
+  // Reply/forward never touch subject (it isn't shown inline).
+
+  const applyTemplate = (template: MailTemplate) => {
+    const run = () => {
+      setBody(template.body);
+      if (template.includesMeeting) setMeetingState(meetingStateFromTemplate(template));
+    };
+    const meetingConflict = template.includesMeeting && meetingState.enabled;
+    if (body.trim() || meetingConflict) {
+      setPendingApply({ kind: meetingConflict ? "meeting" : "body", run });
+      return;
+    }
+    run();
+  };
+
+  const applyGenerated = (result: { body: string }) => {
+    const run = () => setBody(result.body);
+    if (body.trim()) {
+      setPendingApply({ kind: "body", run });
+      return;
+    }
+    run();
+  };
+
+  // Fire an optional calendar invite after a successful send. Independent of
+  // the send: never blocks it, offers a Retry on failure. `eventInput` is
+  // built before onClose() unmounts this box.
+  const fireMeeting = useCallback(
+    (recipients: string[]) => {
+      const eventInput = buildEventInput(meetingState, subject, recipients);
+      if (!eventInput) return;
+      const createEvent = () =>
+        createEventAsync(eventInput)
+          .then(() => toast.success("Calendar invite created"))
+          .catch(() =>
+            toast.error("Sent, but the calendar invite couldn't be created", {
+              action: { label: "Retry", onClick: createEvent },
+            }),
+          );
+      void createEvent();
+    },
+    [meetingState, subject, createEventAsync],
+  );
 
   const containerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
@@ -194,6 +271,9 @@ export function InlineReplyBox({
         await replyToEmailAsync({ entityId, body, replyAll: mode === "replyAll" });
       }
       toast.success("Sent");
+      // Fire the optional calendar invite before onClose() unmounts the box —
+      // recipients are whatever this send actually used.
+      fireMeeting(toEditable ? (to.trim() ? [to.trim()] : []) : [senderEmail]);
       onSent();
       onClose();
     } catch (err) {
@@ -206,7 +286,7 @@ export function InlineReplyBox({
   }, [
     draftId, to, subject, body, threadId, mode, entityId,
     saveDraftAsync, sendDraftAsync, forwardEmailAsync, replyToEmailAsync,
-    onSent, onClose,
+    onSent, onClose, fireMeeting, toEditable, senderEmail,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
@@ -304,6 +384,21 @@ export function InlineReplyBox({
 
       {isFreshForward && <QuotedHistoryToggle quoted={quoted} variant="forward" alwaysOpen />}
 
+      <div className="flex flex-wrap items-center gap-2">
+        <TemplatePicker onSelect={applyTemplate} disabled={submitting} />
+        <AiGeneratePanel
+          mode={mode === "forward" ? "forward" : "reply"}
+          context={{
+            fromEmail: quoted.from,
+            to: quoted.to,
+            subject: quoted.subject,
+            body: quoted.body,
+          }}
+          onGenerated={applyGenerated}
+          disabled={submitting}
+        />
+      </div>
+
       <Textarea
         ref={bodyRef}
         value={body}
@@ -313,6 +408,8 @@ export function InlineReplyBox({
         rows={5}
         className="resize-none"
       />
+
+      <MeetingInviteFields value={meetingState} onChange={setMeetingState} disabled={submitting} />
 
       {/*
         Reply/Reply All (fresh or resumed-as-draft) get the collapsed
@@ -340,6 +437,38 @@ export function InlineReplyBox({
           Send
         </Button>
       </div>
+
+      <AlertDialog
+        open={!!pendingApply}
+        onOpenChange={(next) => !next && setPendingApply(null)}
+      >
+        <AlertDialogContent>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingApply?.kind === "meeting"
+                ? "Replace your current meeting details?"
+                : "Replace your current reply text?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingApply?.kind === "meeting"
+                ? "This template has its own meeting settings, which will overwrite the ones you've set."
+                : "Your current reply will be replaced with the template or generated text."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogCancel>Cancel</AlertDialogCancel>
+            <Button
+              type="button"
+              onClick={() => {
+                pendingApply?.run();
+                setPendingApply(null);
+              }}
+            >
+              Replace
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogContent>
+      </AlertDialog>
     </div>
   );
 }

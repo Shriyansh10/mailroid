@@ -23,6 +23,8 @@ import { inngest, emailPriority } from "@repo/inngest";
 import { gmailWatchCron } from "@repo/services/gmail/watch-cron.js";
 import { gmailInitialSync } from "@repo/services/gmail/initial-sync.js";
 import { classificationBatch } from "@repo/services/gmail/classification-batch.js";
+import { hydrateBatch } from "@repo/services/gmail/hydration-batch.js";
+import { indexBatch } from "@repo/services/gmail/index-batch.js";
 import { reconciliationCron } from "@repo/services/gmail/reconciliation-cron.js";
 import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
@@ -138,6 +140,8 @@ app.use(
       emailPriority,
       gmailInitialSync,
       classificationBatch,
+      hydrateBatch,
+      indexBatch,
       reconciliationCron,
       gmailWebhookSync,
     ],

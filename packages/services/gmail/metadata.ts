@@ -332,9 +332,13 @@ export async function getPriorityEmails(
     priorityFilter,
     sql`${messageMetadata.receivedAt} >= ${thresholdDate}`,
     // Priority triage is about live mail: purged rows are invisible everywhere,
-    // and spam/bin/drafts would otherwise compete for the HIGH bucket.
+    // and spam/bin/drafts/sent would otherwise compete for the HIGH bucket.
+    // Sent is excluded for the same reason searchLocalEmails excludes it
+    // (see index.ts) — it's a copy of what the user themselves wrote, not
+    // something they're triaging, and there's very little of it, so a sent
+    // email happening to score HIGH would sit at the top of the list.
     eq(messageMetadata.isArchived, false),
-    notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
+    notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT", "SENT"] as any[]),
   ];
 
   if (unreadOnly) {
@@ -428,7 +432,7 @@ export async function getPriorityCounts(
         // Must mirror getPriorityEmails' filters exactly, or the tab badges
         // promise rows the list itself refuses to show.
         eq(messageMetadata.isArchived, false),
-        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
+        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT", "SENT"] as any[]),
       )
     )
     .groupBy(messageMetadata.priority);

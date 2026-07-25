@@ -7,6 +7,7 @@ import { gmailRouter } from "./routes/gmail/route.js";
 import { calendarRouter } from "./routes/calendar/route.js";
 import { assistantRouter } from "./routes/assistant/route.js";
 import { profileRouter } from "./routes/profile/route.js";
+import { mailTemplatesRouter } from "./routes/mail-templates/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
@@ -15,6 +16,7 @@ export const serverRouter = router({
   calendar: calendarRouter,
   assistant: assistantRouter,
   profile: profileRouter,
+  mailTemplates: mailTemplatesRouter,
 });
 
 export { createContext } from "./context.js";

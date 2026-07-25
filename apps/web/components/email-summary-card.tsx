@@ -20,6 +20,7 @@ import {
   SheetTrigger,
 } from "@web/components/ui/sheet";
 import { cn } from "@web/lib/utils";
+import { useAiReadiness } from "@web/hooks/api/gmail";
 
 interface SummaryFlags {
   injectionBlocked: boolean;
@@ -110,6 +111,10 @@ export function EmailSummaryCard({
   initialFlags?: SummaryFlags | null;
 }) {
   const router = useRouter();
+  // Gates "Discuss with Dobbie" — a one-time latch (see ai-readiness.ts), so
+  // this only ever disables the button during a user's first-ever setup.
+  const { data: aiReadiness } = useAiReadiness();
+  const aiReady = aiReadiness?.ready ?? false;
   const [summary, setSummary] = useState<string | null>(initialSummary ?? null);
   const [digest, setDigest] = useState<string | null>(initialDigest ?? null);
   const [fullText, setFullText] = useState<string | null>(initialFullText ?? null);
@@ -151,7 +156,7 @@ export function EmailSummaryCard({
   // called summarizeEmail" round-trip itself — nothing about the email's
   // content is ever passed through the client for this, only the id.
   const handleDiscuss = async () => {
-    if (!entityId || discussLoading) return;
+    if (!entityId || discussLoading || !aiReady) return;
     setDiscussLoading(true);
     try {
       const res = await fetch("/api/chat/seed", {
@@ -283,7 +288,8 @@ export function EmailSummaryCard({
             <Button
               size="sm"
               onClick={handleDiscuss}
-              disabled={discussLoading}
+              disabled={discussLoading || !aiReady}
+              title={aiReady ? undefined : "Dobbie is still finishing your inbox's one-time setup"}
               className="gap-1.5 bg-[#b08d57] text-white hover:bg-[#8c6f37] text-xs h-8"
             >
               {discussLoading ? <Spinner className="size-3.5" /> : <BotIcon className="size-3.5" />}

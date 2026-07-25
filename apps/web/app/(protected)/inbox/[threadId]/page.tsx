@@ -48,6 +48,14 @@ export default function ThreadDetailPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
+  // Where "Back to Inbox" should return to — the exact list view (category,
+  // q, aiq, mode, page) the user came from, carried forward as `from` by
+  // DossierLayout's buildThreadHref (see page.tsx). Restricted to internal
+  // /inbox paths only, so this can never become an open redirect if `from`
+  // were ever tampered with in the URL.
+  const rawFrom = searchParams.get("from");
+  const backHref = rawFrom && rawFrom.startsWith("/inbox") ? rawFrom : "/inbox";
+
   const [isScheduling, setIsScheduling] = useState(false);
   const [meetingTitle, setMeetingTitle] = useState("");
   const [meetingDate, setMeetingDate] = useState("");
@@ -208,8 +216,10 @@ export default function ThreadDetailPage() {
   const closeBox = () => {
     setBox(null);
     if (resumeDraftId) {
-      // Strip ?draftId= so a refresh doesn't reopen an already-handled draft.
-      router.replace(`/inbox/${threadId}`);
+      // Strip ?draftId= so a refresh doesn't reopen an already-handled draft
+      // — but keep ?from= intact, or Back to Inbox would forget the list
+      // view this thread was opened from.
+      router.replace(rawFrom ? `/inbox/${threadId}?from=${encodeURIComponent(rawFrom)}` : `/inbox/${threadId}`);
     }
   };
 
@@ -240,7 +250,7 @@ export default function ThreadDetailPage() {
             {error?.message ?? "An unexpected error occurred while retrieving this thread."}
           </AlertDescription>
         </Alert>
-        <Button onClick={() => router.push("/inbox")} variant="outline">
+        <Button onClick={() => router.push(backHref)} variant="outline">
           <ArrowLeftIcon className="mr-2 h-4 w-4" />
           Back to Inbox
         </Button>
@@ -253,7 +263,7 @@ export default function ThreadDetailPage() {
       <div className="max-w-5xl mx-auto px-6 py-8 text-center space-y-4">
         <h2 className="text-xl font-semibold">Thread Not Found</h2>
         <p className="text-muted-foreground">The requested thread does not exist or you do not have permission to view it.</p>
-        <Button onClick={() => router.push("/inbox")} variant="outline">
+        <Button onClick={() => router.push(backHref)} variant="outline">
           <ArrowLeftIcon className="mr-2 h-4 w-4" />
           Back to Inbox
         </Button>
@@ -294,7 +304,7 @@ export default function ThreadDetailPage() {
       {/* Back link */}
       <div className="mb-5">
         <Link
-          href="/inbox"
+          href={backHref}
           className="inline-flex items-center gap-2 text-xs font-semibold text-muted-foreground hover:text-foreground transition-colors uppercase tracking-wider"
         >
           <ArrowLeftIcon className="size-3.5" /> Back to Inbox

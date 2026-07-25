@@ -378,6 +378,19 @@ export const useClassificationJobStatus = () => {
   });
 };
 
+/**
+ * Gates Dobbie/semantic search. `ready` is a write-once latch (see
+ * ai-readiness.ts) — once true it stays true, so polling stops entirely the
+ * moment it's observed true. Same stop-polling-once-settled shape as
+ * useClassificationJobStatus.
+ */
+export const useAiReadiness = () => {
+  return trpc.gmail.aiReadiness.useQuery(undefined, {
+    refetchInterval: (query) => (query.state.data?.ready ? false : 10_000),
+    staleTime: 0,
+  });
+};
+
 export const useCategoryCounts = () => {
   frontendLogger.info("[INBOX_HOOK]", "useCategoryCounts called");
   const startMs = Date.now();

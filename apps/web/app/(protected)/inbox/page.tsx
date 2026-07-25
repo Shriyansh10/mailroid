@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useEffect, useState, useMemo } from "react";
+import React, { useEffect, useState, useMemo, useCallback } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import {
   useCategoryEmails,
@@ -16,6 +16,7 @@ import {
   useRetryFailedClassifications,
   useClassificationJobStatus,
   useClassifyControlsStatus,
+  useAiReadiness,
 } from "@web/hooks/api/gmail";
 import { usePriorityProfile } from "@web/hooks/api/profile";
 import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
@@ -619,6 +620,25 @@ function DossierLayout({
   const { untrashThreadAsync } = useUntrashThread();
   const { setStarredAsync } = useSetStarred();
 
+  /**
+   * Builds a thread URL that carries the current list view (category, q,
+   * aiq, mode, page — whatever's in the address bar right now) forward as
+   * `from`, so the thread page's Back to Inbox can return to it exactly.
+   * Reads window.location directly rather than threading category/page
+   * props through, so it stays correct for both CategoryInbox and
+   * PriorityInbox (and any filter state a future view adds) with no extra
+   * plumbing.
+   */
+  const buildThreadHref = useCallback((threadId: string, extra?: Record<string, string>) => {
+    const params = new URLSearchParams();
+    if (extra) {
+      for (const [key, value] of Object.entries(extra)) params.set(key, value);
+    }
+    const from = `${window.location.pathname}${window.location.search}`;
+    params.set("from", from);
+    return `/inbox/${threadId}?${params.toString()}`;
+  }, []);
+
   const isBin = category === "TRASH";
   const isDraftView = category === "DRAFT";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
@@ -699,7 +719,7 @@ function DossierLayout({
 
     const handleOpen = () => {
       if (activeIndex !== null && visibleThreads[activeIndex]) {
-        router.push(`/inbox/${visibleThreads[activeIndex].threadId}`);
+        router.push(buildThreadHref(visibleThreads[activeIndex].threadId));
       }
     };
 
@@ -718,7 +738,7 @@ function DossierLayout({
       window.removeEventListener("mailroid-open-selected", handleOpen);
       window.removeEventListener("mailroid-archive-selected", handleArchiveSelected);
     };
-  }, [activeIndex, visibleThreads, router, selectedThreadId]);
+  }, [activeIndex, visibleThreads, router, selectedThreadId, buildThreadHref]);
 
   // Sync keyboard changes back to active selection state
   useEffect(() => {
@@ -790,7 +810,7 @@ function DossierLayout({
     try {
       const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId });
       if (draft.isReplyToExisting && draft.threadId) {
-        router.push(`/inbox/${draft.threadId}?draftId=${draft.draftId}`);
+        router.push(buildThreadHref(draft.threadId, { draftId: draft.draftId }));
         return;
       }
       window.dispatchEvent(
@@ -886,7 +906,7 @@ function DossierLayout({
                         void handleEditDraft(thread);
                         return;
                       }
-                      router.push(`/inbox/${thread.threadId}`);
+                      router.push(buildThreadHref(thread.threadId));
                     }}
                     className={cn(
                       "group relative flex flex-row items-center justify-between py-3 px-4 cursor-pointer border-b border-border transition-colors",
@@ -1321,6 +1341,80 @@ function FirstClassifyBanner() {
   );
 }
 
+/**
+ * Second progress bar, for the hydration+indexing half of AI setup —
+ * classification's own bar lives in ClassifyControls above. Renders nothing
+ * once `ready` latches true (see ai-readiness.ts) or before classification
+ * has even started (nothing to show yet). While classification is complete
+ * but hydration/indexing are still draining, also surfaces the "what's
+ * happening" helper text so the wait doesn't read as a stall or a bug.
+ */
+function AiSetupProgress() {
+  const [showInfo, setShowInfo] = React.useState(false);
+  const { data: readiness } = useAiReadiness();
+
+  if (!readiness || readiness.ready || !readiness.setup) return null;
+
+  const { classification, hydration, indexing } = readiness.setup;
+  // Nothing to show until the classify window has actually started (avoids a
+  // flash of an empty/zero progress bar before the user has clicked either
+  // scope button in FirstClassifyBanner).
+  if (classification.total === 0) return null;
+
+  const classificationDone = classification.done >= classification.total;
+  const searchTotal = Math.max(hydration.total, indexing.total, 1);
+  const searchDone = Math.min(hydration.done, indexing.done);
+  const pct = Math.min(100, Math.round((searchDone / searchTotal) * 100));
+
+  return (
+    <div className="mx-4 mb-4 rounded-xl border bg-card/50 p-4">
+      <div className="flex items-center justify-between gap-2 mb-2">
+        <div className="flex items-center gap-2">
+          <SparklesIcon className="size-4 text-[#b08d57]" />
+          <p className="text-sm font-semibold">Building your search index</p>
+        </div>
+        {classificationDone && (
+          <button
+            type="button"
+            onClick={() => setShowInfo((v) => !v)}
+            className="text-xs text-muted-foreground hover:text-foreground underline underline-offset-2"
+          >
+            ⓘ What's happening?
+          </button>
+        )}
+      </div>
+
+      <div className="h-2 rounded-full bg-muted overflow-hidden">
+        <div
+          className="h-full rounded-full bg-[#b08d57] transition-all"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <p className="mt-1.5 text-xs text-muted-foreground">
+        {searchDone.toLocaleString()} / {searchTotal.toLocaleString()} emails indexed for search ({pct}%)
+      </p>
+
+      {classificationDone && showInfo && (
+        <div className="mt-3 rounded-lg border bg-background/60 p-3 text-xs leading-relaxed text-muted-foreground">
+          <p className="font-medium text-foreground mb-1">Almost there — thanks for your patience.</p>
+          <p>
+            Your inbox has been classified. We&apos;re now building your private semantic search
+            index in the background, so Dobbie can answer questions grounded in your actual mail.
+            This is the final step and it runs automatically — you can keep using your inbox or
+            leave this page; it won&apos;t stop. Ask Dobbie and semantic search switch on the
+            moment it finishes.
+          </p>
+          <p className="mt-2">
+            This is a <span className="font-medium text-foreground">one-time setup</span>. Once
+            it completes you&apos;re done for good — you won&apos;t be asked to do this again, and
+            you won&apos;t be locked out of anything in the meantime.
+          </p>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ── Priority Inbox View ──────────────────────────────────────────────
 
 function PriorityInbox({
@@ -1393,7 +1487,7 @@ function PriorityInbox({
           </div>
         </div>
       }
-      banner={<FirstClassifyBanner />}
+      banner={<><FirstClassifyBanner /><AiSetupProgress /></>}
       pagination={
         <div className="flex items-center gap-3">
           <Button

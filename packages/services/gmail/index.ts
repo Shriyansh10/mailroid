@@ -784,6 +784,7 @@ export type IngestSource =
   | "sync-emails"
   | "initial-sync"
   | "manual-resync"
+  | "hydrate"
   | "unknown";
 
 /**
@@ -832,7 +833,7 @@ export async function ingestMessage(
   // fan-out can then be traced back to the single trigger that caused it,
   // which is what distinguishes "N new emails" from "one diff retried N times".
   correlationId?: string
-): Promise<void> {
+): Promise<{ hydrated: boolean }> {
   const startMs = Date.now();
   logger.info("[SERVICE] ingestMessage start", { tenantId, messageId, source, correlationId });
 
@@ -856,7 +857,13 @@ export async function ingestMessage(
         source,
         correlationId,
       });
-      return;
+      // Permanent — Gmail confirms this message no longer exists, so the
+      // hydration batch loop must never re-select it (see hydrationStatus
+      // comment on message-metadata.ts). Only relevant if a metadata row
+      // already exists (header import ran); if it doesn't, there's nothing
+      // to mark and a later header import will simply never create one.
+      await markHydrationGone(messageId);
+      return { hydrated: false };
     }
     // Anything else is a real failure (auth, transport, quota) and must keep
     // propagating so the caller refuses to advance its cursor past it.
@@ -870,7 +877,8 @@ export async function ingestMessage(
       source,
       correlationId,
     });
-    return;
+    await markHydrationGone(messageId);
+    return { hydrated: false };
   }
 
   const raw = msg as Record<string, unknown>;
@@ -940,6 +948,19 @@ export async function ingestMessage(
     threadId,
   });
 
+  // A body was just fetched and stored above — this row is hydrated,
+  // regardless of which caller (webhook, syncEmails, or the hydrate batch)
+  // triggered it. Deliberately a separate statement from
+  // upsertMessageMetadataBatch (used by the header-only onboarding import):
+  // that shared conflict-update path has no per-row awareness of hydration
+  // state, and folding hydrationStatus into it would reset an
+  // already-hydrated row back to PENDING every time onboarding's metadata
+  // sync happens to touch it again.
+  await db
+    .update(messageMetadata)
+    .set({ hydrationStatus: "DONE", hydrationAttempts: 0, updatedAt: new Date() })
+    .where(eq(messageMetadata.entityId, messageId));
+
   // Trigger priority classification for unread emails (commit success before
   // emitting event). Spam/Bin/Draft are skipped for the same reason the batch
   // classifier skips them (see UNCLASSIFIABLE_CATEGORIES in classification.ts):
@@ -982,6 +1003,17 @@ export async function ingestMessage(
     correlationId,
     durationMs: Date.now() - startMs,
   });
+
+  return { hydrated: true };
+}
+
+/** Marks a message_metadata row as permanently un-hydratable (Gmail confirms it's
+ *  gone). No-op if the row doesn't exist yet — nothing to mark. */
+async function markHydrationGone(messageId: string): Promise<void> {
+  await db
+    .update(messageMetadata)
+    .set({ hydrationStatus: "FAILED", updatedAt: new Date() })
+    .where(eq(messageMetadata.entityId, messageId));
 }
 
 
@@ -1695,6 +1727,67 @@ export async function getPendingEmbeddingsCount(
   const pending = Number(result[0]?.pending ?? 0);
   logger.debug("[DB] getPendingEmbeddingsCount", { userId, pending, durationMs: Date.now() - startMs });
   return { pending };
+}
+
+/**
+ * Embeds exactly the given entityIds (Gmail message ids), not a user-wide
+ * scan. Used by the hydration→indexing fan-out (email/index.requested):
+ * unlike generateMissingEmbeddings, this never re-scans the whole user's
+ * mailbox per call, and its overlap safety comes from the WHERE clause
+ * itself (embedding IS NULL) rather than the process-local coalescing map
+ * generateMissingEmbeddings relies on — so it's safe to call concurrently
+ * across containers for disjoint id sets.
+ */
+export async function generateEmbeddingsForEntities(
+  userId: string,
+  entityIds: string[],
+): Promise<EmbedResult> {
+  if (entityIds.length === 0) return { embedded: 0 };
+
+  const rows = await db
+    .select({ id: emails.id, subject: emails.subject, bodyText: emails.bodyText })
+    .from(emails)
+    .where(
+      and(
+        eq(emails.userId, userId),
+        inArray(emails.gmailMessageId, entityIds),
+        sql`${emails.embedding} IS NULL`,
+      ),
+    );
+
+  if (rows.length === 0) return { embedded: 0 };
+
+  let embedded = 0;
+  for (let i = 0; i < rows.length; i += EMBED_BATCH_SIZE) {
+    const batch = rows.slice(i, i + EMBED_BATCH_SIZE);
+    const texts = batch.map(
+      (e) => ((e.subject ?? "") + "\n\n" + (e.bodyText ?? "")).slice(0, 8000),
+    );
+
+    try {
+      const vectors = await createEmbeddingsBatch(texts);
+      for (let j = 0; j < batch.length; j++) {
+        const vec = vectors[j];
+        if (!vec) {
+          logger.warn("[SERVICE] no vector returned for email, skipping", { emailId: batch[j]!.id });
+          continue;
+        }
+        try {
+          await db.update(emails).set({ embedding: vec }).where(eq(emails.id, batch[j]!.id));
+          embedded += 1;
+        } catch (dbErr) {
+          logger.error("[DB] generateEmbeddingsForEntities update failed", { emailId: batch[j]!.id, error: String(dbErr) });
+        }
+      }
+    } catch (apiErr) {
+      logger.error("[SERVICE] generateEmbeddingsForEntities batch failed", {
+        userId, batchIndex: Math.floor(i / EMBED_BATCH_SIZE) + 1, error: String(apiErr),
+      });
+    }
+  }
+
+  logger.info("[SERVICE] generateEmbeddingsForEntities completed", { userId, requested: entityIds.length, embedded });
+  return { embedded };
 }
 
 export { getOrGenerateBrief, formatBriefingMarkdown } from "./daily-briefing.ts";

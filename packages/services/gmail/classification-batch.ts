@@ -43,6 +43,7 @@ export const classificationBatch = inngest.createFunction(
     const jobId: string = event.data.jobId;
     const userId: string = event.data.userId;
     const since = new Date(event.data.since);
+    const correlationId: string | undefined = event.data.correlationId;
 
     const outcome = await step.run("classify-batch", () =>
       runClassificationBatch(userId, since),
@@ -59,7 +60,7 @@ export const classificationBatch = inngest.createFunction(
     if (outcome.remaining > 0) {
       await step.sendEvent("continue-classification-batch", {
         name: "classification/batch.requested",
-        data: { jobId, userId, since: since.toISOString() },
+        data: { jobId, userId, since: since.toISOString(), correlationId },
       });
       return { jobId, continued: true, remaining: outcome.remaining };
     }

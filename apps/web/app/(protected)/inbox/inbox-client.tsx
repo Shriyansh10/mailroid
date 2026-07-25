@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, DownloadIcon, SparklesIcon, InboxIcon, SendIcon, StarIcon, FileTextIcon, ShieldAlertIcon, Trash2Icon, ChevronDownIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, SparklesIcon, InboxIcon, SendIcon, StarIcon, FileTextIcon, ShieldAlertIcon, Trash2Icon, ChevronDownIcon, LayoutTemplateIcon } from "lucide-react";
 import Image from "next/image";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -22,7 +22,7 @@ import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import type { ComposePrefill } from "@web/components/inbox/compose-dialog";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@web/components/ui/collapsible";
 import { authClient, useSession } from "@web/lib/auth-client";
-import { useSyncEmails, useStoredEmailCount, useGenerateEmbeddings, usePendingEmbeddingsCount, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
+import { useAiReadiness, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
 import { useCalendarSync } from "@web/hooks/api/calendar";
 import { frontendLogger } from "@web/lib/frontend-logger";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
@@ -93,11 +93,11 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   // Same for the calendar widgets shown on the inbox.
   useCalendarSync();
 
-  const { syncEmailsAsync, isPending: syncing } = useSyncEmails();
-  const { data: countData, refetch: refetchCount } = useStoredEmailCount();
-  const { generateEmbeddingsAsync, isPending: embedding } = useGenerateEmbeddings();
-  const { data: pendingData, refetch: refetchPending } = usePendingEmbeddingsCount();
   const { data: categoryCounts } = useCategoryCounts();
+  // Gates Ask Dobbie + AI search — a one-time latch (see ai-readiness.ts),
+  // so this only ever disables these for a user's first-ever setup window.
+  const { data: aiReadiness } = useAiReadiness();
+  const aiReady = aiReadiness?.ready ?? false;
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -136,20 +136,6 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     await authClient.signOut();
     router.push("/sign-in");
   }, [router]);
-
-  const handleSync = useCallback(async () => {
-    frontendLogger.info("[INBOX_UI]", "sync button clicked", { storedCount: countData?.count });
-    const result = await syncEmailsAsync();
-    refetchCount(); refetchPending();
-    frontendLogger.info("[INBOX_UI]", "sync completed", { synced: result.synced });
-  }, [syncEmailsAsync, refetchCount, refetchPending]);
-
-  const handleGenerateEmbeddings = useCallback(async () => {
-    frontendLogger.info("[INBOX_UI]", "embed button clicked");
-    const result = await generateEmbeddingsAsync();
-    refetchPending();
-    frontendLogger.info("[INBOX_UI]", "embedding completed", { embedded: result.embedded });
-  }, [generateEmbeddingsAsync, refetchPending]);
 
   const count = (cat: string) => categoryCounts?.[cat] ?? 0;
 
@@ -323,8 +309,14 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           </button>
 
           <button
-            onClick={() => router.push("/assistant")}
-            className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/15"
+            onClick={() => { if (aiReady) router.push("/assistant"); }}
+            disabled={!aiReady}
+            title={aiReady ? undefined : "Dobbie is still finishing your inbox's one-time setup"}
+            className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
+              aiReady
+                ? "bg-indigo-500/10 text-indigo-600 hover:bg-indigo-500/15"
+                : "bg-muted/40 text-muted-foreground opacity-60 cursor-not-allowed"
+            }`}
           >
             <BotIcon className="size-4" />
             <span className="flex-1 text-left">Dobbie</span>
@@ -360,25 +352,34 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 Search Gmail
               </button>
               <button
-                onClick={() => { navigateTo({ category, aiq: undefined, mode: "ai" }); }}
+                onClick={() => { if (aiReady) navigateTo({ category, aiq: undefined, mode: "ai" }); }}
+                disabled={!aiReady}
+                title={aiReady ? undefined : "Dobbie is still finishing your inbox's one-time setup"}
                 className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${
                   searchMode === "ai"
                     ? "bg-background text-foreground shadow-sm"
                     : "text-muted-foreground hover:text-foreground"
-                }`}
+                } ${!aiReady ? "opacity-50 cursor-not-allowed" : ""}`}
               >
                 Ask Dobbie
               </button>
             </div>
           </div>
-          
+
           <div className="flex-1 min-w-0">
             <div className="relative w-full">
               <SearchIcon className="absolute left-3 top-1/2 -translate-y-1/2 size-4 text-muted-foreground pointer-events-none" />
               <Input
                 ref={searchInputRef}
                 type="text"
-                placeholder={searchMode === "gmail" ? "Search your workspace..." : "Ask Dobbie about your emails…"}
+                disabled={searchMode === "ai" && !aiReady}
+                placeholder={
+                  searchMode === "gmail"
+                    ? "Search your workspace..."
+                    : aiReady
+                      ? "Ask Dobbie about your emails…"
+                      : "Dobbie is still setting up — hang tight…"
+                }
                 value={localValue}
                 onChange={handleChange}
                 className="pl-10 pr-10 w-full bg-transparent border-border text-muted-foreground focus-visible:bg-background focus-visible:text-foreground focus-visible:border-input transition-colors shadow-sm"
@@ -392,18 +393,6 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 </button>
               )}
             </div>
-          </div>
-
-
-          <div className="flex items-center gap-3 mr-4">
-            <Button variant="outline" size="sm" onClick={handleSync} disabled={syncing} className="gap-1.5 text-xs h-8">
-              <DownloadIcon className="size-3.5" />{syncing ? "Syncing…" : "Sync"}
-            </Button>
-            {countData && <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider whitespace-nowrap">Imported: {countData.count}</span>}
-            <Button variant="outline" size="sm" onClick={handleGenerateEmbeddings} disabled={embedding} className="gap-1.5 text-xs h-8">
-              <SparklesIcon className="size-3.5" />{embedding ? "Embedding…" : "Embed"}
-            </Button>
-            {pendingData !== undefined && <span className="text-[10px] text-muted-foreground font-medium uppercase tracking-wider whitespace-nowrap">Pending: {pendingData.pending}</span>}
           </div>
 
           <DropdownMenu>
@@ -434,6 +423,10 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
                 <KeyboardIcon className="mr-2 h-4 w-4" />
                 <span>Keyboard Shortcuts</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/templates")}>
+                <LayoutTemplateIcon className="mr-2 h-4 w-4" />
+                <span>Email Templates</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={handleLogout}>
