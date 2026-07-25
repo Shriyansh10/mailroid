@@ -62,16 +62,25 @@ const STEPS: {
   },
 ];
 
+// No `onSkip`: the profile is a required step of onboarding (see
+// app/(protected)/onboarding/personalize/page.tsx), and Settings — the only
+// other place this wizard renders — never offered a skip either.
 export function ProfileWizard({
   initialValues,
   onSave,
-  onSkip,
   saving,
+  showOnboardingNote,
 }: {
   initialValues?: PriorityProfile;
   onSave: (profile: PriorityProfile) => void | Promise<void>;
-  onSkip?: () => void;
   saving?: boolean;
+  /**
+   * Shows the step-1 callout explaining that these answers are editable but
+   * only affect future classifications. Onboarding only — Settings already
+   * says the same thing in its card description, and would otherwise state it
+   * twice in a row.
+   */
+  showOnboardingNote?: boolean;
 }) {
   const [step, setStep] = useState(0);
 
@@ -104,18 +113,6 @@ export function ProfileWizard({
             <span>
               Step {step + 1} of {STEPS.length}
             </span>
-            {onSkip && (
-              <Button
-                type="button"
-                variant="ghost"
-                size="sm"
-                onClick={onSkip}
-                disabled={saving}
-                className="text-muted-foreground"
-              >
-                Skip for now
-              </Button>
-            )}
           </div>
           <Progress value={((step + 1) / STEPS.length) * 100} className="h-1.5" />
         </div>
@@ -124,6 +121,47 @@ export function ProfileWizard({
           <h2 className="text-lg font-semibold">{current.title}</h2>
           <p className="text-sm text-muted-foreground">{current.description}</p>
         </div>
+
+        {/*
+          Step 1 only: the one thing a user is likely to get wrong here is
+          assuming this can be fixed later. It can be edited, but historical
+          classification is one-time (see inbox/page.tsx's ClassifyControls) and
+          this profile is the ONLY personalization the classifier ever reads
+          (getClassificationContext -> buildUserSummary -> prompt), so anything
+          already labelled keeps that label for good.
+
+          The example uses this very step's two fields on purpose — role and
+          currentSituation render as the literal first line of the summary the
+          model sees ("Student, currently: looking for a job."), so it describes
+          real behaviour rather than a plausible-sounding one.
+        */}
+        {showOnboardingNote && step === 0 && (
+          <div className="rounded-lg border border-[#b08d57]/30 bg-[#b08d57]/10 p-3 text-xs leading-relaxed">
+            <p>
+              <span className="font-medium">
+                You can edit these anytime in Settings
+              </span>{" "}
+              — but they only shape emails classified{" "}
+              <span className="font-medium">after</span> you save.
+              Already-classified mail keeps its label; emails can&apos;t be
+              re-classified.
+            </p>
+            <p className="mt-2 text-muted-foreground">
+              For example: answer{" "}
+              <span className="font-medium text-foreground/80">Student</span> +{" "}
+              <span className="font-medium text-foreground/80">
+                Looking for a job
+              </span>{" "}
+              and an interview invite lands in High while a sale alert drops to
+              Low. Answer{" "}
+              <span className="font-medium text-foreground/80">Founder</span> +{" "}
+              <span className="font-medium text-foreground/80">
+                Building a startup
+              </span>{" "}
+              and the same inbox puts an investor reply on top instead.
+            </p>
+          </div>
+        )}
 
         <current.Component />
 
@@ -141,8 +179,14 @@ export function ProfileWizard({
           </Button>
         </div>
 
+        {/*
+          Qualified deliberately: the unconditional "change all of this anytime"
+          this replaced was the last line read before Save & finish, and it
+          implied editing later would revisit past classifications.
+        */}
         <p className="text-center text-xs text-muted-foreground">
-          You can change all of this anytime in Settings → Personalization.
+          Editable later in Settings → Personalization — changes apply to future
+          classifications only.
         </p>
       </div>
     </Form>

@@ -4,6 +4,7 @@ import { auth } from "@web/lib/auth";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
 import { getAccountsExist } from "@repo/services/tenant/index";
 import { getSyncStatus } from "@repo/services/gmail/sync-status";
+import { getPriorityProfile } from "@repo/services/profile/index";
 import { logger } from "@repo/logger";
 
 /**
@@ -18,25 +19,33 @@ import { logger } from "@repo/logger";
 
 /**
  * "Fully onboarded" = both Gmail and Calendar connected, AND the initial
- * mailbox sync isn't currently queued/running. Deliberately the SAME
- * definition app/(protected)/layout.tsx already uses client-side
- * (getAccountsExist + useSyncStatus's queued/running check) — matching it
- * exactly is what prevents a redirect loop: that layout independently sends
- * a signed-in-but-not-yet-onboarded user TO /onboarding, so this guard must
- * agree on what "not yet onboarded" means or the two would fight each other.
+ * mailbox sync isn't currently queued/running, AND the personalization profile
+ * has been filled. Deliberately the SAME definition app/(protected)/layout.tsx
+ * uses client-side (getAccountsExist + useSyncStatus's queued/running check +
+ * usePriorityProfile's completedOnboarding) — matching it exactly is what
+ * prevents a redirect loop: that layout independently sends a signed-in-but-
+ * not-yet-onboarded user TO /onboarding, so this guard must agree on what "not
+ * yet onboarded" means or the two would fight each other.
+ *
+ * The profile clause is what makes the form compulsory rather than advisory.
+ * It has to be a routing-layer gate and not just a removed button, because the
+ * profile is only useful BEFORE the first classification — emails can't be
+ * re-classified — so "I'll do it later from Settings" is a door that quietly
+ * costs the user personalized priorities for their whole mailbox.
  *
  * getAccountsExist (not getConnectedPlugins) on purpose — a plain DB read,
  * not a live corsair token round-trip, since this runs on every navigation
  * to a guarded route.
  */
 async function isFullyOnboarded(userId: string): Promise<boolean> {
-  const [accounts, sync] = await Promise.all([
+  const [accounts, sync, profile] = await Promise.all([
     getAccountsExist(userId),
     getSyncStatus(userId),
+    getPriorityProfile(userId),
   ]);
   const bothConnected = accounts.gmail && accounts.calendar;
   const syncInProgress = sync?.status === "queued" || sync?.status === "running";
-  return bothConnected && !syncInProgress;
+  return bothConnected && !syncInProgress && profile?.completedOnboarding === true;
 }
 
 export async function proxy(request: NextRequest) {

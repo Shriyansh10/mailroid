@@ -99,9 +99,8 @@ function loadPersisted(): PluginName[] {
 function persist(plugins: PluginName[]) {
   try { localStorage.setItem(LS_KEY, JSON.stringify(plugins)); } catch { /* quota */ }
 }
-function clearPersisted() {
-  try { localStorage.removeItem(LS_KEY); } catch { /* ignore */ }
-}
+// The key is cleared by the personalize page's finish(), which is now the only
+// exit from onboarding.
 
 // ── component ─────────────────────────────────────────────────────────
 export default function OnboardingPage() {
@@ -189,17 +188,14 @@ export default function OnboardingPage() {
     }
   }, [getCalendarOAuthUrlAsync]);
 
-  // Primary CTA: the personalization wizard (which itself lands in /inbox).
+  // The only way out of onboarding: the personalization wizard, which is a
+  // required step (it lands in /inbox once saved). There is deliberately no
+  // "skip to inbox" path — the profile can only be filled BEFORE the first
+  // classification, since emails can't be re-classified afterwards, so a user
+  // who skips it silently forfeits personalized priorities forever.
   const handlePersonalize = useCallback(() => {
     setProceeding(true);
     router.push("/onboarding/personalize");
-  }, [router]);
-
-  // Secondary: skip personalization entirely and go straight to the inbox.
-  const handleProceed = useCallback(() => {
-    setProceeding(true);
-    clearPersisted();
-    router.push("/inbox");
   }, [router]);
 
   // ── derived state ───────────────────────────────────────────────
@@ -323,19 +319,10 @@ export default function OnboardingPage() {
                   : "Help us personalise your mailbox"}
             </Button>
 
-            <Button
-              variant="ghost"
-              onClick={handleProceed}
-              disabled={!bothConnected || proceeding || checkingServer || syncInProgress}
-              className="mt-2 w-full text-muted-foreground"
-            >
-              Skip for now
-            </Button>
-
             <p className="mt-3 text-center text-xs text-muted-foreground leading-relaxed">
-              The personalization form is also available in Settings. Remember
-              to fill it once before classifying — emails can&apos;t be
-              re-classified after.
+              Takes two to three minutes. It has to be filled once before
+              classifying — emails can&apos;t be re-classified after — so it&apos;s
+              part of setup rather than something to come back to.
             </p>
           </div>
         </div>

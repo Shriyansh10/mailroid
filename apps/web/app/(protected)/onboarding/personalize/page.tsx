@@ -5,10 +5,7 @@ import { useRouter } from "next/navigation";
 import Image from "next/image";
 import { toast } from "sonner";
 import { SparklesIcon } from "lucide-react";
-import {
-  DEFAULT_PRIORITY_PROFILE,
-  type PriorityProfile,
-} from "@repo/shared";
+import { type PriorityProfile } from "@repo/shared";
 import {
   usePriorityProfile,
   useUpsertPriorityProfile,
@@ -50,20 +47,6 @@ export default function PersonalizePage() {
     }
   };
 
-  const handleSkip = async () => {
-    try {
-      // Defaults with completedOnboarding=false: Settings keeps offering the
-      // fillable form, and the priority tab nudges before classifying.
-      await upsertProfileAsync({
-        data: DEFAULT_PRIORITY_PROFILE,
-        completedOnboarding: false,
-      });
-    } catch {
-      // Skipping must never trap the user on this page.
-    }
-    finish();
-  };
-
   if (isLoading || existing?.completedOnboarding) {
     return (
       <div className="min-h-screen bg-background flex items-center justify-center">
@@ -85,17 +68,17 @@ export default function PersonalizePage() {
           </h1>
           <p className="mt-2 max-w-md text-sm text-muted-foreground leading-relaxed">
             Two to three minutes now makes every classification about{" "}
-            <span className="font-medium text-foreground/80">you</span>. Fill
-            this once before classifying — emails can&apos;t be re-classified
-            later.
+            <span className="font-medium text-foreground/80">you</span>. This is
+            the last setup step — it has to be filled once before classifying,
+            because emails can&apos;t be re-classified later.
           </p>
         </div>
 
         <div className="rounded-2xl border bg-card/50 p-6 shadow-sm">
           <ProfileWizard
             onSave={handleSave}
-            onSkip={handleSkip}
             saving={isPending || leaving}
+            showOnboardingNote
           />
         </div>
       </div>
