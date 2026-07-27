@@ -211,6 +211,20 @@
       "when": 1784931472125,
       "tag": "0031_fluffy_jack_murdock",
       "breakpoints": true
+    },
+    {
+      "idx": 32,
+      "version": "7",
+      "when": 1785152487989,
+      "tag": "0032_calm_manta",
+      "breakpoints": true
+    },
+    {
+      "idx": 33,
+      "version": "7",
+      "when": 1785159333511,
+      "tag": "0033_tiresome_domino",
+      "breakpoints": true
     }
   ]
 }

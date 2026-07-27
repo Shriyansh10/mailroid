@@ -8,6 +8,7 @@
   "exports": {
     ".": "./index.ts",
     "./schema": "./schema.ts",
+    "./models/auth": "./models/auth.ts",
     "./models/corsair-connections": "./models/corsair-connections.ts",
     "./models/corsair": "./models/corsair.ts",
     "./models/emails": "./models/emails.ts",
@@ -21,7 +22,9 @@
     "./models/user-priority-profile": "./models/user-priority-profile.ts",
     "./models/email-chunks": "./models/email-chunks.ts",
     "./models/ai-setup-status": "./models/ai-setup-status.ts",
-    "./models/mail-templates": "./models/mail-templates.ts"
+    "./models/mail-templates": "./models/mail-templates.ts",
+    "./models/user-usage": "./models/user-usage.ts",
+    "./models/ai-usage": "./models/ai-usage.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

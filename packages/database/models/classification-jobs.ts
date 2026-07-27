@@ -24,6 +24,20 @@ export const classificationJobs = pgTable(
     since: timestamp("since", { withTimezone: true }).notNull(),
     processedCount: integer("processed_count").notNull().default(0),
     totalCount: integer("total_count").notNull().default(0),
+    // Credit-cap fields (bulk classification consumes 1 credit per 1,000
+    // emails — see packages/services/gmail/classification.ts). null
+    // maxToProcess means uncapped: the user's remaining credits covered the
+    // whole pending count at job-start time.
+    maxToProcess: integer("max_to_process"),
+    // True running total of emails actually sent to the LLM across every
+    // continuation of this job — distinct from processedCount above, which
+    // is a *derived display* value (totalCount - remaining), not an
+    // incrementing counter. Used to enforce maxToProcess across continuations.
+    attemptedCount: integer("attempted_count").notNull().default(0),
+    // What was actually charged for this job. Written once at creation and
+    // never recomputed — the accounting record of this job's cost, immune to
+    // later changes to the credits-per-1000-emails ratio.
+    creditsCharged: integer("credits_charged").notNull().default(0),
     startedAt: timestamp("started_at", { withTimezone: true }).notNull().defaultNow(),
     updatedAt: timestamp("updated_at", { withTimezone: true })
       .notNull()
