@@ -2,7 +2,7 @@ import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
 import { db, eq, and, sql } from "@repo/database";
 import { feedbacks, userUsage } from "@repo/database/schema";
-import { evaluateFeedback } from "@repo/ai";
+import { evaluateFeedback, withAiUsage } from "@repo/ai";
 
 export const runtime = "nodejs";
 
@@ -109,7 +109,7 @@ export async function POST(request: Request) {
 
     // Evaluate feedback via the AI model using original text (or normalized if requested,
     // let's use the normalized text as specified in the plan)
-    const evalResult = await evaluateFeedback(normalized);
+    const evalResult = await withAiUsage({ userId }, () => evaluateFeedback(normalized));
 
     const isApproved = evalResult.approved && evalResult.score >= 0.60;
     const isBorderline = !isApproved && evalResult.score >= 0.50 && evalResult.score < 0.60;

@@ -2,7 +2,7 @@ import { db, eq, and, or, gte, lte, gt } from "@repo/database";
 import { dailyBriefs } from "@repo/database/models/daily-briefs";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { calendarEvents } from "@repo/database/models/calendar-events";
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "@repo/ai";
+import { deepseek, DEEPSEEK_CHAT_MODEL, chatCompletion, withAiUsage } from "@repo/ai";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { logger } from "@repo/logger";
 import { getProtectedConfig } from "../profile/index.ts";
@@ -114,6 +114,10 @@ function getEmailRank(email: typeof messageMetadata.$inferSelect): number {
 }
 
 export async function getOrGenerateBrief(userId: string, localDate: string): Promise<string> {
+  return withAiUsage({ userId }, () => getOrGenerateBriefInner(userId, localDate));
+}
+
+async function getOrGenerateBriefInner(userId: string, localDate: string): Promise<string> {
   logger.info("[daily-briefing] Fetching brief for user", { userId, localDate });
 
   // The briefing is forward-looking: it only considers meetings from this
@@ -340,15 +344,19 @@ ${emailsString || "No critical emails."}
 `;
 
   // ── 5. Call DeepSeek ──────────────────────────────────────────────
-  const completion = await deepseek.chat.completions.create({
-    model: DEEPSEEK_CHAT_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user", content: userPrompt },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.2,
-  });
+  const completion = await chatCompletion(
+    deepseek,
+    {
+      model: DEEPSEEK_CHAT_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        { role: "user", content: userPrompt },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.2,
+    },
+    { feature: "daily-brief" },
+  );
 
   const rawJson = completion.choices[0]?.message?.content || "{}";
   let brief: StructuredBriefing;

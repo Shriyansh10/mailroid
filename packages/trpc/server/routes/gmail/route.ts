@@ -28,6 +28,10 @@ import {
   countFailedClassifications,
   retryFailedClassifications,
   getClassifyControlsStatus,
+  estimateClassificationCost,
+  computeCreditPlan,
+  scopeToSinceDate,
+  LLM_BATCH_SIZE,
 } from "@repo/services/gmail/classification.js";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness.js";
 import {
@@ -379,10 +383,70 @@ export const gmailRouter = router({
       };
     }),
 
+  // Read-only preview for the pre-start confirm dialog — never charges, never
+  // creates a job. Uses the exact same estimateClassificationCost the
+  // mutation below charges against, so the two can never diverge in formula
+  // (only in the harmless sense that time passes between preview and confirm).
+  classificationCostEstimate: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/classification-cost-estimate"),
+        tags: TAGS,
+      },
+    })
+    .input(z.object({ scope: z.enum(["last_week", "last_month"]) }))
+    .output(
+      z.object({
+        pendingCount: z.number(),
+        remainingCredits: z.number(),
+        capped: z.boolean(),
+        cappedCount: z.number(),
+        creditsToCharge: z.number(),
+        noCredits: z.boolean(),
+        estimatedAiRequests: z.number(),
+      }),
+    )
+    .query(async ({ ctx, input }) => {
+      const since = scopeToSinceDate(input.scope);
+      const estimate = await estimateClassificationCost(ctx.user!.id, since, ctx.user!.email);
+      return { ...estimate, estimatedAiRequests: Math.ceil(estimate.cappedCount / LLM_BATCH_SIZE) };
+    }),
+
+  // Same preview, for the Retry-failed button — pendingCount here is the
+  // FAILED-row count (what would be reset and retried), not a PENDING count.
+  retryClassificationCostEstimate: protectedProcedure
+    .meta({
+      openapi: {
+        method: "GET",
+        path: getPath("/retry-classification-cost-estimate"),
+        tags: TAGS,
+      },
+    })
+    .output(
+      z.object({
+        pendingCount: z.number(),
+        remainingCredits: z.number(),
+        capped: z.boolean(),
+        cappedCount: z.number(),
+        creditsToCharge: z.number(),
+        noCredits: z.boolean(),
+        estimatedAiRequests: z.number(),
+      }),
+    )
+    .query(async ({ ctx }) => {
+      const failedCount = await countFailedClassifications(ctx.user!.id);
+      const estimate = await computeCreditPlan(failedCount, ctx.user!.id, ctx.user!.email);
+      return { ...estimate, estimatedAiRequests: Math.ceil(estimate.cappedCount / LLM_BATCH_SIZE) };
+    }),
+
   // Starts a historical bulk classification job ("Classify Last Week" /
-  // "Classify Last Month"). Rejects with a friendly result (not an error) if
-  // one is already running for this user — the unique partial index on
-  // classification_jobs is the actual guard; this just surfaces it cleanly.
+  // "Classify Last Month"). Charges 1 credit per 1,000 pending emails
+  // (rounded up, capped to what the user's remaining credits can cover — see
+  // classification.ts's estimateClassificationCost) once, up front. Rejects
+  // with a friendly result (not an error) if one is already running for this
+  // user, if there are no credits left today, or if a concurrent request
+  // consumed the remaining credits between the estimate and the charge.
   startClassificationJob: protectedProcedure
     .meta({
       openapi: {
@@ -397,22 +461,35 @@ export const gmailRouter = router({
         started: z.boolean(),
         jobId: z.string().nullable(),
         totalCount: z.number(),
-        alreadyRunning: z.boolean(),
+        capped: z.boolean(),
+        cappedCount: z.number(),
+        creditsCharged: z.number(),
+        reason: z.enum(["already_running", "no_credits", "credits_changed"]).nullable(),
       }),
     )
     .mutation(async ({ ctx, input }) => {
       logger.info("[TRPC] gmail.startClassificationJob called", { userId: ctx.user!.id, scope: input.scope });
-      const result = await startClassificationJob(ctx.user!.id, input.scope);
+      const result = await startClassificationJob(ctx.user!.id, input.scope, ctx.user!.email);
       if (!result.started) {
-        return { started: false, jobId: null, totalCount: 0, alreadyRunning: true };
+        return { started: false, jobId: null, totalCount: 0, capped: false, cappedCount: 0, creditsCharged: 0, reason: result.reason };
       }
-      return { started: true, jobId: result.jobId, totalCount: result.totalCount, alreadyRunning: false };
+      return {
+        started: true,
+        jobId: result.jobId,
+        totalCount: result.totalCount,
+        capped: result.capped,
+        cappedCount: result.cappedCount,
+        creditsCharged: result.creditsCharged,
+        reason: null,
+      };
     }),
 
   // Clears the attempt cap on emails stuck at FAILED and classifies them.
   // Separate from startClassificationJob because it takes no scope — the
   // window is derived from where the failed rows are, which no fixed scope
-  // would reliably cover.
+  // would reliably cover. Costed identically to startClassificationJob —
+  // otherwise a user capped out on "Classify Last Month" could retry-loop
+  // their way to unlimited free classification.
   retryFailedClassifications: protectedProcedure
     .meta({
       openapi: {
@@ -428,21 +505,27 @@ export const gmailRouter = router({
         jobId: z.string().nullable(),
         totalCount: z.number(),
         resetCount: z.number(),
-        alreadyRunning: z.boolean(),
+        capped: z.boolean(),
+        cappedCount: z.number(),
+        creditsCharged: z.number(),
+        reason: z.enum(["already_running", "no_credits", "credits_changed"]).nullable(),
       }),
     )
     .mutation(async ({ ctx }) => {
       logger.info("[TRPC] gmail.retryFailedClassifications called", { userId: ctx.user!.id });
-      const result = await retryFailedClassifications(ctx.user!.id);
+      const result = await retryFailedClassifications(ctx.user!.id, ctx.user!.email);
       if (!result.started) {
-        return { started: false, jobId: null, totalCount: 0, resetCount: 0, alreadyRunning: true };
+        return { started: false, jobId: null, totalCount: 0, resetCount: 0, capped: false, cappedCount: 0, creditsCharged: 0, reason: result.reason };
       }
       return {
         started: true,
         jobId: result.jobId,
         totalCount: result.totalCount,
         resetCount: result.resetCount,
-        alreadyRunning: false,
+        capped: result.capped,
+        cappedCount: result.cappedCount,
+        creditsCharged: result.creditsCharged,
+        reason: null,
       };
     }),
 

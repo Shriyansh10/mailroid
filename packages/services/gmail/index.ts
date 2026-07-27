@@ -24,7 +24,7 @@ import type {
   EmbedResult,
   PendingEmbeddingsCount,
 } from "./model.ts";
-import { createEmbedding, createEmbeddingsBatch, embedSearchQuery } from "@repo/ai";
+import { createEmbedding, createEmbeddingsBatch, embedSearchQuery, withAiUsage } from "@repo/ai";
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -1555,7 +1555,7 @@ const EMBED_BATCH_SIZE = 20;
  */
 export async function validateEmbeddingsApi(): Promise<void> {
   try {
-    const embedding = await createEmbedding("test");
+    const embedding = await createEmbedding("test", { feature: "embed:healthcheck" });
 
     if (!embedding || embedding.length === 0) {
       console.warn(`[embeddings] ⚠️ API responded but returned no vector`);
@@ -1648,6 +1648,10 @@ export async function generateMissingEmbeddings(userId: string): Promise<EmbedRe
 }
 
 async function runGenerateMissingEmbeddings(userId: string): Promise<EmbedResult> {
+  return withAiUsage({ userId }, () => runGenerateMissingEmbeddingsInner(userId));
+}
+
+async function runGenerateMissingEmbeddingsInner(userId: string): Promise<EmbedResult> {
   const startMs = Date.now();
   logger.info("[SERVICE] generateMissingEmbeddings start", { userId });
 
@@ -1677,7 +1681,7 @@ async function runGenerateMissingEmbeddings(userId: string): Promise<EmbedResult
     );
 
     try {
-      const vectors = await createEmbeddingsBatch(texts);
+      const vectors = await createEmbeddingsBatch(texts, { feature: "embed:index" });
 
       for (let j = 0; j < batch.length; j++) {
         const vec = vectors[j];
@@ -1742,6 +1746,13 @@ export async function generateEmbeddingsForEntities(
   userId: string,
   entityIds: string[],
 ): Promise<EmbedResult> {
+  return withAiUsage({ userId }, () => generateEmbeddingsForEntitiesInner(userId, entityIds));
+}
+
+async function generateEmbeddingsForEntitiesInner(
+  userId: string,
+  entityIds: string[],
+): Promise<EmbedResult> {
   if (entityIds.length === 0) return { embedded: 0 };
 
   const rows = await db
@@ -1765,7 +1776,7 @@ export async function generateEmbeddingsForEntities(
     );
 
     try {
-      const vectors = await createEmbeddingsBatch(texts);
+      const vectors = await createEmbeddingsBatch(texts, { feature: "embed:index" });
       for (let j = 0; j < batch.length; j++) {
         const vec = vectors[j];
         if (!vec) {

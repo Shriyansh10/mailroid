@@ -3,6 +3,17 @@ export { embedSearchQuery } from "./embeddings/search.ts";
 
 export { deepseek, DEEPSEEK_CHAT_MODEL, MODEL_CONTEXT_WINDOW_TOKENS } from "./client.ts";
 
+// ── AI usage tracking ────────────────────────────────────────────────
+export { withAiUsage, currentAiUsage } from "./usage/context.ts";
+export type { AiUsageContext } from "./usage/context.ts";
+export {
+  chatCompletion,
+  streamChatCompletion,
+  embeddingsCreate,
+  tagClientProvider,
+} from "./usage/track.ts";
+export type { UsageMeta, UsageMetadata, UsageMetadataTag } from "./usage/track.ts";
+
 export {
   ChatMessageSchema,
   ChatRequestSchema,
@@ -105,7 +116,7 @@ export {
   extractSenderDomain,
 } from "./prompts/overrides.ts";
 export type { ProfileOverrideInput } from "./prompts/overrides.ts";
-export { summarizeEmail } from "./prompts/summarize.ts";
+export { summarizeEmail, NothingToSummarizeError } from "./prompts/summarize.ts";
 export type { EmailSummaryResult } from "./prompts/summarize.ts";
 export { generateEmailContent } from "./prompts/generate-email.ts";
 export type { GenerateEmailInput, GenerateEmailResult } from "./prompts/generate-email.ts";

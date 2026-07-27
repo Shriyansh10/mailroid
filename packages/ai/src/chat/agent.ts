@@ -1,4 +1,5 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { chatCompletion } from "../usage/track.ts";
 import type { ChatMessage } from "./types.ts";
 import type { AgentResponse } from "./types.ts";
 import type { ToolRegistry } from "../tools/registry.ts";
@@ -319,7 +320,10 @@ export async function runAgentLoop(
 
     let completion;
     try {
-      completion = await deepseek.chat.completions.create(params);
+      completion = await chatCompletion(deepseek, params, {
+        feature: "chat:agent",
+        metadata: { iteration },
+      });
     } catch (err) {
       console.error("[agent:deepseek:error]", {
         iteration,

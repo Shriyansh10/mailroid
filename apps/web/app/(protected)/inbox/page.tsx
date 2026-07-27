@@ -14,6 +14,8 @@ import {
   useSetStarred,
   useStartClassificationJob,
   useRetryFailedClassifications,
+  useClassificationCostEstimate,
+  useRetryClassificationCostEstimate,
   useClassificationJobStatus,
   useClassifyControlsStatus,
   useAiReadiness,
@@ -43,6 +45,16 @@ import {
 import { cn } from "@web/lib/utils";
 import { trpc } from "@web/trpc/client";
 import { toast } from "sonner";
+import {
+  AlertDialog,
+  AlertDialogAction,
+  AlertDialogCancel,
+  AlertDialogContent,
+  AlertDialogDescription,
+  AlertDialogFooter,
+  AlertDialogHeader,
+  AlertDialogTitle,
+} from "@web/components/ui/alert-dialog";
 import { motion, AnimatePresence } from "framer-motion";
 
 const CATEGORIES = [
@@ -1176,6 +1188,9 @@ function ClassifyControls() {
   const { data: controls } = useClassifyControlsStatus();
   const { retryFailedClassificationsAsync, isPending: isRetrying } =
     useRetryFailedClassifications();
+  const retryEstimate = useRetryClassificationCostEstimate();
+  const [confirmRetryOpen, setConfirmRetryOpen] = React.useState(false);
+  const [estimateLoading, setEstimateLoading] = React.useState(false);
   const utils = trpc.useUtils();
 
   const jobRunning = job?.status === "running";
@@ -1192,20 +1207,76 @@ function ClassifyControls() {
     prevRunning.current = jobRunning;
   }, [jobRunning, utils]);
 
+  const openConfirmRetry = async () => {
+    setEstimateLoading(true);
+    try {
+      await retryEstimate.refetch();
+      setConfirmRetryOpen(true);
+    } finally {
+      setEstimateLoading(false);
+    }
+  };
+
+  const REASON_MESSAGES: Record<string, string> = {
+    already_running: "Retry queued — a classification job is already running",
+    no_credits: "No credits left today — check back tomorrow",
+    credits_changed: "Your available credits changed — try again",
+  };
+
   const handleRetryFailed = async () => {
+    setConfirmRetryOpen(false);
     const result = await retryFailedClassificationsAsync({});
-    if (result.alreadyRunning) {
-      // The rows were still un-stuck (see retryFailedClassifications) — only
-      // the new job was refused, so this isn't a no-op the user should redo.
-      toast.info("Retry queued — a classification job is already running");
+    if (!result.started) {
+      // The rows were still un-stuck (see retryFailedClassifications) if this
+      // was already_running — only the new job was refused, so this isn't a
+      // no-op the user should redo.
+      toast.info(
+        (result.reason && REASON_MESSAGES[result.reason]) || "Couldn't start the retry",
+      );
       return;
     }
     if (result.jobId === null) {
       toast.info("No failed emails to retry");
       return;
     }
-    toast.success(`Retrying ${result.resetCount.toLocaleString()} failed emails…`);
+    toast.success(
+      result.capped
+        ? `Retrying ${result.resetCount.toLocaleString()} of the failed emails (capped by your remaining credits)…`
+        : `Retrying ${result.resetCount.toLocaleString()} failed emails…`,
+    );
   };
+
+  const estimate = retryEstimate.data;
+
+  const retryDialog = (
+    <AlertDialog open={confirmRetryOpen} onOpenChange={setConfirmRetryOpen}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>Retry failed emails?</AlertDialogTitle>
+          <AlertDialogDescription>
+            {!estimate ? (
+              "Loading…"
+            ) : estimate.noCredits ? (
+              "No credits left today — check back tomorrow."
+            ) : estimate.capped ? (
+              `You have ${estimate.pendingCount.toLocaleString()} failed emails, but based on your credit limit only ${estimate.cappedCount.toLocaleString()} can be retried right now (using all ${estimate.remainingCredits} remaining credit${estimate.remainingCredits === 1 ? "" : "s"}). The rest stay available another day.`
+            ) : (
+              `This will retry ${estimate.pendingCount.toLocaleString()} email${estimate.pendingCount === 1 ? "" : "s"} (~${estimate.estimatedAiRequests.toLocaleString()} AI requests) and use ${estimate.creditsToCharge} credit${estimate.creditsToCharge === 1 ? "" : "s"}. You have ${estimate.remainingCredits} left today.`
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!estimate || estimate.noCredits || estimate.pendingCount === 0}
+            onClick={handleRetryFailed}
+          >
+            Retry
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+  );
 
   if (jobRunning && job) {
     const pct = job.totalCount > 0 ? Math.min(100, Math.round((job.processedCount / job.totalCount) * 100)) : 0;
@@ -1232,16 +1303,19 @@ function ClassifyControls() {
   if (!showRetry) return null;
 
   return (
-    <Button
-      variant="outline"
-      size="sm"
-      disabled={isRetrying}
-      onClick={handleRetryFailed}
-      title="These emails hit the classification retry limit. Retrying clears it and classifies them again."
-      className="text-xs h-8 border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive"
-    >
-      {isRetrying ? "Retrying…" : `Retry ${failedCount.toLocaleString()} failed`}
-    </Button>
+    <>
+      <Button
+        variant="outline"
+        size="sm"
+        disabled={isRetrying || estimateLoading}
+        onClick={openConfirmRetry}
+        title="These emails hit the classification retry limit. Retrying clears it and classifies them again."
+        className="text-xs h-8 border-destructive/30 bg-destructive/10 text-destructive hover:bg-destructive/20 hover:text-destructive"
+      >
+        {isRetrying ? "Retrying…" : `Retry ${failedCount.toLocaleString()} failed`}
+      </Button>
+      {retryDialog}
+    </>
   );
 }
 
@@ -1256,6 +1330,10 @@ function FirstClassifyBanner() {
   const { data: job } = useClassificationJobStatus();
   const { data: profile } = usePriorityProfile();
   const { startClassificationJobAsync, isPending } = useStartClassificationJob();
+  const weekEstimate = useClassificationCostEstimate("last_week");
+  const monthEstimate = useClassificationCostEstimate("last_month");
+  const [confirmScope, setConfirmScope] = React.useState<"last_week" | "last_month" | null>(null);
+  const [estimateLoading, setEstimateLoading] = React.useState(false);
   const utils = trpc.useUtils();
 
   const jobRunning = job?.status === "running";
@@ -1263,10 +1341,29 @@ function FirstClassifyBanner() {
 
   const profileFilled = profile?.completedOnboarding === true;
 
+  const REASON_MESSAGES: Record<string, string> = {
+    already_running: "A classification job is already running",
+    no_credits: "No credits left today — check back tomorrow",
+    credits_changed: "Your available credits changed — try again",
+  };
+
+  const openConfirm = async (scope: "last_week" | "last_month") => {
+    setEstimateLoading(true);
+    try {
+      await (scope === "last_week" ? weekEstimate : monthEstimate).refetch();
+      setConfirmScope(scope);
+    } finally {
+      setEstimateLoading(false);
+    }
+  };
+
   const handleClassify = async (scope: "last_week" | "last_month") => {
+    setConfirmScope(null);
     const result = await startClassificationJobAsync({ scope });
-    if (result.alreadyRunning) {
-      toast.info("A classification job is already running");
+    if (!result.started) {
+      toast.info(
+        (result.reason && REASON_MESSAGES[result.reason]) || "Couldn't start classification",
+      );
       return;
     }
     if (result.jobId === null) {
@@ -1274,8 +1371,15 @@ function FirstClassifyBanner() {
       void utils.gmail.classifyControlsStatus.invalidate();
       return;
     }
-    toast.success(`Classifying ${result.totalCount.toLocaleString()} emails…`);
+    toast.success(
+      result.capped
+        ? `Classifying ${result.totalCount.toLocaleString()} emails (capped by your remaining credits) — used ${result.creditsCharged} credit${result.creditsCharged === 1 ? "" : "s"}`
+        : `Classifying ${result.totalCount.toLocaleString()} emails… used ${result.creditsCharged} credit${result.creditsCharged === 1 ? "" : "s"}`,
+    );
   };
+
+  const activeEstimate =
+    confirmScope === "last_week" ? weekEstimate.data : confirmScope === "last_month" ? monthEstimate.data : undefined;
 
   const scopeCard = (
     scope: "last_week" | "last_month",
@@ -1290,8 +1394,8 @@ function FirstClassifyBanner() {
       <Button
         size="sm"
         variant="outline"
-        disabled={isPending}
-        onClick={() => handleClassify(scope)}
+        disabled={isPending || estimateLoading}
+        onClick={() => openConfirm(scope)}
         className="w-full text-xs"
       >
         {title}
@@ -1300,6 +1404,7 @@ function FirstClassifyBanner() {
   );
 
   return (
+    <>
     <div className="mx-4 my-4 rounded-xl border bg-card/50 p-4">
       <div className="flex items-center gap-2 mb-1">
         <SparklesIcon className="size-4 text-[#b08d57]" />
@@ -1338,6 +1443,37 @@ function FirstClassifyBanner() {
         )}
       </div>
     </div>
+
+    <AlertDialog open={confirmScope !== null} onOpenChange={(open) => { if (!open) setConfirmScope(null); }}>
+      <AlertDialogContent>
+        <AlertDialogHeader>
+          <AlertDialogTitle>
+            Classify {confirmScope === "last_week" ? "last week" : "last month"}?
+          </AlertDialogTitle>
+          <AlertDialogDescription>
+            {!activeEstimate ? (
+              "Loading…"
+            ) : activeEstimate.noCredits ? (
+              "No credits left today — check back tomorrow."
+            ) : activeEstimate.capped ? (
+              `You have ${activeEstimate.pendingCount.toLocaleString()} emails pending, but based on your credit limit only ${activeEstimate.cappedCount.toLocaleString()} can be classified right now (using all ${activeEstimate.remainingCredits} remaining credit${activeEstimate.remainingCredits === 1 ? "" : "s"}). The rest stay available to classify another day.`
+            ) : (
+              `This will classify ~${activeEstimate.pendingCount.toLocaleString()} emails (~${activeEstimate.estimatedAiRequests.toLocaleString()} AI requests) and use ${activeEstimate.creditsToCharge} credit${activeEstimate.creditsToCharge === 1 ? "" : "s"}. You have ${activeEstimate.remainingCredits} left today.`
+            )}
+          </AlertDialogDescription>
+        </AlertDialogHeader>
+        <AlertDialogFooter>
+          <AlertDialogCancel>Cancel</AlertDialogCancel>
+          <AlertDialogAction
+            disabled={!activeEstimate || activeEstimate.noCredits || activeEstimate.pendingCount === 0}
+            onClick={() => confirmScope && handleClassify(confirmScope)}
+          >
+            Classify
+          </AlertDialogAction>
+        </AlertDialogFooter>
+      </AlertDialogContent>
+    </AlertDialog>
+    </>
   );
 }
 

@@ -47,6 +47,11 @@ export function AiGeneratePanel({
       onGenerated(result);
       setLastPrompt(trimmed);
       setOpen(false);
+      // The server already charged a credit for this generation — tell the
+      // usage widget to refetch, same signal /assistant's chat/approve flows
+      // dispatch after their own successful charge (DailyUsageWidget only
+      // ever refetches on mount or on this event).
+      window.dispatchEvent(new Event("assistant-action-completed"));
     } catch (err) {
       toast.error(err instanceof Error ? err.message : "Couldn't generate the email");
     }
@@ -98,7 +103,8 @@ export function AiGeneratePanel({
             <span>Also generate subject</span>
           </label>
         )}
-        <div className="flex justify-end">
+        <div className="flex items-center justify-between gap-2">
+          <p className="text-[11px] text-muted-foreground">Uses 1 credit</p>
           <Button type="button" size="sm" onClick={handleGenerate} disabled={isPending || !prompt.trim()}>
             {isPending ? (
               <>

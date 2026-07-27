@@ -11,6 +11,8 @@ import {
   DEEPSEEK_CHAT_MODEL,
   toOpenAiToolDefs,
   healConversation,
+  chatCompletion,
+  withAiUsage,
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
@@ -182,12 +184,17 @@ export async function POST(request: Request) {
         // after createEvent was approved)
         const toolDefs = toOpenAiToolDefs(registry);
 
-        const completion = await deepseek.chat.completions.create({
-          model: DEEPSEEK_CHAT_MODEL,
-          messages: conversation,
-          stream: false as const,
-          ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
-        } as Parameters<typeof deepseek.chat.completions.create>[0]);
+        const completion = await withAiUsage({ userId }, () =>
+          chatCompletion(
+            deepseek,
+            {
+              model: DEEPSEEK_CHAT_MODEL,
+              messages: conversation,
+              ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
+            } as Parameters<typeof chatCompletion>[1],
+            { feature: "chat:approve-resume" },
+          ),
+        );
 
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         const msg = (completion as any).choices[0]?.message;
@@ -287,11 +294,13 @@ export async function POST(request: Request) {
           } else {
             // One more DeepSeek call for a final summary (no tools this time)
             try {
-              const summary = await deepseek.chat.completions.create({
-                model: DEEPSEEK_CHAT_MODEL,
-                messages: conversation,
-                stream: false as const,
-              } as Parameters<typeof deepseek.chat.completions.create>[0]);
+              const summary = await withAiUsage({ userId }, () =>
+                chatCompletion(
+                  deepseek,
+                  { model: DEEPSEEK_CHAT_MODEL, messages: conversation } as Parameters<typeof chatCompletion>[1],
+                  { feature: "chat:approve-summary" },
+                ),
+              );
 
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
               finalContent = (summary as any).choices[0]?.message?.content ?? results.join("\n");

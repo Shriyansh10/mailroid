@@ -1,5 +1,6 @@
 import OpenAI from "openai";
 import "dotenv/config";
+import { tagClientProvider } from "./usage/track.ts";
 
 /**
  * DeepSeek chat client.
@@ -30,9 +31,16 @@ const DEEPSEEK_CHAT_MODEL =
 // pointed at a different model with a different window size.
 export const MODEL_CONTEXT_WINDOW_TOKENS = 128_000;
 
-export const deepseek = new OpenAI({
-  apiKey: (process.env.DEEPSEEK_API_KEY ?? "").trim(),
-  baseURL: DEEPSEEK_BASE_URL,
-});
+// Tagged "deepseek" for ai_usage.provider regardless of what DEEPSEEK_BASE_URL
+// actually points at (this deployment currently points it at gpt-4o-mini on
+// api.openai.com — see the note above) — the label identifies which env vars
+// / which bill this client draws from, not the literal upstream host.
+export const deepseek = tagClientProvider(
+  new OpenAI({
+    apiKey: (process.env.DEEPSEEK_API_KEY ?? "").trim(),
+    baseURL: DEEPSEEK_BASE_URL,
+  }),
+  "deepseek",
+);
 
 export { DEEPSEEK_CHAT_MODEL, DEEPSEEK_BASE_URL };

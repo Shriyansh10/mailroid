@@ -46,18 +46,21 @@ export const classificationBatch = inngest.createFunction(
     const correlationId: string | undefined = event.data.correlationId;
 
     const outcome = await step.run("classify-batch", () =>
-      runClassificationBatch(userId, since),
+      runClassificationBatch(userId, since, jobId),
     );
 
     if (outcome.attempted === 0) {
-      // Nothing left to select for this job's scope.
+      // Nothing left to select — either the scope is exhausted, or (capReached)
+      // this job already attempted everything its charged credits cover.
+      // Either way, whatever's still PENDING beyond that stays for a future
+      // job/day rather than continuing for free.
       await step.run("job-complete", () => markJobComplete(jobId));
-      return { jobId, done: true };
+      return { jobId, done: true, capReached: outcome.capReached };
     }
 
     await step.run("job-progress", () => setJobProgress(jobId, outcome.remaining));
 
-    if (outcome.remaining > 0) {
+    if (outcome.remaining > 0 && !outcome.capReached) {
       await step.sendEvent("continue-classification-batch", {
         name: "classification/batch.requested",
         data: { jobId, userId, since: since.toISOString(), correlationId },
@@ -66,6 +69,6 @@ export const classificationBatch = inngest.createFunction(
     }
 
     await step.run("job-complete-done", () => markJobComplete(jobId));
-    return { jobId, done: true };
+    return { jobId, done: true, capReached: outcome.capReached };
   },
 );

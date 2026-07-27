@@ -353,6 +353,12 @@ importers:
 
   packages/ai:
     dependencies:
+      '@repo/database':
+        specifier: workspace:*
+        version: link:../database
+      '@repo/logger':
+        specifier: workspace:*
+        version: link:../logger
       '@repo/shared':
         specifier: workspace:*
         version: link:../shared
@@ -381,6 +387,9 @@ importers:
       dotenv-cli:
         specifier: ^11.0.0
         version: 11.0.0
+      tsx:
+        specifier: ^4.21.0
+        version: 4.21.0
 
   packages/corsair:
     dependencies:

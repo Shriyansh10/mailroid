@@ -1,4 +1,6 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { chatCompletion } from "../usage/track.ts";
+import type { UsageMetadataTag } from "../usage/track.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import { detectSensitive } from "../security/detector.ts";
 import { sanitizeText, neutralizeContentLinks } from "../security/sanitizer.ts";
@@ -62,6 +64,20 @@ export interface EmailSummaryResult {
   injectionBlocked: boolean;
   maskedCategories: PIICategory[];
   secretsRedacted: boolean;
+}
+
+/**
+ * Thrown when the model determined there was nothing substantive to report
+ * (it replied SKIP, per DIGEST_SYSTEM_PROMPT's "IF THERE IS NOTHING TO
+ * REPORT" rule) — a genuinely boilerplate email, not a failure. Callers
+ * should catch this separately from other errors and show the user "nothing
+ * to summarize" rather than "summary generation failed".
+ */
+export class NothingToSummarizeError extends Error {
+  constructor() {
+    super("summarizeEmail: the email has no substantive content to summarize");
+    this.name = "NothingToSummarizeError";
+  }
 }
 
 const MAX_BODY_CHARS = 50_000;
@@ -248,13 +264,18 @@ async function callModel(
   messages: ChatTurn[],
   maxTokens: number,
   label: string,
+  stage: UsageMetadataTag,
 ): Promise<string> {
-  const response = await deepseek.chat.completions.create({
-    model: DEEPSEEK_CHAT_MODEL,
-    messages,
-    temperature: 0.2,
-    max_tokens: maxTokens,
-  });
+  const response = await chatCompletion(
+    deepseek,
+    {
+      model: DEEPSEEK_CHAT_MODEL,
+      messages,
+      temperature: 0.2,
+      max_tokens: maxTokens,
+    },
+    { feature: "summarize:digest", metadata: { stage } },
+  );
 
   const choice = response.choices[0];
   // The provider truncates mid-sentence at the ceiling and reports it only
@@ -412,6 +433,7 @@ export async function summarizeEmail(input: {
           ],
           DIGEST_MAX_TOKENS,
           `segment ${i + 1}/${segments.length}`,
+          "map",
         ),
       ),
     );
@@ -422,22 +444,28 @@ export async function summarizeEmail(input: {
       .filter(Boolean)
       .join("\n\n");
   } else {
-    digest = stripEmptyClaims(
-      cleanModelText(
-        await callModel(
-          [
-            { role: "system", content: DIGEST_SYSTEM_PROMPT },
-            { role: "user", content: buildUser(masked) },
-          ],
-          DIGEST_MAX_TOKENS,
-          "single pass",
-        ),
+    const rawSinglePass = cleanModelText(
+      await callModel(
+        [
+          { role: "system", content: DIGEST_SYSTEM_PROMPT },
+          { role: "user", content: buildUser(masked) },
+        ],
+        DIGEST_MAX_TOKENS,
+        "single pass",
+        "single",
       ),
     );
+    // Same SKIP/empty-claim handling as the segmented branch (isEmptySegmentOutput
+    // above) — a single boilerplate email hits this branch just as often as one
+    // boilerplate segment hits that one, and deserves the same distinct result.
+    digest = isEmptySegmentOutput(rawSinglePass) ? "" : stripEmptyClaims(rawSinglePass);
   }
 
   if (!digest.trim()) {
-    throw new Error("summarizeEmail: empty digest from model");
+    // The model explicitly reported nothing substantive (SKIP), not a
+    // malformed/empty response — distinguish so callers can show "nothing to
+    // summarize" instead of a generic failure.
+    throw new NothingToSummarizeError();
   }
 
   digest = trimToBoundary(digest, MAX_DIGEST_CHARS);
@@ -456,6 +484,7 @@ export async function summarizeEmail(input: {
       ],
       QUICK_MAX_TOKENS,
       "quick summary",
+      "reduce",
     ),
   );
   // A short email's digest is already the overview; don't pay for a second

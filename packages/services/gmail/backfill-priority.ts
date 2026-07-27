@@ -1,6 +1,6 @@
 import { db, eq, and, isNull, gte } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
-import { classifyEmailPriority } from "@repo/ai";
+import { classifyEmailPriority, withAiUsage } from "@repo/ai";
 import { logger } from "@repo/logger";
 
 export async function backfillPriorityEmails(opts?: {
@@ -62,14 +62,16 @@ export async function backfillPriorityEmails(opts?: {
         break;
       }
       processedCount++;
-      const { entityId, sender, subject, snippet } = record;
+      const { entityId, userId, sender, subject, snippet } = record;
       logger.info(`[BACKFILL] Classifying email ${processedCount}: ${subject || "(No Subject)"} from ${sender || "Unknown"}`);
 
       try {
-        const classification = await classifyEmailPriority(
-          sender || "Unknown Sender",
-          subject || "No Subject",
-          snippet || "No Content"
+        const classification = await withAiUsage({ userId }, () =>
+          classifyEmailPriority(
+            sender || "Unknown Sender",
+            subject || "No Subject",
+            snippet || "No Content",
+          ),
         );
 
         // classifyEmailPriority throws on failure now (rate limit, malformed

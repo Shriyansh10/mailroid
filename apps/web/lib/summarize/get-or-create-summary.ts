@@ -1,7 +1,7 @@
 import { db, eq, and, or, ilike, desc } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { emails } from "@repo/database/models/emails";
-import { summarizeEmail } from "@repo/ai";
+import { summarizeEmail, withAiUsage, NothingToSummarizeError } from "@repo/ai";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
@@ -288,12 +288,25 @@ export async function getOrCreateSummary(
 
   let result: Awaited<ReturnType<typeof summarizeEmail>>;
   try {
-    result = await summarizeEmail({
-      sender: meta.sender || "Unknown Sender",
-      subject: meta.subject || "No Subject",
-      body: sourceText,
-    });
+    result = await withAiUsage({ userId }, () =>
+      summarizeEmail({
+        sender: meta.sender || "Unknown Sender",
+        subject: meta.subject || "No Subject",
+        body: sourceText,
+      }),
+    );
   } catch (err) {
+    if (err instanceof NothingToSummarizeError) {
+      // Not a failure — the model correctly identified boilerplate/promotional
+      // content with nothing substantive to report. Same user-facing bucket as
+      // the empty-sourceText case above, so callers treat them identically.
+      return {
+        ok: false,
+        reason: "no_content",
+        message: "That email doesn't have any substantive content to summarize — it looks like a promotional or boilerplate message.",
+        ...common,
+      };
+    }
     console.error("[getOrCreateSummary] generation failed", { entityId: meta.entityId, error: err });
     return {
       ok: false,

@@ -356,6 +356,26 @@ export const useRetryFailedClassifications = () => {
 };
 
 /**
+ * Read-only cost preview for the pre-start confirm dialog — call right
+ * before showing the dialog (enabled: false by default) rather than on
+ * mount, so the numbers shown are fresh at confirm time, not stale from
+ * whenever the priority tab happened to load.
+ */
+export const useClassificationCostEstimate = (scope: "last_week" | "last_month") => {
+  return trpc.gmail.classificationCostEstimate.useQuery(
+    { scope },
+    { enabled: false, staleTime: 0 },
+  );
+};
+
+export const useRetryClassificationCostEstimate = () => {
+  return trpc.gmail.retryClassificationCostEstimate.useQuery(undefined, {
+    enabled: false,
+    staleTime: 0,
+  });
+};
+
+/**
  * Whether the one-time classify buttons should still render, and once
  * they're spent, whether a Retry is warranted. Refetched when a job status
  * change invalidates gmail queries.

@@ -1,5 +1,12 @@
 import OpenAI from "openai";
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { chatCompletion, tagClientProvider } from "../usage/track.ts";
+
+// Constructed once per process, not per call, so it isn't re-tagged (and its
+// connection pool isn't rebuilt) on every evaluateFeedback() invocation.
+const openaiClient = process.env.OPENAI_API_KEY
+  ? tagClientProvider(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), "openai")
+  : null;
 
 export interface FeedbackEvaluationResult {
   approved: boolean;
@@ -40,11 +47,8 @@ export async function evaluateFeedback(feedbackText: string): Promise<FeedbackEv
   }
 
   // Select client & model
-  const hasOpenAI = !!(process.env.OPENAI_API_KEY ?? "");
-  const client = hasOpenAI
-    ? new OpenAI({ apiKey: process.env.OPENAI_API_KEY })
-    : deepseek;
-  const model = hasOpenAI ? "gpt-4o-mini" : DEEPSEEK_CHAT_MODEL;
+  const client = openaiClient ?? deepseek;
+  const model = openaiClient ? "gpt-4o-mini" : DEEPSEEK_CHAT_MODEL;
 
   const systemPrompt = [
     `You are a strict Feedback Evaluation Model for Mailroid, a fullstack email/calendar productivity app currently in BETA.`,
@@ -125,16 +129,19 @@ export async function evaluateFeedback(feedbackText: string): Promise<FeedbackEv
   ].join("\n");
 
   try {
-    const completion = await client.chat.completions.create({
-      model,
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: feedbackText },
-      ],
-      stream: false,
-      temperature: 0.1,
-      response_format: { type: "json_object" },
-    });
+    const completion = await chatCompletion(
+      client,
+      {
+        model,
+        messages: [
+          { role: "system", content: systemPrompt },
+          { role: "user", content: feedbackText },
+        ],
+        temperature: 0.1,
+        response_format: { type: "json_object" },
+      },
+      { feature: "feedback-evaluator" },
+    );
 
     const content = completion.choices[0]?.message?.content;
     if (!content) {

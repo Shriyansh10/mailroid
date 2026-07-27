@@ -101,7 +101,7 @@ export async function ensureEmailChunks(userId: string, entityId: string): Promi
   const pieces = chunkText(fullText);
   if (pieces.length === 0) return;
 
-  const embeddings = await createEmbeddingsBatch(pieces);
+  const embeddings = await createEmbeddingsBatch(pieces, { feature: "embed:chunks" });
   await db.insert(emailChunks).values(
     pieces.map((text, i) => ({
       userId,

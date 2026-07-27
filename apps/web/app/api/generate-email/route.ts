@@ -6,6 +6,7 @@ import {
   detectPromptInjection,
   writeGuard,
   AuditEventType,
+  withAiUsage,
 } from "@repo/ai";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
@@ -132,12 +133,14 @@ export async function POST(request: Request) {
     }
 
     // ── Generate ─────────────────────────────────────────────────────
-    const result = await generateEmailContent({
-      mode: input.mode,
-      prompt: input.prompt,
-      generateSubject: input.generateSubject,
-      context: input.context,
-    });
+    const result = await withAiUsage({ userId }, () =>
+      generateEmailContent({
+        mode: input.mode,
+        prompt: input.prompt,
+        generateSubject: input.generateSubject,
+        context: input.context,
+      }),
+    );
 
     // ── Write-guard on the generated body (body-only replyToEmail shape) ──
     const guardResult = writeGuard.evaluate("replyToEmail", { body: result.body });

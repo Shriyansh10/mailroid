@@ -1,18 +1,7 @@
-import OpenAI from "openai";
 import { db } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
 import { eq, sql, and } from "@repo/database";
-
-function getClient(): OpenAI {
-  return new OpenAI({
-    apiKey: process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "",
-    baseURL: process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? undefined,
-  });
-}
-
-function getModel(): string {
-  return process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small";
-}
+import { createEmbeddingsBatch, withAiUsage } from "@repo/ai";
 
 const BATCH_SIZE = 20;
 
@@ -21,8 +10,16 @@ const BATCH_SIZE = 20;
  *
  * Trigger: manual or scheduled via Inngest dashboard.
  * Ready to be wired to `email.received` webhook or `gmail.initial-sync` completion.
+ *
+ * Uses the shared @repo/ai embeddings client (createEmbeddingsBatch) instead
+ * of constructing its own — that duplicate client used to mean this path's
+ * calls were invisible to usage tracking and untagged with a provider.
  */
 export async function emailEmbed({ userId }: { userId: string }) {
+  return withAiUsage({ userId }, () => emailEmbedInner(userId));
+}
+
+async function emailEmbedInner(userId: string) {
   const unEmbedded = await db
     .select({ id: emails.id, subject: emails.subject, bodyText: emails.bodyText })
     .from(emails)
@@ -36,8 +33,7 @@ export async function emailEmbed({ userId }: { userId: string }) {
     const batch = unEmbedded.slice(i, i + BATCH_SIZE);
     const texts = batch.map((e: { subject: string | null; bodyText: string | null }) => (e.subject ?? "") + "\n\n" + (e.bodyText ?? ""));
 
-    const response = await getClient().embeddings.create({ model: getModel(), input: texts });
-    const vectors = response.data.map((d: { embedding: number[] }) => d.embedding);
+    const vectors = await createEmbeddingsBatch(texts, { feature: "embed:webhook" });
 
     for (let j = 0; j < batch.length; j++) {
       await db

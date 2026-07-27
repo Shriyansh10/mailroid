@@ -20,5 +20,5 @@ export async function embedSearchQuery(query: string): Promise<number[]> {
     .trim();
 
   // Use normalized text if non-empty, fall back to original
-  return createEmbedding(normalized || query);
+  return createEmbedding(normalized || query, { feature: "embed:search-query" });
 }

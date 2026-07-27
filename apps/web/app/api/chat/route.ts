@@ -14,6 +14,8 @@ import {
   deepseek,
   DEEPSEEK_CHAT_MODEL,
   MODEL_CONTEXT_WINDOW_TOKENS,
+  chatCompletion,
+  withAiUsage,
   type ChatMessage,
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
@@ -268,14 +270,19 @@ export async function POST(request: Request) {
     ];
 
     // ── Run agent loop (DeepSeek + tool calling) ───────────────────
-    const { response, newMessages, contextChars } = await runAgentLoop({
-      messages: agentMessages,
-      registry,
-      execute: (name, args) =>
-        orchestrator.executeTool(name, args, userId, crypto.randomUUID(), false, userTimeZone, session.user.email),
-      userId,
-      deriveToolMessageMetadata,
-    });
+    // Wrapped in withAiUsage so every AI call the loop makes (and any tool
+    // it invokes that itself calls out to @repo/ai) is attributed to this
+    // user without threading userId through every function signature.
+    const { response, newMessages, contextChars } = await withAiUsage({ userId }, () =>
+      runAgentLoop({
+        messages: agentMessages,
+        registry,
+        execute: (name, args) =>
+          orchestrator.executeTool(name, args, userId, crypto.randomUUID(), false, userTimeZone, session.user.email),
+        userId,
+        deriveToolMessageMetadata,
+      }),
+    );
 
     // ── Context-window usage, for the assistant UI's indicator ─────
     // Measured against the model's real context window (gpt-4o-mini, 128K
@@ -294,7 +301,7 @@ export async function POST(request: Request) {
 
     // ── Beautification pass: convert raw tables to natural language ──
     if (!("approvalRequired" in response) && response.content) {
-      response.content = await beautifyResponse(response.content);
+      response.content = await withAiUsage({ userId }, () => beautifyResponse(response.content));
     }
 
     // Update the content of the assistant message in newMessages if it was beautified
@@ -413,32 +420,35 @@ async function beautifyResponse(rawContent: string): Promise<string> {
   console.log("[beautify] detected raw table, running beautification pass");
 
   try {
-    const completion = await deepseek.chat.completions.create({
-      model: DEEPSEEK_CHAT_MODEL,
-      messages: [
-        {
-          role: "system",
-          content: [
-            "You are a response beautifier. Your job is to convert raw data/tables into natural conversational English.",
-            "",
-            "RULES:",
-            "- NEVER output markdown tables, pipe characters, or structured data.",
-            "- Always respond in natural conversational paragraphs.",
-            "- Preserve ALL information from the original — just reformat it.",
-            "- Use plain bullet points (- item) for lists, never tables.",
-            "- Be warm and helpful in tone.",
-            "- NEVER add information not present in the original.",
-          ].join("\n"),
-        },
-        {
-          role: "user",
-          content: `Convert this raw assistant response into natural conversational English:\n\n${rawContent}`,
-        },
-      ],
-      stream: false,
-      temperature: 0.3,
-      max_tokens: 1000,
-    });
+    const completion = await chatCompletion(
+      deepseek,
+      {
+        model: DEEPSEEK_CHAT_MODEL,
+        messages: [
+          {
+            role: "system",
+            content: [
+              "You are a response beautifier. Your job is to convert raw data/tables into natural conversational English.",
+              "",
+              "RULES:",
+              "- NEVER output markdown tables, pipe characters, or structured data.",
+              "- Always respond in natural conversational paragraphs.",
+              "- Preserve ALL information from the original — just reformat it.",
+              "- Use plain bullet points (- item) for lists, never tables.",
+              "- Be warm and helpful in tone.",
+              "- NEVER add information not present in the original.",
+            ].join("\n"),
+          },
+          {
+            role: "user",
+            content: `Convert this raw assistant response into natural conversational English:\n\n${rawContent}`,
+          },
+        ],
+        temperature: 0.3,
+        max_tokens: 1000,
+      },
+      { feature: "chat:beautify" },
+    );
 
     const beautified = completion.choices[0]?.message?.content;
     if (beautified) {

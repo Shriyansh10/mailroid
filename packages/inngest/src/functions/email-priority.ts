@@ -7,6 +7,7 @@ import {
   classifyEmailPriority,
   buildClassificationContext,
   applyProfileOverrides,
+  withAiUsage,
   type ClassificationContext,
 } from "@repo/ai";
 import { priorityProfileModel } from "@repo/shared";
@@ -32,13 +33,16 @@ async function fetchUserProfile(userId: string) {
  * provider actually asked for, instead of Inngest's default immediate retry.
  */
 async function classifyWithRetryTranslation(
+  userId: string,
   sender: string,
   subject: string,
   snippet: string,
   context?: ClassificationContext,
 ) {
   try {
-    return await classifyEmailPriority(sender, subject, snippet, context);
+    return await withAiUsage({ userId }, () =>
+      classifyEmailPriority(sender, subject, snippet, context),
+    );
   } catch (err) {
     const status = (err as { status?: number })?.status;
     const code = (err as { code?: string })?.code;
@@ -120,6 +124,7 @@ export const emailPriority = inngest.createFunction(
     // network error) so Inngest actually retries instead of silently skipping.
     const rawClassification = await step.run("classify-email", () =>
       classifyWithRetryTranslation(
+        userId,
         sender || "Unknown Sender",
         subject || "No Subject",
         snippet || "No Content",

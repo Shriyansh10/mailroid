@@ -1,4 +1,5 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { chatCompletion } from "../usage/track.ts";
 import { renderContextBlock, type ClassificationContext } from "./user-summary.ts";
 
 // A ceiling, not a reservation: billing counts tokens actually generated, so
@@ -118,18 +119,22 @@ export async function classifyEmailPriority(
     ? SYSTEM_PROMPT + contextBlock + MATCHED_SIGNALS_INSTRUCTION
     : SYSTEM_PROMPT;
 
-  const response = await deepseek.chat.completions.create({
-    model: DEEPSEEK_CHAT_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: `Sender: ${sender}\nSubject: ${subject}\nSnippet: ${snippet}`,
-      },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-  });
+  const response = await chatCompletion(
+    deepseek,
+    {
+      model: DEEPSEEK_CHAT_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: `Sender: ${sender}\nSubject: ${subject}\nSnippet: ${snippet}`,
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+    },
+    { feature: "priority:single" },
+  );
 
   const content = response.choices[0]?.message?.content;
   if (!content) {
@@ -242,26 +247,30 @@ export async function classifyEmailPriorityBatch(
     ? BATCH_SYSTEM_PROMPT + contextBlock + MATCHED_SIGNALS_INSTRUCTION
     : BATCH_SYSTEM_PROMPT;
 
-  const response = await deepseek.chat.completions.create({
-    model: DEEPSEEK_CHAT_MODEL,
-    messages: [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: JSON.stringify(
-          items.map((it) => ({
-            index: it.index,
-            sender: it.sender,
-            subject: it.subject,
-            snippet: it.snippet,
-          })),
-        ),
-      },
-    ],
-    response_format: { type: "json_object" },
-    temperature: 0.1,
-    max_tokens: MAX_OUTPUT_TOKENS,
-  });
+  const response = await chatCompletion(
+    deepseek,
+    {
+      model: DEEPSEEK_CHAT_MODEL,
+      messages: [
+        { role: "system", content: systemPrompt },
+        {
+          role: "user",
+          content: JSON.stringify(
+            items.map((it) => ({
+              index: it.index,
+              sender: it.sender,
+              subject: it.subject,
+              snippet: it.snippet,
+            })),
+          ),
+        },
+      ],
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      max_tokens: MAX_OUTPUT_TOKENS,
+    },
+    { feature: "priority:batch", metadata: { emailCount: items.length } },
+  );
 
   const content = response.choices[0]?.message?.content;
   if (!content) {

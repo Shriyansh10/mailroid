@@ -7,6 +7,7 @@ import {
   ConsoleAuditLogger,
   ToolCallSchema,
   ToolExecutionStatus,
+  withAiUsage,
 } from "@repo/ai";
 import crypto from "node:crypto";
 import { registerProductionExecutors } from "@web/lib/executors/index";
@@ -83,11 +84,8 @@ export async function POST(request: Request) {
     console.log("[api:tools:execute] authenticated userId:", userId);
 
     // ── Execute via orchestrator ───────────────────────────────
-    const result = await orchestrator.executeTool(
-      parsed.data.toolName,
-      parsed.data.args,
-      userId,
-      requestId,
+    const result = await withAiUsage({ userId }, () =>
+      orchestrator.executeTool(parsed.data.toolName, parsed.data.args, userId, requestId),
     );
 
     // ── Map status to HTTP code ────────────────────────────────────

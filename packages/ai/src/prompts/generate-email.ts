@@ -1,4 +1,5 @@
 import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { chatCompletion } from "../usage/track.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import { detectSensitive } from "../security/detector.ts";
 import { sanitizeText, neutralizeContentLinks } from "../security/sanitizer.ts";
@@ -158,15 +159,19 @@ export async function generateEmailContent(
   }
 
   // 3. Single generation call.
-  const response = await deepseek.chat.completions.create({
-    model: DEEPSEEK_CHAT_MODEL,
-    messages: [
-      { role: "system", content: GENERATE_SYSTEM_PROMPT },
-      { role: "user", content: buildUserMessage(input, scrubbedContext) },
-    ],
-    temperature: 0.5,
-    max_tokens: GENERATE_MAX_TOKENS,
-  });
+  const response = await chatCompletion(
+    deepseek,
+    {
+      model: DEEPSEEK_CHAT_MODEL,
+      messages: [
+        { role: "system", content: GENERATE_SYSTEM_PROMPT },
+        { role: "user", content: buildUserMessage(input, scrubbedContext) },
+      ],
+      temperature: 0.5,
+      max_tokens: GENERATE_MAX_TOKENS,
+    },
+    { feature: "generate-email" },
+  );
 
   const raw = response.choices[0]?.message?.content?.trim() ?? "";
 
