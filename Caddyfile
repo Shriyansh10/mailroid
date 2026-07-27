@@ -5,6 +5,9 @@ mailroid.in {
 	handle /api/chat {
 		reverse_proxy mailroid-web:3000
 	}
+	handle /api/chat/seed {
+		reverse_proxy mailroid-web:3000
+	}
 	handle /api/approvals/* {
 		reverse_proxy mailroid-web:3000
 	}
@@ -18,6 +21,9 @@ mailroid.in {
 		reverse_proxy mailroid-web:3000
 	}
 	handle /api/summarize {
+		reverse_proxy mailroid-web:3000
+	}
+	handle /api/generate-email {
 		reverse_proxy mailroid-web:3000
 	}
 	handle /api/* {
