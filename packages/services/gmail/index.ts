@@ -700,8 +700,46 @@ export async function setThreadStarred(
 }
 
 /**
+ * Mark a whole thread read or unread.
+ *
+ * Gmail is written as well as the local row, and that is not optional: the
+ * metadata sync upserts `is_unread` straight from Gmail's labels (see
+ * sync-metadata.ts), so a DB-only write would be silently reverted on the
+ * next sync.
+ */
+export async function setThreadRead(
+  tenantId: string,
+  threadId: string,
+  read: boolean,
+): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.modify({
+    id: threadId,
+    ...(read ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] }),
+  });
+
+  await db
+    .update(messageMetadata)
+    .set({ isUnread: !read, updatedAt: new Date() })
+    .where(
+      and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+    );
+
+  logger.info("[SERVICE] setThreadRead completed", {
+    tenantId, threadId, read, durationMs: Date.now() - startMs,
+  });
+}
+
+/**
  * Search emails by query string (uses Gmail search syntax).
  * Returns ThreadSummary[] matching the query.
+ *
+ * NOTE: the returned summaries carry no `isUnread` — this path doesn't join
+ * messageMetadata — so search results always render in the "read" style in
+ * the inbox list. Selecting messageMetadata.isUnread here (and in
+ * searchLocalEmails) is the fix when that's worth doing.
  */
 export async function searchEmails(
   tenantId: string,
@@ -1111,6 +1149,10 @@ export async function getStoredEmailCount(userId: string): Promise<EmailCount> {
  * safety net for when the caller didn't populate the structured field).
  *
  * Never crashes — always returns results or empty array.
+ *
+ * NOTE: like searchEmails, the returned rows carry no `isUnread`, so AI search
+ * results render in the "read" style in the inbox list. Selecting
+ * messageMetadata.isUnread here is the fix when that's worth doing.
  */
 export async function searchLocalEmails(
   userId: string,

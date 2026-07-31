@@ -8,6 +8,7 @@ import {
   trashThread,
   untrashThread,
   setThreadStarred,
+  setThreadRead,
   replyToEmail,
   forwardEmail,
 } from "@repo/services/gmail/index.js";
@@ -201,6 +202,18 @@ export const gmailRouter = router({
         userId: ctx.user!.id, threadId: input.threadId, starred: input.starred,
       });
       await setThreadStarred(ctx.user!.id, input.threadId, input.starred);
+      return { success: true };
+    }),
+
+  setRead: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-read"), tags: TAGS } })
+    .input(z.object({ threadId: z.string(), read: z.boolean() }))
+    .output(z.object({ success: z.boolean() }))
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setRead called", {
+        userId: ctx.user!.id, threadId: input.threadId, read: input.read,
+      });
+      await setThreadRead(ctx.user!.id, input.threadId, input.read);
       return { success: true };
     }),
 

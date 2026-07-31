@@ -899,6 +899,11 @@ function DossierLayout({
             >
               {visibleThreads.map((thread, index) => {
                 const isSelected = selectedThreadId === thread.threadId;
+                // Search results (Gmail and AI) don't carry isUnread — those
+                // services don't join messageMetadata — so they render in the
+                // read style. See the note on searchEmails in
+                // packages/services/gmail/index.ts.
+                const isUnread = thread.isUnread ?? false;
 
                 // Extract sender name
                 let senderName = thread.sender;
@@ -922,19 +927,48 @@ function DossierLayout({
                     }}
                     className={cn(
                       "group relative flex flex-row items-center justify-between py-3 px-4 cursor-pointer border-b border-border transition-colors",
-                      isSelected ? "bg-accent/40" : "bg-transparent hover:bg-muted/50"
+                      // Read mail is tinted so blocks of it recede; unread sits
+                      // on the plain background. Selection wins over both.
+                      isSelected
+                        ? "bg-accent/40"
+                        : isUnread
+                          ? "bg-transparent hover:bg-muted/50"
+                          : "bg-muted/30 hover:bg-muted/50"
                     )}
                   >
                     {/* Left & Center: Icons + Sender + Subject + Snippet */}
                     <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
-                      <div className="w-40 shrink-0 truncate font-semibold text-[13px] text-foreground">
+                      {/* Unread dot. Still rendered when read, just invisible,
+                          so sender names stay column-aligned down the list. */}
+                      <span
+                        className={cn(
+                          "size-1.5 shrink-0 rounded-full bg-primary",
+                          !isUnread && "opacity-0"
+                        )}
+                      />
+                      <div
+                        className={cn(
+                          "w-40 shrink-0 truncate text-[13px]",
+                          isUnread ? "font-bold text-foreground" : "font-normal text-muted-foreground"
+                        )}
+                      >
                         {senderName}
                       </div>
                       <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate text-[13px]">
-                        <span className="font-semibold text-foreground truncate shrink-0 max-w-[50%]">
+                        <span
+                          className={cn(
+                            "truncate shrink-0 max-w-[50%]",
+                            isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
+                          )}
+                        >
                           {thread.subject || "(No Subject)"}
                         </span>
-                        <span className="text-muted-foreground truncate font-normal">
+                        <span
+                          className={cn(
+                            "truncate font-normal",
+                            isUnread ? "text-muted-foreground" : "text-muted-foreground/70"
+                          )}
+                        >
                           <span className="mr-1.5 opacity-50">-</span>
                           {thread.snippet}
                         </span>
@@ -1031,7 +1065,12 @@ function DossierLayout({
                       </div>
 
                       {thread.priority && <PrioritySeal priority={thread.priority} score={thread.priorityScore} />}
-                      <span className="text-[11px] font-semibold text-foreground/80 w-14 text-right tabular-nums">
+                      <span
+                        className={cn(
+                          "text-[11px] w-14 text-right tabular-nums",
+                          isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
+                        )}
+                      >
                         {formatThreadDate(thread.date)}
                       </span>
                     </div>

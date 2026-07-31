@@ -488,6 +488,20 @@ export const useSetStarred = () => {
 };
 
 /**
+ * Mark a thread read / unread. Invalidating the inbox is what makes the row
+ * restyle itself once the user comes back to the list.
+ */
+export const useSetRead = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setRead.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetRead error", { error: error.message }),
+  });
+  return { setRead: result.mutate, setReadAsync: result.mutateAsync, ...result };
+};
+
+/**
  * Reply/reply-all to a message. Unlike `useSendEmail`, this is entity-id
  * based — the server derives the recipient and In-Reply-To/References
  * headers from the actual message, which is what keeps the reply in the same

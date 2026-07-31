@@ -89,7 +89,7 @@ const EMPTY = { to: "", subject: "", body: "" };
 
 export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDialogProps) {
   const { sendEmailAsync } = useSendEmail();
-  const { saveDraftAsync } = useSaveDraft();
+  const { saveDraftAsync, isPending: isSavingDraft } = useSaveDraft();
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
@@ -109,6 +109,9 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     kind: "body" | "meeting";
     run: () => void;
   }>(null);
+  // A close request (backdrop / Esc / X) held back until the user says what to
+  // do with the message they'd otherwise lose.
+  const [confirmClose, setConfirmClose] = useState(false);
 
   // Load the prefill when the dialog opens. Keyed on `open` as well as the
   // prefill itself so reopening on the same draft re-seeds the fields the user
@@ -178,16 +181,50 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
   const resetAndClose = useCallback(() => {
     form.reset(EMPTY);
+    setMeetingState(emptyMeetingState());
     onOpenChange(false);
   }, [form, onOpenChange]);
 
+  /**
+   * Is there anything here worth not losing? Only the mail fields count — an
+   * enabled-but-empty meeting toggle isn't a message, and meeting state isn't
+   * part of a Gmail draft anyway.
+   */
+  const hasContent = useCallback(() => {
+    const v = form.getValues();
+    return Boolean(v.to?.trim() || v.subject?.trim() || v.body?.trim());
+  }, [form]);
+
+  /**
+   * Radix routes backdrop click, Escape and the X all through onOpenChange, so
+   * intercepting here covers every accidental close. A stray click on the grey
+   * overlay used to wipe a half-written email outright; now it asks first.
+   */
   const handleOpenChange = useCallback(
     (next: boolean) => {
-      if (!next) form.reset(EMPTY);
+      if (!next && hasContent()) {
+        setConfirmClose(true);
+        return;
+      }
+      if (!next) {
+        form.reset(EMPTY);
+        setMeetingState(emptyMeetingState());
+      }
       onOpenChange(next);
     },
-    [form, onOpenChange],
+    [form, hasContent, onOpenChange],
   );
+
+  /**
+   * "Discard" on the close confirmation: throw away what's in the form, but
+   * never touch the draft that already exists in Gmail — closing without
+   * saving is not the same as deleting (that's what the Discard button in the
+   * footer, `handleDiscard`, is for).
+   */
+  const handleConfirmDiscard = useCallback(() => {
+    setConfirmClose(false);
+    resetAndClose();
+  }, [resetAndClose]);
 
   const onSubmit = useCallback(
     async (values: { to: string; subject: string; body: string }) => {
@@ -266,6 +303,10 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
       });
       toast.success(draftId ? "Draft updated" : "Draft saved");
       form.reset(EMPTY);
+      setMeetingState(emptyMeetingState());
+      // Cleared before the close so handleOpenChange sees an empty form and
+      // doesn't re-open the confirmation it was just dismissed from.
+      setConfirmClose(false);
       onOpenChange(false);
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save draft";
@@ -291,7 +332,12 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
   return (
     <Dialog open={open} onOpenChange={handleOpenChange}>
-      <DialogContent className="sm:max-w-140">
+      {/*
+        max-h + overflow, or a tall compose (long body + meeting fields) grows
+        past a short viewport with its footer buttons unreachable below the
+        fold. dvh rather than vh so mobile browser chrome is accounted for.
+      */}
+      <DialogContent className="sm:max-w-140 max-h-[90dvh] overflow-y-auto">
         <DialogHeader>
           <DialogTitle
             style={{ display: "flex", alignItems: "center", gap: "0.5rem" }}
@@ -365,7 +411,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                       placeholder="Write your message…"
                       disabled={isSubmitting}
                       rows={8}
-                      style={{ minHeight: "12rem" }}
+                      className="min-h-32 sm:min-h-48"
                       {...field}
                     />
                   </FormControl>
@@ -448,6 +494,48 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           </AlertDialogFooter>
         </AlertDialogContent>
       </AlertDialog>
+
+      {/*
+        Close confirmation. A Dialog rather than an AlertDialog on purpose:
+        DialogContent renders a top-right X, and that X — not a third button —
+        is how the user gets back to editing. Escape and clicking outside this
+        confirmation do the same thing, since they all route through its
+        onOpenChange.
+      */}
+      <Dialog open={confirmClose} onOpenChange={(next) => !next && setConfirmClose(false)}>
+        <DialogContent className="sm:max-w-100">
+          <DialogHeader>
+            <DialogTitle>Save as draft?</DialogTitle>
+            <DialogDescription>
+              You have an unsent message. Save it as a draft in Gmail, or discard it.
+            </DialogDescription>
+          </DialogHeader>
+          <DialogFooter>
+            <Button
+              variant="ghost"
+              type="button"
+              onClick={handleConfirmDiscard}
+              disabled={isSavingDraft}
+            >
+              <Trash2Icon className="size-4" />
+              Discard
+            </Button>
+            <Button type="button" onClick={handleSaveDraft} disabled={isSavingDraft}>
+              {isSavingDraft ? (
+                <>
+                  <Loader2Icon className="size-4 animate-spin" />
+                  Saving…
+                </>
+              ) : (
+                <>
+                  <SaveIcon className="size-4" />
+                  {draftId ? "Update draft" : "Save as draft"}
+                </>
+              )}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </Dialog>
   );
 }

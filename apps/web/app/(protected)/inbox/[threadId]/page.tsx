@@ -6,6 +6,7 @@ import {
   useThread,
   useTrashThread,
   useSetStarred,
+  useSetRead,
   useDraft,
 } from "@web/hooks/api/gmail";
 import { useCreateEvent } from "@web/hooks/api/calendar";
@@ -83,6 +84,20 @@ export default function ThreadDetailPage() {
       });
     }
   };
+
+  // Opening a thread marks it read, in Gmail and locally — otherwise nothing
+  // in the app ever clears UNREAD and every row in the list stays bold
+  // forever. Guarded by a ref keyed on threadId so a background refetch of the
+  // thread can't re-fire it, and deliberately silent: a failed read-marking is
+  // not worth interrupting reading the mail over.
+  const { setReadAsync } = useSetRead();
+  const markedReadRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!thread || markedReadRef.current === threadId) return;
+    markedReadRef.current = threadId;
+    void setReadAsync({ threadId, read: true }).catch(() => {});
+  }, [thread, threadId, setReadAsync]);
 
   /** Bin the thread and leave the detail view — the thread is no longer here. */
   const handleMoveToBin = async () => {
