@@ -2,11 +2,19 @@
 node_modules
 **/node_modules
 
-# Local env files
+# Local env files. The `**/` forms are load-bearing: unlike .gitignore, a bare
+# `.env` here matches ONLY the context root, so the per-package .env copies
+# (packages/*/.env, apps/*/.env) would otherwise be copied in by `COPY . .` —
+# and Next.js copies apps/web/.env into .next/standalone, which ships in the
+# published image.
 .env
+**/.env
 .env.local
+**/.env.local
 .env.*.local
+**/.env.*.local
 !.env.example
+!**/.env.example
 
 # Testing
 coverage
@@ -49,3 +57,4 @@ yarn-error.log*
 *.zip
 *.txt
 graphify-out
+PRODUCT-AUDIT.md

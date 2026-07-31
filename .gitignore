@@ -46,3 +46,6 @@ chatgpt*
 *.txt
 
 graphify*
+
+# Internal working notes, not part of the product
+PRODUCT-AUDIT.md
