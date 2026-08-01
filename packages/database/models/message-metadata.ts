@@ -113,13 +113,34 @@ snippet: text("snippet"),
       maskedCategories: string[];
       secretsRedacted: boolean;
     }>(),
+    // The actionable shape of the email, extracted in the same model call
+    // that writes `summary` (no extra AI call). Every key is optional and
+    // schemaVersion says which shape they are in, so adding a field later
+    // (risks, sentiment, meeting requests) is not a migration.
+    //
+    // schemaVersion answers "what shape is this?"; summaryMeta.promptVersion
+    // below answers "which prompt wrote it?" — a reader needs the first to
+    // parse at all, so it lives inside the blob it describes.
+    summaryData: jsonb("summary_data").$type<{
+      schemaVersion: number;
+      decisions?: string[];
+      openQuestions?: string[];
+      actionItems?: { text: string; owner?: string; due?: string }[];
+      deadlines?: { what: string; when: string }[];
+      people?: { name: string; role?: string }[];
+    }>(),
     // What the document analyzer concluded — kept for tuning the pipeline
-    // against real mail rather than guesses.
+    // against real mail rather than guesses. promptVersion records which
+    // generation of the summarize prompts produced the row; it is written
+    // unconditionally but deliberately never acted on automatically, since
+    // silently regenerating stale summaries would spend the user's daily
+    // actions on mail they never asked about.
     summaryMeta: jsonb("summary_meta").$type<{
       type: string;
       topicCount: number;
       complexity: string;
       sections: number;
+      promptVersion?: number;
     }>(),
     summaryGeneratedAt: timestamp("summary_generated_at", { withTimezone: true }),
 
