@@ -1,6 +1,6 @@
 "use client";
 
-import React, { useCallback, useEffect, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
@@ -45,6 +45,13 @@ import { useCreateEvent } from "@web/hooks/api/calendar";
 import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
 import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
 import {
+  RecipientFields,
+  firstInvalidRecipientField,
+  visibleRecipients,
+  type RecipientFieldsHandle,
+} from "@web/components/inbox/recipient-fields";
+import { isValidAddress, parseAddressList } from "@web/lib/email-addresses";
+import {
   MeetingInviteFields,
   emptyMeetingState,
   meetingStateFromTemplate,
@@ -53,12 +60,22 @@ import {
 } from "@web/components/inbox/meeting-invite-fields";
 
 // ── Schema ───────────────────────────────────────────────────────────
+//
+// Recipient lines are comma-joined lists, not single addresses — so the
+// validation is "every address parses", checked on submit. That timing is the
+// whole rule: RecipientFields lets a malformed address sit there as a red chip
+// while you're still typing, and this is what refuses to send it.
+
+const validAddresses = (value: string) =>
+  parseAddressList(value).every(isValidAddress);
 
 const composeSchema = z.object({
   to: z
     .string()
-    .min(1, "Recipient is required")
-    .email("Enter a valid email address"),
+    .refine((v) => parseAddressList(v).length > 0, "Recipient is required")
+    .refine(validAddresses, "One of these addresses isn't valid"),
+  cc: z.string().refine(validAddresses, "One of these Cc addresses isn't valid"),
+  bcc: z.string().refine(validAddresses, "One of these Bcc addresses isn't valid"),
   subject: z.string().min(1, "Subject is required"),
   body: z.string().default(""),
 });
@@ -68,6 +85,9 @@ const composeSchema = z.object({
 /** What the dialog opens with — a blank compose, a reply, or an existing draft. */
 export interface ComposePrefill {
   to?: string;
+  /** Comma-separated. A reopened draft brings both back — Gmail keeps Bcc on drafts. */
+  cc?: string;
+  bcc?: string;
   subject?: string;
   body?: string;
   /** Keeps a reply in its original Gmail thread. */
@@ -83,7 +103,7 @@ interface ComposeDialogProps {
   prefill?: ComposePrefill;
 }
 
-const EMPTY = { to: "", subject: "", body: "" };
+const EMPTY = { to: "", cc: "", bcc: "", subject: "", body: "" };
 
 // ── Component ────────────────────────────────────────────────────────
 
@@ -103,6 +123,14 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const draftId = prefill?.draftId;
   const threadId = prefill?.threadId;
 
+  // Watched rather than registered: RecipientFields owns all three lines at
+  // once (an address added to Cc can be dropped for already being in To), so
+  // it can't be three independent FormFields.
+  const toValue = form.watch("to");
+  const ccValue = form.watch("cc");
+  const bccValue = form.watch("bcc");
+  const recipientsRef = useRef<RecipientFieldsHandle>(null);
+
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   // A pending template/AI apply awaiting overwrite confirmation.
   const [pendingApply, setPendingApply] = useState<null | {
@@ -120,11 +148,16 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     if (!open) return;
     form.reset({
       to: prefill?.to ?? "",
+      cc: prefill?.cc ?? "",
+      bcc: prefill?.bcc ?? "",
       subject: prefill?.subject ?? "",
       body: prefill?.body ?? "",
     });
     setMeetingState(emptyMeetingState());
-  }, [open, prefill?.to, prefill?.subject, prefill?.body, prefill?.draftId, form]);
+  }, [
+    open, prefill?.to, prefill?.cc, prefill?.bcc,
+    prefill?.subject, prefill?.body, prefill?.draftId, form,
+  ]);
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   //
@@ -192,7 +225,9 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
    */
   const hasContent = useCallback(() => {
     const v = form.getValues();
-    return Boolean(v.to?.trim() || v.subject?.trim() || v.body?.trim());
+    return Boolean(
+      v.to?.trim() || v.cc?.trim() || v.bcc?.trim() || v.subject?.trim() || v.body?.trim(),
+    );
   }, [form]);
 
   /**
@@ -227,7 +262,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   }, [resetAndClose]);
 
   const onSubmit = useCallback(
-    async (values: { to: string; subject: string; body: string }) => {
+    async (values: { to: string; cc: string; bcc: string; subject: string; body: string }) => {
       try {
         // An open draft is sent via drafts.send so Gmail consumes the draft
         // itself. Sending a fresh copy instead would leave the draft behind.
@@ -236,6 +271,8 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         } else {
           await sendEmailAsync({
             to: values.to.trim(),
+            cc: values.cc.trim(),
+            bcc: values.bcc.trim(),
             subject: values.subject.trim(),
             body: values.body,
             ...(threadId ? { threadId } : {}),
@@ -249,10 +286,14 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         // Build the event input BEFORE resetting form/meeting state — the
         // retry closure below must capture a concrete value, since the reset
         // right after wipes meetingState/values.
+        //
+        // To + Cc only, deduped. Bcc is deliberately excluded: a calendar
+        // invite shows its attendee list to everyone on it, which would undo
+        // the one thing a blind copy is for.
         const eventInput = buildEventInput(
           meetingState,
           values.subject.trim(),
-          values.to.trim() ? [values.to.trim()] : [],
+          visibleRecipients(values),
         );
 
         form.reset(EMPTY);
@@ -284,6 +325,16 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   );
 
   /**
+   * A blocked send lands the cursor on the line holding the bad address, so
+   * "Send did nothing" never happens with the offending chip scrolled out of
+   * view behind a collapsed Cc/Bcc row.
+   */
+  const handleInvalidSubmit = useCallback(() => {
+    const field = firstInvalidRecipientField(form.getValues());
+    if (field) recipientsRef.current?.focusField(field);
+  }, [form]);
+
+  /**
    * Save without sending. Deliberately does NOT run the zod resolver: a draft
    * is by definition unfinished, and refusing to save one because the recipient
    * isn't a valid address yet is exactly the moment you most want it saved.
@@ -293,6 +344,8 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     try {
       await saveDraftAsync({
         to: values.to.trim(),
+        cc: values.cc?.trim() ?? "",
+        bcc: values.bcc?.trim() ?? "",
         subject: values.subject.trim(),
         // getValues() returns the pre-resolver input shape, where the zod
         // `.default("")` hasn't been applied yet — an untouched body is
@@ -354,7 +407,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
         <Form {...form}>
           <form
-            onSubmit={form.handleSubmit(onSubmit)}
+            onSubmit={form.handleSubmit(onSubmit, handleInvalidSubmit)}
             style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
           >
             <div className="flex flex-wrap items-center gap-2">
@@ -362,24 +415,29 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
               <AiGeneratePanel mode="compose" onGenerated={applyGenerated} disabled={isSubmitting} />
             </div>
 
-            <FormField
-              control={form.control}
-              name="to"
-              render={({ field }) => (
-                <FormItem>
-                  <FormLabel>To</FormLabel>
-                  <FormControl>
-                    <Input
-                      type="email"
-                      placeholder="recipient@example.com"
-                      disabled={isSubmitting}
-                      {...field}
-                    />
-                  </FormControl>
-                  <FormMessage />
-                </FormItem>
+            <div className="space-y-1">
+              <RecipientFields
+                ref={recipientsRef}
+                values={{ to: toValue, cc: ccValue, bcc: bccValue }}
+                onChange={(next) => {
+                  // shouldValidate so a fixed address clears its error as soon
+                  // as it's corrected, rather than at the next submit.
+                  form.setValue("to", next.to, { shouldValidate: form.formState.isSubmitted });
+                  form.setValue("cc", next.cc, { shouldValidate: form.formState.isSubmitted });
+                  form.setValue("bcc", next.bcc, { shouldValidate: form.formState.isSubmitted });
+                }}
+                disabled={isSubmitting}
+              />
+              {(form.formState.errors.to ||
+                form.formState.errors.cc ||
+                form.formState.errors.bcc) && (
+                <p className="text-destructive text-sm">
+                  {form.formState.errors.to?.message ??
+                    form.formState.errors.cc?.message ??
+                    form.formState.errors.bcc?.message}
+                </p>
               )}
-            />
+            </div>
 
             <FormField
               control={form.control}

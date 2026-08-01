@@ -12,7 +12,6 @@ import {
 import { toast } from "sonner";
 
 import { Button } from "@web/components/ui/button";
-import { Input } from "@web/components/ui/input";
 import { Textarea } from "@web/components/ui/textarea";
 import {
   AlertDialog,
@@ -35,6 +34,14 @@ import { useCreateEvent } from "@web/hooks/api/calendar";
 import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
 import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
 import {
+  RecipientFields,
+  firstInvalidRecipientField,
+  visibleRecipients,
+  type RecipientFieldsHandle,
+  type RecipientValues,
+} from "@web/components/inbox/recipient-fields";
+import { parseAddressList } from "@web/lib/email-addresses";
+import {
   MeetingInviteFields,
   emptyMeetingState,
   meetingStateFromTemplate,
@@ -46,12 +53,13 @@ export type InlineReplyMode = "reply" | "replyAll" | "forward";
 
 /**
  * The message being replied to/forwarded. Used ONLY for display (the
- * recipient chip and the quoted-text preview) — never sent as-is. The actual
- * send goes through `replyToEmail`/`forwardEmail`, which independently
- * re-fetch this same message server-side and derive the authoritative
- * recipient/subject/threading headers from it. If this object were ever wrong
- * or stale, the worst outcome is a wrong-looking preview, never a
- * misdirected send.
+ * quoted-text preview and the AI panel's context) — never sent as-is. The
+ * subject and the threading headers still come from `replyToEmail`/
+ * `forwardEmail` re-fetching this same message server-side, so a wrong or
+ * stale object here can at worst produce a wrong-looking preview.
+ *
+ * Recipients are the one thing no longer derived from it: they're seeded into
+ * editable To/Cc/Bcc lines and sent as whatever the user leaves on screen.
  */
 export interface QuotedMessage {
   from: string;
@@ -67,17 +75,22 @@ export interface InlineReplyBoxProps {
   /** The message this reply/forward targets — always the thread's LAST message. */
   entityId: string;
   quoted: QuotedMessage;
-  /** Reply/Reply All only: display-only recipient string (see QuotedMessage doc). Ignored for forward. */
-  displayTo?: string;
   /**
    * Present when this box is resuming an existing draft (only ever true for
    * drafts flagged `isReplyToExisting` — see getDraft) — switches Send/Save/
-   * Discard to the draft mutations and makes `to` editable regardless of mode.
+   * Discard to the draft mutations.
    */
   draftId?: string;
   /** The subject to save the draft under. Never shown/edited inline — Gmail's own inline reply doesn't expose it either. */
   subject: string;
+  /**
+   * Seeds for the three recipient lines. Every mode gets them editable, so
+   * these are a starting point rather than the final recipients: whatever is
+   * on screen at send time is what goes out (see handleSend).
+   */
   initialTo?: string;
+  initialCc?: string;
+  initialBcc?: string;
   initialBody?: string;
   onClose: () => void;
   onSent: () => void;
@@ -148,10 +161,11 @@ export function InlineReplyBox({
   threadId,
   entityId,
   quoted,
-  displayTo,
   draftId,
   subject,
   initialTo,
+  initialCc,
+  initialBcc,
   initialBody,
   onClose,
   onSent,
@@ -163,14 +177,17 @@ export function InlineReplyBox({
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
 
-  // `to` is editable whenever there's no fixed recipient to derive: forwarding
-  // always needs one supplied, and resuming a draft edits whatever Gmail has
-  // saved for it (a draft can be an in-progress reply-all whose recipients the
-  // user already trimmed, which display-derived `to` would silently discard).
-  const toEditable = mode === "forward" || Boolean(draftId);
   const isFreshForward = mode === "forward" && !draftId;
 
-  const [to, setTo] = useState(initialTo ?? "");
+  // All three lines are editable in every mode, Gmail-style — including a
+  // plain reply, where the seed is the sender but the user may well want to
+  // add someone or move the conversation elsewhere before sending.
+  const [recipients, setRecipients] = useState<RecipientValues>({
+    to: initialTo ?? "",
+    cc: initialCc ?? "",
+    bcc: initialBcc ?? "",
+  });
+  const recipientsRef = useRef<RecipientFieldsHandle>(null);
   const [body, setBody] = useState(initialBody ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
@@ -178,13 +195,6 @@ export function InlineReplyBox({
     kind: "body" | "meeting";
     run: () => void;
   }>(null);
-
-  // The sender's bare address, for seeding calendar attendees on a reply.
-  // Parsed from the display `from` the same way [threadId]/page.tsx does.
-  const senderEmail = (() => {
-    const match = quoted.from.match(/<([^>]+)>/);
-    return match ? match[1]! : quoted.from;
-  })();
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   // Reply/forward never touch subject (it isn't shown inline).
@@ -215,8 +225,8 @@ export function InlineReplyBox({
   // the send: never blocks it, offers a Retry on failure. `eventInput` is
   // built before onClose() unmounts this box.
   const fireMeeting = useCallback(
-    (recipients: string[]) => {
-      const eventInput = buildEventInput(meetingState, subject, recipients);
+    (attendees: string[]) => {
+      const eventInput = buildEventInput(meetingState, subject, attendees);
       if (!eventInput) return;
       const createEvent = () =>
         createEventAsync(eventInput)
@@ -233,7 +243,6 @@ export function InlineReplyBox({
 
   const containerRef = useRef<HTMLDivElement>(null);
   const bodyRef = useRef<HTMLTextAreaElement>(null);
-  const toRef = useRef<HTMLInputElement>(null);
 
   // Scroll the box into view then focus the field the user actually needs to
   // fill in — reply/replyAll and draft-editing want the body, a fresh forward
@@ -241,13 +250,30 @@ export function InlineReplyBox({
   // thread leaves the user looking at the top, unaware anything changed.
   useEffect(() => {
     containerRef.current?.scrollIntoView({ behavior: "smooth", block: "start" });
-    const focusTarget = mode === "forward" && !draftId ? toRef.current : bodyRef.current;
-    const t = setTimeout(() => focusTarget?.focus(), 300);
+    const t = setTimeout(() => {
+      if (isFreshForward) recipientsRef.current?.focusField("to");
+      else bodyRef.current?.focus();
+    }, 300);
     return () => clearTimeout(t);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const handleSend = useCallback(async () => {
+    // Same rule as the compose dialog: bad addresses are tolerated while
+    // typing and refused here, with the cursor put on the line at fault.
+    const invalidField = firstInvalidRecipientField(recipients);
+    if (invalidField) {
+      toast.error("Check the recipient addresses");
+      recipientsRef.current?.focusField(invalidField);
+      return;
+    }
+    if (parseAddressList(recipients.to).length === 0) {
+      toast.error(mode === "forward" ? "Add a recipient before forwarding" : "Add a recipient");
+      recipientsRef.current?.focusField("to");
+      return;
+    }
+
+    const { to, cc, bcc } = recipients;
     setSubmitting(true);
     try {
       if (draftId) {
@@ -256,24 +282,26 @@ export function InlineReplyBox({
         // entityId/replyAll re-derive In-Reply-To/References on every push —
         // a draft opened here is always reply-shaped (see the comment below).
         await saveDraftAsync({
-          to, subject, body, threadId, draftId,
+          to, cc, bcc, subject, body, threadId, draftId,
           entityId, replyAll: mode === "replyAll",
         });
         await sendDraftAsync({ draftId });
       } else if (mode === "forward") {
-        if (!to.trim()) {
-          toast.error("Add a recipient before forwarding");
-          setSubmitting(false);
-          return;
-        }
-        await forwardEmailAsync({ entityId, to: to.trim(), note: body.trim() || undefined });
+        await forwardEmailAsync({
+          entityId, to, cc, bcc, note: body.trim() || undefined,
+        });
       } else {
-        await replyToEmailAsync({ entityId, body, replyAll: mode === "replyAll" });
+        // to/cc/bcc are passed explicitly, so what the user sees on screen is
+        // what gets sent. Passing them also means an emptied Cc stays empty
+        // rather than being re-derived server-side — see replyToEmail.
+        await replyToEmailAsync({
+          entityId, body, replyAll: mode === "replyAll", to, cc, bcc,
+        });
       }
       toast.success("Sent");
-      // Fire the optional calendar invite before onClose() unmounts the box —
-      // recipients are whatever this send actually used.
-      fireMeeting(toEditable ? (to.trim() ? [to.trim()] : []) : [senderEmail]);
+      // Fire the optional calendar invite before onClose() unmounts the box.
+      // To + Cc only: a Bcc'd address must not surface in an attendee list.
+      fireMeeting(visibleRecipients(recipients));
       onSent();
       onClose();
     } catch (err) {
@@ -284,16 +312,18 @@ export function InlineReplyBox({
       setSubmitting(false);
     }
   }, [
-    draftId, to, subject, body, threadId, mode, entityId,
+    draftId, recipients, subject, body, threadId, mode, entityId,
     saveDraftAsync, sendDraftAsync, forwardEmailAsync, replyToEmailAsync,
-    onSent, onClose, fireMeeting, toEditable, senderEmail,
+    onSent, onClose, fireMeeting,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
     setSubmitting(true);
     try {
       await saveDraftAsync({
-        to: toEditable ? to : (displayTo ?? ""),
+        to: recipients.to,
+        cc: recipients.cc,
+        bcc: recipients.bcc,
         subject,
         body,
         threadId,
@@ -313,7 +343,7 @@ export function InlineReplyBox({
       setSubmitting(false);
     }
   }, [
-    saveDraftAsync, toEditable, to, displayTo, subject, body, threadId, draftId,
+    saveDraftAsync, recipients, subject, body, threadId, draftId,
     isFreshForward, entityId, mode, onClose, onSent,
   ]);
 
@@ -361,26 +391,13 @@ export function InlineReplyBox({
         </Button>
       </div>
 
-      {toEditable ? (
-        <div className="flex items-center gap-2">
-          <span className="text-xs text-muted-foreground shrink-0">To</span>
-          <Input
-            ref={toRef}
-            value={to}
-            onChange={(e) => setTo(e.target.value)}
-            placeholder="recipient@example.com"
-            disabled={submitting}
-            className="h-8"
-          />
-        </div>
-      ) : (
-        displayTo && (
-          <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            <span>To</span>
-            <span className="rounded-full bg-muted px-2 py-0.5 text-foreground">{displayTo}</span>
-          </div>
-        )
-      )}
+      <RecipientFields
+        ref={recipientsRef}
+        values={recipients}
+        onChange={setRecipients}
+        disabled={submitting}
+        compact
+      />
 
       {isFreshForward && <QuotedHistoryToggle quoted={quoted} variant="forward" alwaysOpen />}
 

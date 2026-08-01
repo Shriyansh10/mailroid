@@ -105,6 +105,8 @@ export const gmailRouter = router({
     .input(
       z.object({
         to: z.string(),
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
         subject: z.string(),
         body: z.string(),
         threadId: z.string().optional(),
@@ -122,13 +124,19 @@ export const gmailRouter = router({
       return result;
     }),
 
-  // Entity-id based, unlike `send`: recipient and threading headers
+  // Entity-id based, unlike `send`: the threading headers
   // (In-Reply-To/References) are derived server-side from the actual message
   // fetched fresh from Gmail — see resolveReplyTarget in
   // packages/services/gmail/index.ts. This is what keeps a reply in the same
   // Gmail conversation; the generic `send` mutation only carries `threadId`,
   // which Gmail treats as a grouping hint, not the header a client (or
   // another mail client entirely) needs to see the thread stay together.
+  //
+  // to/cc/bcc are optional overrides for the inline reply box, where a human
+  // edits the recipient lines. Omit them and the server derives them exactly
+  // as before; pass one (even empty) and it wins. The assistant reaches
+  // replyToEmail through the tool registry, not this route, and that schema
+  // has no recipient fields at all.
   replyToEmail: protectedProcedure
     .meta({ openapi: { method: "POST", path: getPath("/reply"), tags: TAGS } })
     .input(
@@ -136,6 +144,9 @@ export const gmailRouter = router({
         entityId: z.string(),
         body: z.string(),
         replyAll: z.boolean().optional(),
+        to: z.string().optional(),
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
       }),
     )
     .output(sendEmailOutputModel)
@@ -155,6 +166,8 @@ export const gmailRouter = router({
       z.object({
         entityId: z.string(),
         to: z.string(),
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
         note: z.string().optional(),
       }),
     )
@@ -227,6 +240,10 @@ export const gmailRouter = router({
         draftId: z.string(),
         messageId: z.string(),
         to: z.string(),
+        // Bcc round-trips here and only here: a draft is the one place Gmail
+        // still holds the header (it strips it on send).
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
         subject: z.string(),
         body: z.string(),
         threadId: z.string().optional(),
@@ -243,6 +260,8 @@ export const gmailRouter = router({
     .input(
       z.object({
         to: z.string(),
+        cc: z.string().optional(),
+        bcc: z.string().optional(),
         subject: z.string(),
         body: z.string(),
         threadId: z.string().optional(),

@@ -28,6 +28,20 @@ interface SummaryFlags {
   secretsRedacted: boolean;
 }
 
+/**
+ * The actionable shape extracted alongside the summary. Every field is
+ * optional — an all-empty result is the honest answer for most single
+ * emails, and the UI renders nothing rather than empty headings.
+ */
+interface SummaryData {
+  schemaVersion: number;
+  decisions?: string[];
+  openQuestions?: string[];
+  actionItems?: { text: string; owner?: string; due?: string }[];
+  deadlines?: { what: string; when: string }[];
+  people?: { name: string; role?: string }[];
+}
+
 const CATEGORY_LABELS: Record<string, string> = {
   EMAIL: "email addresses",
   PHONE: "phone numbers",
@@ -81,6 +95,28 @@ function parseSections(digest: string | null): SummarySection[] {
     .filter((s): s is SummarySection => s !== null);
 }
 
+/** One labelled block of extracted items. Renders nothing when empty. */
+function StructuredList({ label, items }: { label: string; items: string[] }) {
+  if (items.length === 0) return null;
+  return (
+    <div className="flex flex-col gap-1">
+      <span className="text-[10px] font-mono uppercase tracking-widest text-[#b08d57] font-bold">
+        {label}
+      </span>
+      <ul className="flex flex-col gap-1">
+        {items.map((item, i) => (
+          <li
+            key={i}
+            className="text-xs text-foreground/85 leading-relaxed pl-2.5 border-l-2 border-[#b08d57]/20"
+          >
+            {item}
+          </li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
 /**
  * On-demand AI summary for a single email.
  *
@@ -92,6 +128,7 @@ function parseSections(digest: string | null): SummarySection[] {
 export function EmailSummaryCard({
   entityId,
   threadId,
+  messageCount,
   subject,
   sender,
   receivedAt,
@@ -99,9 +136,14 @@ export function EmailSummaryCard({
   initialDigest,
   initialFullText,
   initialFlags,
+  initialData,
 }: {
   entityId: string | undefined;
   threadId?: string;
+  /** How many messages the thread has, as rendered. Sent to the server as a
+   *  completeness hint — it can only force a slower path, never change the
+   *  result. See normalizeMessageCountHint in lib/summarize/thread-source.ts. */
+  messageCount?: number;
   subject?: string;
   sender?: string;
   receivedAt?: string;
@@ -109,6 +151,7 @@ export function EmailSummaryCard({
   initialDigest?: string | null;
   initialFullText?: string | null;
   initialFlags?: SummaryFlags | null;
+  initialData?: SummaryData | null;
 }) {
   const router = useRouter();
   // Gates "Discuss with Dobbie" — a one-time latch (see ai-readiness.ts), so
@@ -119,6 +162,7 @@ export function EmailSummaryCard({
   const [digest, setDigest] = useState<string | null>(initialDigest ?? null);
   const [fullText, setFullText] = useState<string | null>(initialFullText ?? null);
   const [flags, setFlags] = useState<SummaryFlags | null>(initialFlags ?? null);
+  const [data, setData] = useState<SummaryData | null>(initialData ?? null);
   const [loading, setLoading] = useState(false);
   const [discussLoading, setDiscussLoading] = useState(false);
 
@@ -132,18 +176,19 @@ export function EmailSummaryCard({
           "Content-Type": "application/json",
           "x-user-timezone": Intl.DateTimeFormat().resolvedOptions().timeZone,
         },
-        body: JSON.stringify({ entityId, force }),
+        body: JSON.stringify({ entityId, threadId, messageCount, force }),
       });
-      const data = await res.json();
+      const payload = await res.json();
       if (!res.ok) {
-        toast.error(data.error ?? "Could not summarize this email");
+        toast.error(payload.error ?? "Could not summarize this email");
         return;
       }
-      setSummary(data.summary);
-      setDigest(data.digest ?? null);
-      setFullText(data.fullText ?? null);
-      setFlags(data.flags ?? null);
-      if (!data.cached) toast.success("Summary generated — 1 action used");
+      setSummary(payload.summary);
+      setDigest(payload.digest ?? null);
+      setFullText(payload.fullText ?? null);
+      setFlags(payload.flags ?? null);
+      setData(payload.data ?? null);
+      if (!payload.cached) toast.success("Summary generated — 1 action used");
     } catch {
       toast.error("Could not reach the summarizer");
     } finally {
@@ -190,6 +235,16 @@ export function EmailSummaryCard({
   const sections = parseSections(digest);
   const hasDigest = sections.length > 0 && Boolean(digest?.trim());
 
+  // Nothing extracted is the normal answer for a plain FYI email, so an
+  // empty array renders nothing at all — no headings, no "None".
+  const actionItems = data?.actionItems ?? [];
+  const decisions = data?.decisions ?? [];
+  const openQuestions = data?.openQuestions ?? [];
+  const deadlines = data?.deadlines ?? [];
+  const people = data?.people ?? [];
+  const hasStructured =
+    actionItems.length + decisions.length + openQuestions.length + deadlines.length > 0;
+
   return (
     <div className="bg-[#b08d57]/5 border border-[#b08d57]/15 rounded-xl p-5 relative overflow-hidden shadow-sm">
       <div className="absolute right-4 top-4 select-none opacity-10">
@@ -213,6 +268,24 @@ export function EmailSummaryCard({
           <p className="font-serif text-sm text-foreground/90 leading-relaxed">
             {summary}
           </p>
+          {hasStructured && (
+            <div className="mt-3 flex flex-col gap-2.5 border-t border-[#b08d57]/15 pt-3">
+              <StructuredList
+                label="Action items"
+                items={actionItems.map((a) =>
+                  [a.text, a.owner && `— ${a.owner}`, a.due && `(${a.due})`]
+                    .filter(Boolean)
+                    .join(" "),
+                )}
+              />
+              <StructuredList label="Decisions" items={decisions} />
+              <StructuredList label="Open questions" items={openQuestions} />
+              <StructuredList
+                label="Deadlines"
+                items={deadlines.map((d) => `${d.what} — ${d.when}`)}
+              />
+            </div>
+          )}
           {hasDigest && (
             <Sheet>
               <SheetTrigger asChild>
@@ -236,6 +309,26 @@ export function EmailSummaryCard({
                   <p className="text-sm text-muted-foreground leading-relaxed border-b pb-4">
                     {summary}
                   </p>
+                  {people.length > 0 && (
+                    <div className="flex flex-col gap-2">
+                      <h3 className="text-xs font-mono uppercase tracking-widest text-[#b08d57] font-bold">
+                        People
+                      </h3>
+                      <div className="flex flex-wrap gap-1.5">
+                        {people.map((p, i) => (
+                          <span
+                            key={i}
+                            className="rounded-full border border-[#b08d57]/25 bg-[#b08d57]/5 px-2.5 py-0.5 text-xs text-foreground/80"
+                          >
+                            {p.name}
+                            {p.role && (
+                              <span className="text-muted-foreground"> · {p.role}</span>
+                            )}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                   {sections.map((section, i) => (
                     <div key={i} className="flex flex-col gap-2">
                       {section.topic && (

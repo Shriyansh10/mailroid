@@ -1,10 +1,11 @@
 import { db, eq, and, or, ilike, desc } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { emails } from "@repo/database/models/emails";
-import { summarizeEmail, withAiUsage, NothingToSummarizeError } from "@repo/ai";
+import { summarizeEmail, withAiUsage, SUMMARY_PROMPT_VERSION, type SummaryData } from "@repo/ai";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
+import { buildThreadSource, normalizeMessageCountHint } from "./thread-source.ts";
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -26,6 +27,7 @@ export interface SummaryMeta {
   topicCount: number;
   complexity: string;
   sections: number;
+  promptVersion?: number;
 }
 
 export interface SummaryOutcomeOk {
@@ -42,6 +44,8 @@ export interface SummaryOutcomeOk {
   digest: string;
   /** Guardrailed but uncompressed body. Callers that persist this into an LLM conversation should NOT — see apps/web/lib/executors/summarize.ts. */
   fullText: string;
+  /** Extracted decisions/actions/deadlines. null when never generated or unparseable. */
+  data: SummaryData | null;
   flags: SummaryGuardrails;
   meta: SummaryMeta | null;
 }
@@ -70,6 +74,12 @@ export interface GetOrCreateSummaryOptions {
   force?: boolean;
   userTimeZone?: string;
   /**
+   * The caller's belief about how many messages the thread has. UNTRUSTED —
+   * used only as a lower bound that can force the slower Gmail path. See
+   * normalizeMessageCountHint in thread-source.ts.
+   */
+  messageCountHint?: number;
+  /**
    * "on-generate" charges one daily action when a summary is actually
    * produced (never on a cache hit). "never" is for callers that already
    * charge elsewhere for the surrounding action (the chat route charges once
@@ -91,6 +101,7 @@ const METADATA_SELECTION = {
   summaryDigest: messageMetadata.summaryDigest,
   summaryFullText: messageMetadata.summaryFullText,
   summaryFlags: messageMetadata.summaryFlags,
+  summaryData: messageMetadata.summaryData,
   summaryMeta: messageMetadata.summaryMeta,
 };
 
@@ -105,6 +116,7 @@ interface ResolvedMetadataRow {
   summaryDigest: string | null;
   summaryFullText: string | null;
   summaryFlags: SummaryGuardrails | null;
+  summaryData: SummaryData | null;
   summaryMeta: SummaryMeta | null;
 }
 
@@ -254,6 +266,9 @@ export async function getOrCreateSummary(
       summary: meta.summary,
       digest: meta.summaryDigest || meta.summary,
       fullText: meta.summaryFullText ?? "",
+      // null for rows summarized before structured extraction existed —
+      // the card renders those exactly as it did before.
+      data: meta.summaryData ?? null,
       flags: meta.summaryFlags ?? {
         injectionBlocked: false,
         maskedCategories: [],
@@ -270,18 +285,56 @@ export async function getOrCreateSummary(
     }
   }
 
-  const [emailRow] = await db
-    .select({ bodyText: emails.bodyText })
-    .from(emails)
-    .where(and(eq(emails.gmailMessageId, meta.entityId), eq(emails.userId, userId)))
-    .limit(1);
+  // Prefer the whole thread. Summarizing one message of a conversation was
+  // the original bug: the card sent the OLDEST message, so a 3-message
+  // thread whose first message said "Test" was reported as having nothing
+  // substantive in it.
+  const thread = meta.threadId
+    ? await buildThreadSource({
+        userId,
+        threadId: meta.threadId,
+        messageCountHint: normalizeMessageCountHint(opts.messageCountHint),
+      })
+    : null;
 
-  const sourceText = emailRow?.bodyText || meta.snippet || "";
+  let sourceText = thread?.text ?? "";
+  if (!sourceText.trim()) {
+    const [emailRow] = await db
+      .select({ bodyText: emails.bodyText })
+      .from(emails)
+      .where(and(eq(emails.gmailMessageId, meta.entityId), eq(emails.userId, userId)))
+      .limit(1);
+    // Widened chain: subject is a last resort but it is still content, and
+    // with the refusal path gone a subject-only email should summarize
+    // rather than error.
+    sourceText = emailRow?.bodyText || meta.snippet || meta.subject || "";
+  }
+
   if (!sourceText.trim()) {
     return {
       ok: false,
       reason: "no_content",
       message: "That email has no readable content to summarize.",
+      ...common,
+    };
+  }
+
+  // Second protected-content pass, now that the full text exists.
+  //
+  // The check above only saw subject + snippet, so a protected keyword
+  // deeper in the body slipped through; and it only saw the resolved
+  // message's sender, so a protected participant who appears on a later
+  // reply was invisible. Both run BEFORE any model call, so blocked content
+  // is never sent, never cached and never charged.
+  const bodyKeywordHit = matchProtectedKeyword(sourceText, blocklist.keywords);
+  const threadSenderHit = (thread?.senders ?? []).some((from) =>
+    matchProtectedSender(from, blocklist.senders),
+  );
+  if (bodyKeywordHit || threadSenderHit) {
+    return {
+      ok: false,
+      reason: "blocked",
+      message: "That email is on your protected list, so I can't open or summarize it.",
       ...common,
     };
   }
@@ -293,20 +346,10 @@ export async function getOrCreateSummary(
         sender: meta.sender || "Unknown Sender",
         subject: meta.subject || "No Subject",
         body: sourceText,
+        isThread: (thread?.messageCount ?? 0) > 1,
       }),
     );
   } catch (err) {
-    if (err instanceof NothingToSummarizeError) {
-      // Not a failure — the model correctly identified boilerplate/promotional
-      // content with nothing substantive to report. Same user-facing bucket as
-      // the empty-sourceText case above, so callers treat them identically.
-      return {
-        ok: false,
-        reason: "no_content",
-        message: "That email doesn't have any substantive content to summarize — it looks like a promotional or boilerplate message.",
-        ...common,
-      };
-    }
     console.error("[getOrCreateSummary] generation failed", { entityId: meta.entityId, error: err });
     return {
       ok: false,
@@ -322,6 +365,11 @@ export async function getOrCreateSummary(
     secretsRedacted: result.secretsRedacted,
   };
 
+  const summaryMeta: SummaryMeta = {
+    ...result.analysis,
+    promptVersion: SUMMARY_PROMPT_VERSION,
+  };
+
   // Cached so the inbox card and the assistant always show the same notes
   // rather than paying to generate twice.
   await db
@@ -331,7 +379,8 @@ export async function getOrCreateSummary(
       summaryDigest: result.digest,
       summaryFullText: result.fullText,
       summaryFlags: flags,
-      summaryMeta: result.analysis,
+      summaryData: result.data,
+      summaryMeta,
       summaryGeneratedAt: new Date(),
       updatedAt: new Date(),
     })
@@ -354,7 +403,8 @@ export async function getOrCreateSummary(
     summary: result.summary,
     digest: result.digest,
     fullText: result.fullText,
+    data: result.data,
     flags,
-    meta: result.analysis,
+    meta: summaryMeta,
   };
 }

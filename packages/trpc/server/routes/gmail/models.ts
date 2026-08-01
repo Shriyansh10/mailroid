@@ -34,6 +34,14 @@ export const messageDetailOutputModel = z.object({
   id: z.string(),
   from: z.string(),
   to: z.string(),
+  /**
+   * The Cc line the message carried. No `bcc` counterpart exists on purpose:
+   * Gmail strips Bcc from delivered mail, so there is no header to read on a
+   * received message — only a draft you wrote still has one.
+   */
+  cc: z.string().optional(),
+  /** Reply-To, when set — the reply box seeds its To line from this over From. */
+  replyTo: z.string().optional(),
   subject: z.string(),
   date: z.string(),
   body: z.string(),
@@ -63,6 +71,22 @@ export const threadDetailOutputModel = z.object({
       injectionBlocked: z.boolean(),
       maskedCategories: z.array(z.string()),
       secretsRedacted: z.boolean(),
+    })
+    .nullable()
+    .optional(),
+  // The actionable shape extracted alongside the summary. Every field is
+  // optional and schemaVersion says which shape they're in, so adding one
+  // later doesn't break older stored rows.
+  summaryData: z
+    .object({
+      schemaVersion: z.number(),
+      decisions: z.array(z.string()).optional(),
+      openQuestions: z.array(z.string()).optional(),
+      actionItems: z
+        .array(z.object({ text: z.string(), owner: z.string().optional(), due: z.string().optional() }))
+        .optional(),
+      deadlines: z.array(z.object({ what: z.string(), when: z.string() })).optional(),
+      people: z.array(z.object({ name: z.string(), role: z.string().optional() })).optional(),
     })
     .nullable()
     .optional(),

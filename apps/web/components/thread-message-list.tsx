@@ -1,14 +1,21 @@
 "use client";
 
-import { useState, useEffect, useMemo } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import DOMPurify from "dompurify";
-import { ChevronRightIcon } from "lucide-react";
+import { ChevronRightIcon, ChevronDownIcon } from "lucide-react";
 import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
+import { parseAddressList } from "@web/lib/email-addresses";
 
 export interface ThreadMessage {
   id: string;
   from: string;
   to: string;
+  /**
+   * The message's Cc line, when it had one. There is no `bcc` counterpart on
+   * purpose: Gmail strips Bcc from delivered mail, so a received message
+   * simply doesn't carry one — only a draft you wrote still does.
+   */
+  cc?: string;
   subject: string;
   date: string;
   body: string;
@@ -31,6 +38,23 @@ function parseSender(from: string) {
     name: from.split("@")[0] || from,
     email: from,
   };
+}
+
+/**
+ * Gmail's one-line recipient summary: "to agarwalshriyansh009, Smog" — your
+ * own address becomes "me", everyone else is shortened to the part before the
+ * @. The full addresses live in the details panel, which is the point of the
+ * summary being this short.
+ */
+function summariseRecipients(header: string | undefined, selfEmail?: string): string {
+  const addresses = parseAddressList(header);
+  if (addresses.length === 0) return "";
+  const self = selfEmail?.toLowerCase();
+  return addresses
+    .map((address) =>
+      address.toLowerCase() === self ? "me" : (address.split("@")[0] || address),
+    )
+    .join(", ");
 }
 
 function formatMessageDate(dateString: string): string {
@@ -71,11 +95,45 @@ function formatMessageDate(dateString: string): string {
  * DOMPurify sanitization stays here, non-optional — this renders untrusted
  * HTML email content via dangerouslySetInnerHTML.
  */
-export function ThreadMessageList({ messages: allMessages }: { messages: ThreadMessage[] }) {
+export function ThreadMessageList({
+  messages: allMessages,
+  selfEmail,
+}: {
+  messages: ThreadMessage[];
+  /** The signed-in address, so recipient summaries can say "me" like Gmail. */
+  selfEmail?: string;
+}) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // Which message has its from/to/cc/date/subject panel open (one at a time).
+  const [detailsFor, setDetailsFor] = useState<string | null>(null);
+  const detailsRef = useRef<HTMLDivElement>(null);
+
+  // Click anywhere outside closes it. The panel itself stops propagation, so
+  // selecting an address inside it doesn't dismiss what you're reading.
+  useEffect(() => {
+    if (!detailsFor) return;
+    const onPointerDown = (e: MouseEvent) => {
+      const target = e.target as Element;
+      // The caret is excluded, not just the panel: mousedown fires before
+      // click, so closing here would let the caret's own handler reopen it and
+      // the panel would look stuck open.
+      if (target.closest("[data-message-details-toggle]")) return;
+      if (!detailsRef.current?.contains(target)) setDetailsFor(null);
+    };
+    const onEscape = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setDetailsFor(null);
+    };
+    document.addEventListener("mousedown", onPointerDown);
+    document.addEventListener("keydown", onEscape);
+    return () => {
+      document.removeEventListener("mousedown", onPointerDown);
+      document.removeEventListener("keydown", onEscape);
+    };
+  }, [detailsFor]);
 
   // Drafts are unsent — Gmail groups them into the thread by threadId, but
   // they have no place in a read-only timeline. The thread page renders the
@@ -138,28 +196,101 @@ export function ThreadMessageList({ messages: allMessages }: { messages: ThreadM
         }
 
         return (
-          <div key={msg.id} className="bg-card border rounded-xl shadow-sm overflow-hidden">
-            {/* Message Header — clickable to collapse back, mirroring Gmail */}
-            <button
-              type="button"
+          // No overflow-hidden: it would clip the details panel that drops out
+          // of the header. The header carries its own rounded-t-xl instead,
+          // which is all the clipping was doing (its tinted background is the
+          // only thing that reaches the card's corners).
+          <div key={msg.id} className="bg-card border rounded-xl shadow-sm">
+            {/*
+              Message Header — clicking it collapses the message back, as in
+              Gmail. A div rather than a button now that it contains its own
+              interactive control (the details caret): a button nested inside a
+              button is invalid HTML and browsers handle it inconsistently.
+              role/tabIndex/onKeyDown keep it operable from the keyboard.
+            */}
+            <div
+              role="button"
+              tabIndex={0}
               onClick={() => toggle(msg.id)}
-              className="w-full bg-muted/10 border-b px-6 py-4 flex flex-col sm:flex-row sm:items-center justify-between gap-4 text-left hover:bg-muted/20 transition-colors"
+              onKeyDown={(e) => {
+                if (e.key === "Enter" || e.key === " ") {
+                  e.preventDefault();
+                  toggle(msg.id);
+                }
+              }}
+              className="w-full bg-muted/10 border-b rounded-t-xl px-6 py-4 flex flex-col sm:flex-row sm:items-start justify-between gap-4 text-left hover:bg-muted/20 transition-colors cursor-pointer"
             >
-              <div className="flex items-center gap-3">
-                <Avatar className="size-9 border border-border">
+              <div className="flex items-start gap-3 min-w-0">
+                <Avatar className="size-9 border border-border shrink-0">
                   <AvatarFallback className="bg-muted text-muted-foreground text-xs font-mono font-bold">
                     {initials}
                   </AvatarFallback>
                 </Avatar>
-                <div>
+                <div className="min-w-0">
                   <div className="text-sm font-semibold text-foreground leading-none">{name}</div>
                   <div className="text-xs text-muted-foreground font-mono mt-1 leading-none">{email}</div>
+
+                  {/*
+                    "to me, Smog ▾" — the short summary, with the full
+                    from/to/cc/date/subject behind the caret, exactly like
+                    Gmail's own header popup.
+                  */}
+                  <div className="relative mt-1.5">
+                    <button
+                      type="button"
+                      data-message-details-toggle
+                      onClick={(e) => {
+                        e.stopPropagation(); // don't collapse the message
+                        setDetailsFor((current) => (current === msg.id ? null : msg.id));
+                      }}
+                      title="Show details"
+                      className="flex items-center gap-1 text-xs text-muted-foreground hover:text-foreground transition-colors max-w-full"
+                    >
+                      <span className="truncate">
+                        to {summariseRecipients(msg.to, selfEmail) || "—"}
+                        {msg.cc ? `, cc ${summariseRecipients(msg.cc, selfEmail)}` : ""}
+                      </span>
+                      <ChevronDownIcon className="size-3 shrink-0" />
+                    </button>
+
+                    {detailsFor === msg.id && (
+                      <div
+                        ref={detailsRef}
+                        onClick={(e) => e.stopPropagation()}
+                        className="absolute left-0 top-full z-20 mt-1 w-max max-w-[min(32rem,calc(100vw-4rem))] rounded-lg border bg-popover p-3 shadow-lg"
+                      >
+                        <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1 text-xs">
+                          <dt className="text-muted-foreground text-right">from:</dt>
+                          <dd className="break-all">
+                            <span className="font-semibold">{name}</span>{" "}
+                            <span className="text-muted-foreground">{email}</span>
+                          </dd>
+
+                          <dt className="text-muted-foreground text-right">to:</dt>
+                          <dd className="break-all">{msg.to || "—"}</dd>
+
+                          {msg.cc && (
+                            <>
+                              <dt className="text-muted-foreground text-right">cc:</dt>
+                              <dd className="break-all">{msg.cc}</dd>
+                            </>
+                          )}
+
+                          <dt className="text-muted-foreground text-right">date:</dt>
+                          <dd>{mounted ? formatMessageDate(msg.date) : msg.date}</dd>
+
+                          <dt className="text-muted-foreground text-right">subject:</dt>
+                          <dd className="break-words">{msg.subject}</dd>
+                        </dl>
+                      </div>
+                    )}
+                  </div>
                 </div>
               </div>
-              <div className="text-xs font-mono text-muted-foreground">
+              <div className="text-xs font-mono text-muted-foreground shrink-0">
                 {mounted ? formatMessageDate(msg.date) : msg.date}
               </div>
-            </button>
+            </div>
 
             {/* Message Body */}
             <div className="p-6">

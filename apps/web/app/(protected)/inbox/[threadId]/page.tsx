@@ -32,6 +32,13 @@ import { EmailSummaryCard } from "@web/components/email-summary-card";
 import { ThreadMessageList } from "@web/components/thread-message-list";
 import { InlineReplyBox } from "@web/components/inbox/inline-reply-box";
 import type { InlineReplyMode } from "@web/components/inbox/inline-reply-box";
+import { useSession } from "@web/lib/auth-client";
+import {
+  dedupeAddresses,
+  joinAddresses,
+  parseAddressList,
+  removeAddresses,
+} from "@web/lib/email-addresses";
 
 /**
  * Which action opened the inline box, and — separately — whether it's
@@ -48,6 +55,9 @@ export default function ThreadDetailPage() {
   const { data: thread, isLoading, isError, error, refetch: refetchThread } = useThread(threadId);
   const router = useRouter();
   const searchParams = useSearchParams();
+  // Your own address, so Reply All doesn't seed a Cc that copies you.
+  const { data: session } = useSession();
+  const myEmail = session?.user?.email ?? "";
 
   // Where "Back to Inbox" should return to — the exact list view (category,
   // q, aiq, mode, page) the user came from, carried forward as `from` by
@@ -128,22 +138,31 @@ export default function ThreadDetailPage() {
   // normal message row; this page does the same via the InlineReplyBox.
   const trailingDraft = thread?.messages?.find((m) => m.isDraft);
 
-  const senderEmail = useMemo(() => {
-    if (!lastMsg?.from) return "";
-    const match = lastMsg.from.match(/<([^>]+)>/);
-    return match ? match[1] : lastMsg.from;
-  }, [lastMsg]);
+  /**
+   * Who a reply goes to. Reply-To wins over From when the message set one —
+   * mailing lists and no-reply senders depend on it, and this line is now what
+   * actually gets sent (the box passes its recipients through), so getting it
+   * from the same header resolveReplyTarget uses is not optional.
+   */
+  const senderEmail = useMemo(
+    () => parseAddressList(lastMsg?.replyTo || lastMsg?.from)[0] ?? "",
+    [lastMsg],
+  );
 
-  const replyAllRecipients = useMemo(() => {
+  /**
+   * Everyone else the last message reached — the Cc line a Reply All starts
+   * with. Mirrors resolveReplyTarget's server-side rule: drop the sender (who
+   * is the To of this reply) and drop yourself (Gmail doesn't copy you on your
+   * own reply). Both lists are editable afterwards, so this only has to be a
+   * sensible starting point, not the last word.
+   */
+  const replyAllCc = useMemo(() => {
     if (!lastMsg) return "";
-    const recipients = [senderEmail];
-    if (lastMsg.to) {
-      const matchTo = lastMsg.to.match(/<([^>]+)>/);
-      const toEmail = matchTo ? matchTo[1] : lastMsg.to;
-      if (toEmail && toEmail !== senderEmail) recipients.push(toEmail);
-    }
-    return recipients.filter(Boolean).join(", ");
-  }, [lastMsg, senderEmail]);
+    const everyone = parseAddressList(`${lastMsg.to ?? ""},${lastMsg.cc ?? ""}`);
+    return joinAddresses(
+      dedupeAddresses(removeAddresses(everyone, [senderEmail, myEmail])),
+    );
+  }, [lastMsg, senderEmail, myEmail]);
 
   useEffect(() => {
     if (thread) {
@@ -200,7 +219,12 @@ export default function ThreadDetailPage() {
   // dependency on the query's data object, so a background refetch triggered
   // by the send/save mutations below can't reopen a box the user closed).
   const resumeDraftId = searchParams.get("draftId") ?? undefined;
-  const { data: resumedDraft } = useDraft(resumeDraftId);
+  // Also covers the trailing-draft case below, so a resumed draft always comes
+  // from getDraft whichever way it was opened. That's not just tidiness: the
+  // thread's own copy of a draft message has no Bcc line (message detail
+  // deliberately doesn't carry one — Gmail strips Bcc from delivered mail), so
+  // prefilling from it would quietly drop the Bcc off a draft that has one.
+  const { data: resumedDraft } = useDraft(resumeDraftId ?? trailingDraft?.draftId);
   const autoOpenedRef = useRef<string | null>(null);
 
   useEffect(() => {
@@ -296,17 +320,25 @@ export default function ThreadDetailPage() {
       }
     : { from: "", to: "", subject: thread.subject, date: "", body: "" };
 
-  // The draft's own fields, whichever source has them: the `?draftId=` fetch
-  // (resumedDraft) when opened from the Draft list, or the thread's own
-  // trailing draft message when detected in-place — either way the box
-  // prefills from the same draftId it's editing, never mismatched.
-  const activeDraft = box?.draftId
-    ? box.draftId === resumedDraft?.draftId
-      ? resumedDraft
-      : box.draftId === trailingDraft?.draftId
-        ? trailingDraft
-        : undefined
-    : undefined;
+  // The draft's own fields, from getDraft — whether it was opened via
+  // `?draftId=` from the Draft list or detected as this thread's trailing
+  // draft, useDraft above fetches the same resource. Guarded on the ids
+  // matching so the box never prefills from a draft it isn't editing (a stale
+  // query result while switching drafts).
+  const activeDraft =
+    box?.draftId && box.draftId === resumedDraft?.draftId ? resumedDraft : undefined;
+
+  // What the three recipient lines open with. A draft resumes exactly what
+  // Gmail has stored for it (including a Bcc, which survives on drafts alone);
+  // otherwise the seed is per-mode, and a forward starts blank so the user
+  // can't accidentally send the whole quoted thread back to its own sender.
+  const prefillRecipients = box?.draftId
+    ? { initialTo: activeDraft?.to, initialCc: activeDraft?.cc, initialBcc: activeDraft?.bcc }
+    : box?.mode === "replyAll"
+      ? { initialTo: senderEmail, initialCc: replyAllCc }
+      : box?.mode === "reply"
+        ? { initialTo: senderEmail }
+        : {};
 
   const boxSubject = box?.draftId
     ? (activeDraft?.subject ?? thread.subject)
@@ -459,20 +491,28 @@ export default function ThreadDetailPage() {
             (a classification rationale) or, failing that, the raw Gmail
             snippet — neither of which was a summary, and the snippet leaked
             whatever the email happened to contain. */}
+        {/* Keyed to the NEWEST message, not the oldest. The summary covers
+            the whole thread, and keying it to the latest message is what
+            makes a new reply a cache miss — no version column, no timestamp
+            comparison. It also fixes the original bug: with the oldest
+            message as the key, a thread whose first message said "Test" was
+            all the summarizer ever saw. */}
         <EmailSummaryCard
-          entityId={thread.messages[0]?.id}
+          entityId={thread.messages[thread.messages.length - 1]?.id}
           threadId={thread.threadId}
+          messageCount={thread.messages.length}
           subject={thread.subject}
-          sender={thread.messages[0]?.from}
-          receivedAt={thread.messages[0]?.date}
+          sender={thread.messages[thread.messages.length - 1]?.from}
+          receivedAt={thread.messages[thread.messages.length - 1]?.date}
           initialSummary={thread.summary}
           initialDigest={thread.summaryDigest}
           initialFullText={thread.summaryFullText}
           initialFlags={thread.summaryFlags}
+          initialData={thread.summaryData}
         />
 
         {/* Email Messages Timeline */}
-        <ThreadMessageList messages={thread.messages} />
+        <ThreadMessageList messages={thread.messages} selfEmail={myEmail} />
 
         {/* Bottom pill bar — same handlers as the top icon bar. */}
         <div className="flex items-center gap-2 pt-2">
@@ -496,18 +536,9 @@ export default function ThreadDetailPage() {
             threadId={thread.threadId}
             entityId={lastMsg.id}
             quoted={quoted}
-            displayTo={
-              box.draftId
-                ? undefined
-                : box.mode === "replyAll"
-                  ? replyAllRecipients
-                  : box.mode === "reply"
-                    ? senderEmail
-                    : undefined
-            }
             draftId={box.draftId}
             subject={boxSubject}
-            initialTo={box.draftId ? activeDraft?.to : undefined}
+            {...prefillRecipients}
             initialBody={box.draftId ? activeDraft?.body : undefined}
             onClose={closeBox}
             onSent={() => void refetchThread()}

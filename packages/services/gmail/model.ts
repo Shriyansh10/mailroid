@@ -40,6 +40,18 @@ export const messageDetailSchema = z.object({
   id: z.string(),
   from: z.string(),
   to: z.string(),
+  /**
+   * The message's Cc line, when it had one.
+   *
+   * There is deliberately no `bcc` here: Gmail strips Bcc from every delivered
+   * copy, so a received message has no Bcc header to read and the field would
+   * be permanently empty — which reads as a bug rather than as the privacy
+   * guarantee it actually is. Bcc survives only on a draft you wrote yourself,
+   * which is why getDraft returns it and this doesn't.
+   */
+  cc: z.string().optional(),
+  /** The message's Reply-To, when it set one — where a reply actually belongs. */
+  replyTo: z.string().optional(),
   subject: z.string(),
   date: z.string(),
   body: z.string(),
@@ -74,6 +86,22 @@ export const threadDetailSchema = z.object({
     })
     .nullable()
     .optional(),
+  // Extracted alongside the summary, in the same model call. Every field
+  // optional and shape-versioned so a later addition doesn't invalidate
+  // rows written today.
+  summaryData: z
+    .object({
+      schemaVersion: z.number(),
+      decisions: z.array(z.string()).optional(),
+      openQuestions: z.array(z.string()).optional(),
+      actionItems: z
+        .array(z.object({ text: z.string(), owner: z.string().optional(), due: z.string().optional() }))
+        .optional(),
+      deadlines: z.array(z.object({ what: z.string(), when: z.string() })).optional(),
+      people: z.array(z.object({ name: z.string(), role: z.string().optional() })).optional(),
+    })
+    .nullable()
+    .optional(),
 });
 
 export type ThreadDetail = z.infer<typeof threadDetailSchema>;
@@ -82,6 +110,9 @@ export type ThreadDetail = z.infer<typeof threadDetailSchema>;
 
 export const sendEmailInputSchema = z.object({
   to: z.string(),
+  /** Comma-separated, same shape as the RFC header this ends up as. */
+  cc: z.string().optional(),
+  bcc: z.string().optional(),
   subject: z.string(),
   body: z.string(),
   threadId: z.string().optional(),
@@ -102,15 +133,26 @@ export type SendEmailResult = z.infer<typeof sendEmailResultSchema>;
 //
 // entityId, not threadId: the RECIPIENT and RFC threading headers (Message-
 // ID, References) are derived from one specific original message, which a
-// thread id alone doesn't identify. Deliberately no `to`/`subject` here for
-// replyToEmail — those come from the original message, never the model, so
-// a masked-PII sender ([EMAIL] in anything the model has seen) can't become
-// a wrong or fabricated recipient. See packages/services/gmail/index.ts.
+// thread id alone doesn't identify. There is still no `subject` for
+// replyToEmail — that always comes from the original message.
+//
+// `to`/`cc`/`bcc` are optional overrides, and who may pass them is the whole
+// point of them being optional. The assistant cannot: they are absent from the
+// replyToEmail tool schema (packages/ai/src/tools/registry.ts), so a model call
+// physically has nowhere to put a recipient — which matters because a masked-
+// PII sender ([EMAIL] in anything the model has seen) could otherwise become a
+// wrong or fabricated one. The inline reply box is the one caller that does
+// pass them: a human editing the To/Cc/Bcc lines the way Gmail allows.
+// Omitted means "derive it", not "leave it empty". See
+// packages/services/gmail/index.ts.
 
 export const replyToEmailInputSchema = z.object({
   entityId: z.string(),
   body: z.string(),
   replyAll: z.boolean().optional(),
+  to: z.string().optional(),
+  cc: z.string().optional(),
+  bcc: z.string().optional(),
 });
 
 export type ReplyToEmailInput = z.infer<typeof replyToEmailInputSchema>;
@@ -118,6 +160,10 @@ export type ReplyToEmailInput = z.infer<typeof replyToEmailInputSchema>;
 export const forwardEmailInputSchema = z.object({
   entityId: z.string(),
   to: z.string(),
+  // Human-only, same as replyToEmail's overrides: the forwardEmail tool schema
+  // exposes `to` and `note` and nothing else.
+  cc: z.string().optional(),
+  bcc: z.string().optional(),
   note: z.string().optional(),
 });
 

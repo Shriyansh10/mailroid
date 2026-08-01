@@ -24,6 +24,14 @@ import { withGmailRetry } from "./retry.ts";
 
 export interface DraftInput {
   to: string;
+  /**
+   * Comma-separated, written straight into the draft's headers. Bcc survives
+   * here and nowhere else in the app: Gmail keeps the header on an unsent
+   * draft (so getDraft can read it back) and strips it the moment the draft is
+   * sent, which is exactly the behaviour a blind copy needs.
+   */
+  cc?: string;
+  bcc?: string;
   subject: string;
   body: string;
   /** Set when the draft is a reply, so Gmail keeps it in the same thread. */
@@ -178,6 +186,8 @@ export async function getDraft(userId: string, draftId: string): Promise<DraftDe
     draftId,
     messageId: msg?.id ?? "",
     to: getHeader(headers, "To"),
+    cc: getHeader(headers, "Cc") || undefined,
+    bcc: getHeader(headers, "Bcc") || undefined,
     subject: getHeader(headers, "Subject"),
     body: extractBody(msg?.payload),
     threadId: msg?.threadId,
@@ -201,7 +211,11 @@ export async function createDraft(
 ): Promise<{ draftId: string }> {
   const tenant = corsair.withTenant(userId);
   const headers = await resolveDraftReplyHeaders(userId, input);
-  const raw = buildRawEmail(input.to, input.subject, input.body, headers);
+  const raw = buildRawEmail(input.to, input.subject, input.body, {
+    ...headers,
+    cc: input.cc?.trim() || undefined,
+    bcc: input.bcc?.trim() || undefined,
+  });
 
   const draft = (await tenant.gmail.api.drafts.create({
     draft: { message: { raw, threadId: input.threadId } },
@@ -221,7 +235,11 @@ export async function updateDraft(
 ): Promise<{ draftId: string }> {
   const tenant = corsair.withTenant(userId);
   const headers = await resolveDraftReplyHeaders(userId, input);
-  const raw = buildRawEmail(input.to, input.subject, input.body, headers);
+  const raw = buildRawEmail(input.to, input.subject, input.body, {
+    ...headers,
+    cc: input.cc?.trim() || undefined,
+    bcc: input.bcc?.trim() || undefined,
+  });
 
   await tenant.gmail.api.drafts.update({
     id: draftId,

@@ -23,7 +23,7 @@ export async function POST(request: Request) {
     }
     const userId = session.user.id;
 
-    let body: { entityId?: string; force?: boolean };
+    let body: { entityId?: string; threadId?: string; messageCount?: number; force?: boolean };
     try {
       body = await request.json();
     } catch {
@@ -41,6 +41,10 @@ export async function POST(request: Request) {
       userId,
       userEmail: session.user.email,
       entityId,
+      threadId: body.threadId?.trim() || undefined,
+      // Untrusted lower bound only — normalizeMessageCountHint clamps it and
+      // it can never do more than force the slower Gmail path.
+      messageCountHint: body.messageCount,
       force: body.force,
       userTimeZone,
       charge: "on-generate",
@@ -53,6 +57,7 @@ export async function POST(request: Request) {
         limit_reached: 429,
         generation_failed: 500,
         ambiguous: 409,
+        blocked: 403,
       };
       return NextResponse.json({ error: outcome.message }, { status: statusByReason[outcome.reason] ?? 500 });
     }
@@ -61,6 +66,7 @@ export async function POST(request: Request) {
       summary: outcome.summary,
       digest: outcome.digest,
       fullText: outcome.fullText,
+      data: outcome.data,
       meta: outcome.meta,
       flags: outcome.flags,
       cached: outcome.source === "cache",

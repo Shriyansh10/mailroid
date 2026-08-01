@@ -1,8 +1,9 @@
 import { randomUUID } from "node:crypto";
 
 import { corsair } from "@repo/corsair";
-import { db, eq, sql, and, or, ilike, gte, inArray } from "@repo/database";
+import { db, eq, sql, and, or, ilike, gte, inArray, desc } from "@repo/database";
 import { emails } from "@repo/database/models/emails";
+import { user } from "@repo/database/models/auth";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 import { getProtectedConfig } from "../profile/index.ts";
@@ -141,16 +142,26 @@ function stripHtml(html: string): string {
  * Gmail's own UI — the `threadId` param on messages.send() is a Gmail-only
  * grouping hint that other mail clients ignore entirely, so a real reply
  * needs these headers regardless of whether Gmail's threadId is also set.
+ *
+ * `bcc` is a plain header and needs no second send: Gmail strips Bcc from
+ * every delivered copy and fans the message out to those addresses itself. On
+ * a DRAFT the header is kept as written, which is what lets getDraft read it
+ * back and reopen the draft with its Bcc line intact.
+ *
+ * Every optional header is emitted only when non-empty — an empty `Cc:` line
+ * is not the same thing as no Cc, and callers legitimately pass "" to mean
+ * "no Cc at all" (see replyToEmail's override semantics).
  */
 export function buildRawEmail(
   to: string,
   subject: string,
   body: string,
-  extra?: { cc?: string; inReplyTo?: string; references?: string },
+  extra?: { cc?: string; bcc?: string; inReplyTo?: string; references?: string },
 ): string {
   const lines = [
     `To: ${to}`,
     extra?.cc ? `Cc: ${extra.cc}` : undefined,
+    extra?.bcc ? `Bcc: ${extra.bcc}` : undefined,
     `Subject: ${subject}`,
     extra?.inReplyTo ? `In-Reply-To: ${extra.inReplyTo}` : undefined,
     extra?.references ? `References: ${extra.references}` : undefined,
@@ -167,6 +178,24 @@ export function buildRawEmail(
 function extractAddress(headerValue: string): string {
   const match = headerValue.match(/<([^>]+)>/);
   return (match ? match[1]! : headerValue).trim();
+}
+
+/**
+ * The signed-in account's own address. Needed to keep Reply All from copying
+ * you on your own reply — the mailbox owner is almost always on the original
+ * To or Cc, and Gmail drops them from the reply rather than echoing them back.
+ *
+ * Same lookup as getAuthenticatedEmail in apps/web/lib/executors/gmail.ts,
+ * living here so the service can use it without the app layer having to pass
+ * an address down through every call.
+ */
+export async function getAccountEmail(tenantId: string): Promise<string> {
+  const [row] = await db
+    .select({ email: user.email })
+    .from(user)
+    .where(eq(user.id, tenantId))
+    .limit(1);
+  return row?.email ?? "";
 }
 
 /**
@@ -209,6 +238,16 @@ function transformThreadDetail(thread: Record<string, unknown>): ThreadDetail {
       id: (msg.id as string) ?? "",
       from: getHeader(headers, "From"),
       to: getHeader(headers, "To"),
+      // Cc is carried so the thread view can show it and Reply All can seed
+      // its Cc line from the real header. No Bcc: Gmail strips it from
+      // delivered mail, so there is nothing here to read — see the note on
+      // messageDetailSchema in model.ts.
+      cc: getHeader(headers, "Cc") || undefined,
+      // Where a reply is meant to go when that isn't the From address —
+      // mailing lists and no-reply senders both rely on it. resolveReplyTarget
+      // has always honoured it server-side; the reply box needs it too, or its
+      // editable To line would seed the wrong address and then send it.
+      replyTo: getHeader(headers, "Reply-To") || undefined,
       subject: getHeader(headers, "Subject") || "(no subject)",
       date: getHeader(headers, "Date"),
       body: extractBody(payload),
@@ -322,9 +361,15 @@ export async function getThread(
       summaryDigest: messageMetadata.summaryDigest,
       summaryFullText: messageMetadata.summaryFullText,
       summaryFlags: messageMetadata.summaryFlags,
+      summaryData: messageMetadata.summaryData,
     })
     .from(messageMetadata)
     .where(and(eq(messageMetadata.threadId, threadId), eq(messageMetadata.userId, tenantId)))
+    // Newest first, deliberately: summaries are keyed to the thread's latest
+    // message (so a new reply invalidates the cache), and without this ORDER
+    // BY the LIMIT 1 picked an arbitrary row — which could hydrate an older
+    // message's summary next to a card that generates against the newest.
+    .orderBy(desc(messageMetadata.receivedAt))
     .limit(1);
 
   if (meta[0]) {
@@ -336,6 +381,7 @@ export async function getThread(
     result.summaryDigest = meta[0].summaryDigest ?? undefined;
     result.summaryFullText = meta[0].summaryFullText ?? undefined;
     result.summaryFlags = meta[0].summaryFlags ?? undefined;
+    result.summaryData = meta[0].summaryData ?? undefined;
   }
 
   // A thread message flagged DRAFT (via its Gmail labelIds) carries no draft
@@ -373,10 +419,14 @@ export async function sendEmail(
   const startMs = Date.now();
   logger.info("[SERVICE] sendEmail start", {
     tenantId, to: input.to, subject: input.subject, hasThreadId: !!input.threadId,
+    hasCc: !!input.cc?.trim(), hasBcc: !!input.bcc?.trim(),
   });
   const tenant = corsair.withTenant(tenantId);
 
-  const raw = buildRawEmail(input.to, input.subject, input.body);
+  const raw = buildRawEmail(input.to, input.subject, input.body, {
+    cc: input.cc?.trim() || undefined,
+    bcc: input.bcc?.trim() || undefined,
+  });
 
   const result = await tenant.gmail.api.messages.send({
     raw,
@@ -435,12 +485,22 @@ export async function resolveReplyTarget(
     throw new Error("Could not determine a reply recipient from the original message");
   }
 
+  // Reply All copies everyone the original reached EXCEPT two people: the
+  // sender (who is already the To of this reply) and you (Gmail doesn't cc you
+  // on your own reply, and seeing your own address appear in Cc reads as a
+  // bug). Deliberately no cleverness beyond that — replying to a message you
+  // sent yourself still resolves you as the recipient, and a mailing-list
+  // address is treated as just another address. Gmail is inconsistent about
+  // both, and every line is editable in the UI before sending, so the rule
+  // stays small enough to be obviously correct.
   let ccAddresses: string | undefined;
   if (replyAll) {
+    const selfEmail = (await getAccountEmail(tenantId)).toLowerCase();
+    const excluded = new Set([recipient.toLowerCase(), selfEmail].filter(Boolean));
     const others = new Set<string>();
     for (const raw of `${to},${cc}`.split(",")) {
       const addr = extractAddress(raw.trim());
-      if (addr && addr.toLowerCase() !== recipient.toLowerCase()) others.add(addr);
+      if (addr && !excluded.has(addr.toLowerCase())) others.add(addr);
     }
     if (others.size > 0) ccAddresses = Array.from(others).join(", ");
   }
@@ -459,13 +519,23 @@ export async function resolveReplyTarget(
 }
 
 /**
- * Reply to a specific message. Recipient, subject, and threading headers
+ * Reply to a specific message. Subject and the threading headers
  * (In-Reply-To/References, built from the original's own Message-ID) are
- * ALL derived from the original message — never from the caller. This
- * matters beyond correctness: the assistant only ever sees the sender as
- * the literal string "[EMAIL]" (PII masking replaces every address before
- * content reaches it — see packages/ai/src/security/pii.ts), so it could
- * not supply a correct recipient even if asked to.
+ * ALWAYS derived from the original message, never from the caller.
+ *
+ * Recipients are derived the same way by default, and the default is all the
+ * assistant ever gets: `to`/`cc`/`bcc` are absent from the replyToEmail tool
+ * schema (packages/ai/src/tools/registry.ts), so a model call has nowhere to
+ * put a recipient. It could not supply a correct one anyway — the assistant
+ * only ever sees the sender as the literal string "[EMAIL]" (PII masking
+ * replaces every address before content reaches it, see
+ * packages/ai/src/security/pii.ts).
+ *
+ * The inline reply box is the one caller that does pass them: a human editing
+ * the To/Cc/Bcc lines the way Gmail allows. A field that is PRESENT wins
+ * outright, including when it's empty — clearing Cc has to actually drop the
+ * Cc, not silently fall back to the derived reply-all list. Absent means
+ * "derive it".
  *
  * Also the tRPC `replyToEmail` mutation's implementation for the plain inbox
  * UI (packages/trpc/server/routes/gmail/route.ts) — there the caller isn't
@@ -484,8 +554,14 @@ export async function replyToEmail(
 
   const target = await resolveReplyTarget(tenantId, input.entityId, input.replyAll);
 
-  const raw = buildRawEmail(target.recipient, target.subject, input.body, {
-    cc: target.ccAddresses,
+  const to = input.to !== undefined ? input.to.trim() : target.recipient;
+  if (!to) {
+    throw new Error("A reply needs at least one recipient in To");
+  }
+
+  const raw = buildRawEmail(to, target.subject, input.body, {
+    cc: input.cc !== undefined ? input.cc.trim() || undefined : target.ccAddresses,
+    bcc: input.bcc?.trim() || undefined,
     inReplyTo: target.messageId || undefined,
     references: target.references || undefined,
   });
@@ -577,7 +653,10 @@ export async function forwardEmail(
       ? `\n\n[${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} on the original message could not be forwarded.]`
       : "";
   const composedBody = (input.note ? `${input.note}\n\n${target.quoted}` : target.quoted) + attachmentNote;
-  const raw = buildRawEmail(input.to, target.subject, composedBody);
+  const raw = buildRawEmail(input.to, target.subject, composedBody, {
+    cc: input.cc?.trim() || undefined,
+    bcc: input.bcc?.trim() || undefined,
+  });
 
   const tenant = corsair.withTenant(tenantId);
   const result = await tenant.gmail.api.messages.send({ raw });
