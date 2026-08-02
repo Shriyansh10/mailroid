@@ -1,7 +1,6 @@
 "use client";
 
 import { AlertTriangleIcon, CalendarClockIcon, RotateCcwIcon } from "lucide-react";
-import { format } from "date-fns";
 
 import { Switch } from "@web/components/ui/switch";
 import { Label } from "@web/components/ui/label";
@@ -15,6 +14,8 @@ import {
   combineDateAndTime,
   formatTimeOfDay,
   formatDuration,
+  formatMeetingWindow,
+  formatMeetingStart,
 } from "@web/components/calendar/event-form-utils";
 
 // ── Thread meeting shapes (mirror the tRPC output) ────────────────────
@@ -188,27 +189,6 @@ export function buildEventInput(
   return { kind: "create", input };
 }
 
-/** "Fri 1 Aug, 5:00 PM – 6:00 PM" */
-function formatMeetingWindow(startIso: string, endIso: string): string {
-  const start = new Date(startIso);
-  const end = new Date(endIso);
-  if (Number.isNaN(start.getTime())) return "";
-  const startLabel = format(start, "EEE d MMM, h:mm a");
-  if (Number.isNaN(end.getTime())) return startLabel;
-  return `${startLabel} – ${format(end, "h:mm a")}`;
-}
-
-/**
- * " — was Fri 1 Aug, 5:00 PM", or "" when the time is unknown. The deleted
- * event's row is usually already gone from calendar_events (sync deletes what
- * Google stops returning), so the time is best-effort by design.
- */
-function formatMeetingStart(startIso: string): string {
-  if (!startIso) return "";
-  const start = new Date(startIso);
-  if (Number.isNaN(start.getTime())) return "";
-  return ` — was ${format(start, "EEE d MMM, h:mm a")}`;
-}
 
 // ── Component ─────────────────────────────────────────────────────────
 
@@ -252,8 +232,10 @@ export function MeetingInviteFields({
             </p>
             <p className="text-muted-foreground">
               {deletedLink.title}
-              {formatMeetingStart(deletedLink.start)}. It was deleted in Google
-              Calendar.
+              {formatMeetingStart(deletedLink.start)
+                ? ` — was ${formatMeetingStart(deletedLink.start)}`
+                : ""}
+              . It was deleted in Google Calendar.
             </p>
           </div>
         </div>

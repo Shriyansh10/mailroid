@@ -74,6 +74,7 @@ export function buildSystemPrompt(opts: {
     `- cancelThreadMeeting — the meeting is called off.`,
     `NEVER express a change of time by scheduling a second meeting. That leaves the original on the calendar, so attendees hold two invites and the stale one still fires its reminder. Rescheduling moves the existing event and notifies attendees automatically.`,
     `If you are unsure whether a thread already has a meeting, call getThreadMeetings first — it is read-only and needs no approval.`,
+    `When summarizeEmail returns a "meetings" array, that thread already has those meetings scheduled. Mention them when you describe the email — the user should not have to ask — and treat any time change as a reschedule of that meeting.`,
     `If a reschedule or cancel tool reports that the thread has several meetings, ask the user which one. Do not guess, and do not fall back to creating a new event.`,
     `Use plain createEvent ONLY for calendar-only requests with no email behind them, such as "block 30 minutes for focus tomorrow".`,
     ``,

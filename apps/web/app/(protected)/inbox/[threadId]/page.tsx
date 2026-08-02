@@ -12,6 +12,7 @@ import {
 import {
   useCreateEvent,
   useUpdateEvent,
+  useDeleteEvent,
   useThreadMeetings,
   useAcknowledgeThreadMeeting,
 } from "@web/hooks/api/calendar";
@@ -50,6 +51,7 @@ import {
   buildEventInput,
   type MeetingState,
 } from "@web/components/inbox/meeting-invite-fields";
+import { ThreadMeetingCard } from "@web/components/inbox/thread-meeting-card";
 import {
   toLocalDateKey,
   parseLocalDateKey,
@@ -214,6 +216,7 @@ export default function ThreadDetailPage() {
 
   const { createEventAsync } = useCreateEvent();
   const { updateEventAsync } = useUpdateEvent();
+  const { deleteEventAsync } = useDeleteEvent();
   const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
   const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
@@ -227,6 +230,38 @@ export default function ThreadDetailPage() {
     seededEventIdRef.current = primaryMeeting.eventId;
     setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
   }, [primaryMeeting]);
+
+  // Cancelling from the card. The tRPC delete route already closes the thread
+  // link as CANCELLED, so there is no second call to keep in step.
+  const [isCancellingMeeting, setIsCancellingMeeting] = useState(false);
+  const handleCancelMeeting = async () => {
+    if (!primaryMeeting) return;
+    if (
+      !window.confirm(
+        `Cancel "${primaryMeeting.title}"? Attendees will be notified.`,
+      )
+    ) {
+      return;
+    }
+    setIsCancellingMeeting(true);
+    try {
+      await deleteEventAsync({ id: primaryMeeting.eventId });
+      toast.success("Meeting cancelled", {
+        description: "Attendees have been notified",
+      });
+      // The form may still be open in "move" mode pointing at the event that
+      // no longer exists.
+      setIsScheduling(false);
+      setMeetingState((prev) => ({ ...prev, mode: "create", target: undefined }));
+      seededEventIdRef.current = null;
+    } catch (err: unknown) {
+      toast.error("Couldn't cancel the meeting", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    } finally {
+      setIsCancellingMeeting(false);
+    }
+  };
 
   const handleConfirmMeeting = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -481,11 +516,16 @@ export default function ThreadDetailPage() {
         <Button
           variant="ghost"
           size="icon"
-          className="size-8"
+          className="size-8 relative"
           onClick={() => setIsScheduling((s) => !s)}
-          title="Schedule Meeting"
+          title={primaryMeeting ? "Move this thread's meeting" : "Schedule Meeting"}
         >
           <CalendarIcon className={cn("size-4", isScheduling ? "text-primary" : "text-muted-foreground")} />
+          {/* Without the dot this icon looks identical whether the thread has
+              a meeting or not, so there was no reason to ever click it. */}
+          {primaryMeeting && (
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
+          )}
         </Button>
         <Button
           variant="ghost"
@@ -506,21 +546,9 @@ export default function ThreadDetailPage() {
               : "Schedule a meeting"}
           </div>
 
-          {deletedLink && (
-            <div className="flex flex-wrap items-center justify-between gap-2 rounded border border-destructive/50 bg-destructive/5 px-2 py-1.5 text-[10px]">
-              <span className="text-muted-foreground">
-                The meeting previously scheduled from this thread no longer
-                exists — it was deleted in Google Calendar.
-              </span>
-              <button
-                type="button"
-                className="font-mono uppercase underline underline-offset-2"
-                onClick={() => void acknowledgeAsync({ eventId: deletedLink.eventId })}
-              >
-                Dismiss
-              </button>
-            </div>
-          )}
+          {/* The deleted-link warning lives on ThreadMeetingCard above, not
+              here — it is thread state, not form state, and belongs where the
+              user sees it before opening anything. */}
 
           {meetingState.mode === "update" && meetingState.target && primaryMeeting && (
             <div className="flex flex-wrap items-center justify-between gap-2 rounded bg-muted/60 px-2 py-1.5 text-[10px]">
@@ -619,6 +647,22 @@ export default function ThreadDetailPage() {
       )}
 
       <div className="space-y-6">
+        {/* The thread's meeting, if it has one. Rendered before the summary so
+            "this mail has a meeting attached" is the first thing seen — the
+            link existed for a while before anything displayed it, which meant
+            the only way to discover a meeting was to click an unlabelled
+            calendar icon and hope. */}
+        {(primaryMeeting || deletedLink) && (
+          <ThreadMeetingCard
+            meeting={primaryMeeting}
+            deletedLink={deletedLink}
+            busy={submittingMeeting || isCancellingMeeting}
+            onReschedule={() => setIsScheduling(true)}
+            onCancel={handleCancelMeeting}
+            onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
+          />
+        )}
+
         {/* On-demand AI summary. Previously this card rendered priorityReason
             (a classification rationale) or, failing that, the raw Gmail
             snippet — neither of which was a summary, and the snippet leaked

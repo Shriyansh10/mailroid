@@ -198,3 +198,27 @@ export function combineDateAndTime(date: Date, minutesOfDay: number): Date {
     0,
   );
 }
+
+// ── Display formatting ───────────────────────────────────────────────
+//
+// Shared rather than per-component: the same meeting is rendered by the
+// thread card, the compose banners and the inbox rail, and three private
+// copies would drift into three different date formats.
+
+/** `"Fri 1 Aug, 5:00 PM – 6:00 PM"`. Empty string if start is unparseable. */
+export function formatMeetingWindow(startIso: string, endIso: string): string {
+  const start = new Date(startIso);
+  if (Number.isNaN(start.getTime())) return "";
+  const startLabel = format(start, "EEE d MMM, h:mm a");
+  const end = new Date(endIso);
+  if (Number.isNaN(end.getTime())) return startLabel;
+  return `${startLabel} – ${format(end, "h:mm a")}`;
+}
+
+/** `"Fri 1 Aug, 5:00 PM"`, or `""` when the time is unknown. */
+export function formatMeetingStart(startIso: string): string {
+  if (!startIso) return "";
+  const start = new Date(startIso);
+  if (Number.isNaN(start.getTime())) return "";
+  return format(start, "EEE d MMM, h:mm a");
+}

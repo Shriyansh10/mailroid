@@ -374,6 +374,23 @@ export class ToolRegistry {
           })
           .optional(),
         message: z.string().optional(),
+        // Rides along on the tool the assistant already calls to read mail,
+        // rather than depending on it thinking to call getThreadMeetings. If
+        // a thread has a meeting, the user should hear about it when they ask
+        // about the mail — not only when they ask about the meeting.
+        meetings: z
+          .array(
+            z.object({
+              title: z.string(),
+              start: z.string(),
+              end: z.string(),
+              attendees: z.array(z.string()),
+            }),
+          )
+          .optional()
+          .describe(
+            "Meetings already scheduled from this thread. Mention them when summarizing, and use rescheduleThreadMeeting rather than scheduling another.",
+          ),
         ambiguous: z
           .boolean()
           .optional()
