@@ -61,6 +61,7 @@ import {
   emptyMeetingState,
   meetingStateFromTemplate,
   meetingStateFromExisting,
+  meetingTimesFor,
   buildEventInput,
   type MeetingState,
 } from "@web/components/inbox/meeting-invite-fields";
@@ -478,7 +479,15 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           >
             <div className="flex flex-wrap items-center gap-2">
               <TemplatePicker onSelect={applyTemplate} disabled={isSubmitting} />
-              <AiGeneratePanel mode="compose" onGenerated={applyGenerated} disabled={isSubmitting} />
+              <AiGeneratePanel
+                mode="compose"
+                // So the drafted body states the invite's real time instead of
+                // inventing one and asking the recipient to confirm a slot the
+                // invite already books.
+                meeting={meetingTimesFor(meetingState) ?? undefined}
+                onGenerated={applyGenerated}
+                disabled={isSubmitting}
+              />
             </div>
 
             <div className="space-y-1">

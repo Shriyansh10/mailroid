@@ -30,6 +30,20 @@ export interface GenerateEmailInput {
     subject?: string;
     body?: string;
   };
+  /**
+   * The calendar invite the user is attaching to this email — trusted, since
+   * they set the fields themselves. Supplying it is what stops the body and
+   * the invite disagreeing: without it the model has no date to write about,
+   * so it invents one and hedges by asking the recipient to confirm a time
+   * that is, in fact, already being booked.
+   */
+  meeting?: {
+    start: string;
+    end: string;
+    location?: string;
+  };
+  /** IANA zone the meeting times should be rendered in. */
+  timeZone?: string;
 }
 
 export interface GenerateEmailResult {
@@ -70,6 +84,13 @@ NEVER include recipient lines. Do not write "To:", "Cc:", "Bcc:", or invent an a
 
 Do not include a subject line inside the body.
 
+CALENDAR INVITE
+When a MEETING INVITE block is present, a real calendar invite is being sent with this email.
+State the meeting time exactly as given in that block. Never invent a different day or time, and never write a vague one ("today", "sometime this week") when the block gives you a specific one.
+Do NOT ask the recipient to confirm their availability, propose alternatives, or ask what time suits them — the invite books that slot. Tell them when it is and why. They can decline in their calendar.
+Only ask about availability if the user's own instruction explicitly says to propose times rather than book one.
+When no MEETING INVITE block is present, never state a specific meeting time unless the user's instruction gives you one.
+
 OUTPUT FORMAT
 Respond using these exact tags and nothing outside them:
 <BODY>
@@ -89,6 +110,54 @@ const FORWARD_INSTRUCTION =
   "Write ONLY a short introductory note to accompany the forwarded email below. " +
   "Do not rewrite, summarize, or reproduce the forwarded content — the recipient will see it quoted separately.";
 
+/**
+ * Render the attached invite in the user's own timezone, plus today's date so
+ * "today"/"tomorrow" in the instruction resolve against the real calendar
+ * rather than the model's guess.
+ */
+function buildMeetingBlock(input: GenerateEmailInput): string | null {
+  if (!input.meeting) return null;
+
+  const zone = input.timeZone;
+  const fmt = (iso: string, opts: Intl.DateTimeFormatOptions) => {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return null;
+    try {
+      return d.toLocaleString("en-US", { ...opts, ...(zone ? { timeZone: zone } : {}) });
+    } catch {
+      return d.toISOString();
+    }
+  };
+
+  const start = fmt(input.meeting.start, {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+  if (!start) return null;
+
+  const end = fmt(input.meeting.end, { hour: "numeric", minute: "2-digit" });
+  const today = fmt(new Date().toISOString(), {
+    weekday: "long",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+  });
+
+  return [
+    "MEETING INVITE (a real calendar invite is attached to this email):",
+    `  When: ${start}${end ? ` to ${end}` : ""}`,
+    input.meeting.location ? `  Where: ${input.meeting.location}` : "",
+    today ? `  Today's date, for reference: ${today}` : "",
+    "State this time in the email. Do not ask the recipient to confirm their availability — the invite books this slot.",
+  ]
+    .filter(Boolean)
+    .join("\n");
+}
+
 function buildUserMessage(input: GenerateEmailInput, scrubbedContext: string | null): string {
   const parts: string[] = [];
 
@@ -97,6 +166,9 @@ function buildUserMessage(input: GenerateEmailInput, scrubbedContext: string | n
   }
 
   parts.push(`Instruction: ${input.prompt}`);
+
+  const meetingBlock = buildMeetingBlock(input);
+  if (meetingBlock) parts.push(meetingBlock);
 
   if (input.mode === "compose") {
     parts.push(

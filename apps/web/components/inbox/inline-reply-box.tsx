@@ -51,6 +51,7 @@ import {
   emptyMeetingState,
   meetingStateFromTemplate,
   meetingStateFromExisting,
+  meetingTimesFor,
   buildEventInput,
   type MeetingState,
 } from "@web/components/inbox/meeting-invite-fields";
@@ -475,6 +476,10 @@ export function InlineReplyBox({
             subject: quoted.subject,
             body: quoted.body,
           }}
+          // The invite attached to this reply, so the drafted body states its
+          // real time rather than asking about availability for a slot the
+          // invite already books.
+          meeting={meetingTimesFor(meetingState) ?? undefined}
           onGenerated={applyGenerated}
           disabled={submitting}
         />

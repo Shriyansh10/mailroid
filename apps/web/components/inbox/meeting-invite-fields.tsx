@@ -148,6 +148,30 @@ export function meetingStateFromTemplate(t: {
 }
 
 /**
+ * The invite's resolved start/end, or null when it is off or unparseable.
+ *
+ * Exists so the AI draft can be told what it is inviting people to. Without
+ * it the generated body invents a time and asks the recipient to confirm
+ * availability for a slot the attached invite is already booking.
+ */
+export function meetingTimesFor(
+  state: MeetingState,
+): { start: string; end: string; location?: string } | null {
+  if (!state.enabled || !state.date) return null;
+  const minutesOfDay = parseTimeInput(state.startTime);
+  const durationMinutes = parseDurationInput(state.duration);
+  if (minutesOfDay === null || durationMinutes === null) return null;
+
+  const start = combineDateAndTime(state.date, minutesOfDay);
+  const end = new Date(start.getTime() + durationMinutes * 60_000);
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+    ...(state.location.trim() ? { location: state.location.trim() } : {}),
+  };
+}
+
+/**
  * Build the calendar action from the current state, or null if the meeting is
  * disabled or the date/time/duration don't parse. Pure — the caller supplies
  * the title and attendees it owns.
