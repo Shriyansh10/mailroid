@@ -55,6 +55,23 @@ const LIMITS = {
   },
 } as const;
 
+/**
+ * Every tool that writes an event with user-supplied title/description/
+ * attendees. The checks below dispatch on exact tool names, so a calendar tool
+ * missing from this set silently bypasses the attendee cap and the length
+ * limits — which is exactly what happened when the thread-scoped verbs were
+ * added. A set rather than chained `||`s so the next verb can't be added to
+ * one check site and forgotten at the other.
+ *
+ * cancelThreadMeeting is absent on purpose: its only argument is a threadId,
+ * so it carries no user content to size-check.
+ */
+const CALENDAR_WRITE_TOOLS = new Set([
+  "createEvent",
+  "scheduleThreadMeeting",
+  "rescheduleThreadMeeting",
+]);
+
 // ── Disposable email domains (flag-only) ──────────────────────────────
 
 const DISPOSABLE_DOMAINS = new Set([
@@ -204,7 +221,7 @@ export class WriteGuard {
     }
 
     // ── Check 3: Calendar spam ────────────────────────────────────
-    if (toolName === "createEvent") {
+    if (CALENDAR_WRITE_TOOLS.has(toolName)) {
       const spamCheck = this.checkCalendarSpam(args);
       if (!spamCheck.passed) {
         return { passed: false, blockReason: spamCheck.reason, eventType: spamCheck.eventType ?? AuditEventType.CALENDAR_SPAM_BLOCKED, warnings };
@@ -268,7 +285,7 @@ export class WriteGuard {
         return { passed: false, reason: `Email body (${body.length} chars) exceeds maximum of ${maxBodyLength}`, eventType: AuditEventType.WRITE_GUARD_BLOCKED };
       }
     }
-    if (toolName === "createEvent") {
+    if (CALENDAR_WRITE_TOOLS.has(toolName)) {
       const { maxTitleLength, maxDescriptionLength } = LIMITS.createEvent;
       const title = (args.title as string) ?? "";
       if (title.length > maxTitleLength) {

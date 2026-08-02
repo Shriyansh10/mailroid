@@ -32,8 +32,48 @@ export const useCalendarSync = () => {
     if (version > lastVersionRef.current) {
       lastVersionRef.current = version;
       void utils.calendar.events.invalidate();
+      // A sync can be what reveals that a linked meeting was deleted in
+      // Google, so the thread views need re-resolving too.
+      void utils.calendar.threadMeetings.invalidate();
     }
   }, [data?.version, utils]);
+};
+
+/**
+ * Meetings scheduled from a Gmail thread, plus any deletion still awaiting
+ * acknowledgement. This is what lets a compose surface offer to *move* the
+ * thread's meeting instead of creating a second one.
+ *
+ * No refetchInterval on purpose: resolving links can call the Calendar API for
+ * a link the webhook hasn't synced yet, so this stays demand-driven.
+ */
+export const useThreadMeetings = (threadId?: string) => {
+  const { data, isLoading, refetch } = trpc.calendar.threadMeetings.useQuery(
+    { threadId: threadId ?? "" },
+    { enabled: !!threadId, staleTime: 30_000 },
+  );
+
+  return {
+    meetings: data?.meetings ?? [],
+    // Newest-scheduled first (createdAt desc), which is what a banner should
+    // describe. Deliberately not used to target a write — see resolveWriteTarget.
+    primaryMeeting: data?.meetings?.[0] ?? null,
+    deletedLink: data?.deletedLink ?? null,
+    isLoading,
+    refetch,
+  };
+};
+
+export const useAcknowledgeThreadMeeting = () => {
+  const utils = trpc.useUtils();
+  const { mutateAsync: acknowledgeAsync, isPending } =
+    trpc.calendar.acknowledgeThreadMeeting.useMutation({
+      onSuccess: () => {
+        void utils.calendar.threadMeetings.invalidate();
+      },
+    });
+
+  return { acknowledgeAsync, isPending };
 };
 
 export const useCalendarEvents = (timeMin: string, timeMax: string) => {
@@ -82,6 +122,7 @@ export const useCalendarEvent = (id: string) => {
 };
 
 export const useCreateEvent = () => {
+  const utils = trpc.useUtils();
   const {
     mutateAsync: createEventAsync,
     mutate: createEventFn,
@@ -92,7 +133,11 @@ export const useCreateEvent = () => {
     isPending,
     reset,
     status,
-  } = trpc.calendar.create.useMutation();
+  } = trpc.calendar.create.useMutation({
+    onSuccess: () => {
+      void utils.calendar.threadMeetings.invalidate();
+    },
+  });
 
   return {
     createEventAsync,
@@ -108,6 +153,7 @@ export const useCreateEvent = () => {
 };
 
 export const useUpdateEvent = () => {
+  const utils = trpc.useUtils();
   const {
     mutateAsync: updateEventAsync,
     mutate: updateEventFn,
@@ -118,7 +164,11 @@ export const useUpdateEvent = () => {
     isPending,
     reset,
     status,
-  } = trpc.calendar.update.useMutation();
+  } = trpc.calendar.update.useMutation({
+    onSuccess: () => {
+      void utils.calendar.threadMeetings.invalidate();
+    },
+  });
 
   return {
     updateEventAsync,
@@ -134,6 +184,7 @@ export const useUpdateEvent = () => {
 };
 
 export const useDeleteEvent = () => {
+  const utils = trpc.useUtils();
   const {
     mutateAsync: deleteEventAsync,
     mutate: deleteEventFn,
@@ -144,7 +195,11 @@ export const useDeleteEvent = () => {
     isPending,
     reset,
     status,
-  } = trpc.calendar.delete.useMutation();
+  } = trpc.calendar.delete.useMutation({
+    onSuccess: () => {
+      void utils.calendar.threadMeetings.invalidate();
+    },
+  });
 
   return {
     deleteEventAsync,

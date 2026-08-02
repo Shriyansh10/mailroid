@@ -183,6 +183,117 @@ export class ToolRegistry {
         createEventExec.execute(args as CreateEventInput, ctx),
     });
 
+    // ── Thread-scoped meeting tools ─────────────────────────────────
+    //
+    // A meeting that came from an email is addressed by its *thread*, never by
+    // an event id. Two reasons, in order of importance:
+    //
+    //  1. Without this the model has no way to express "move the meeting" and
+    //     falls back to creating a second event — the bug these tools exist to
+    //     fix.
+    //  2. No eventId appears in any of these schemas, so an event id pasted
+    //     into an email body is inexpressible rather than merely rejected.
+    //     The injection path is closed by shape.
+    //
+    // `createEvent` above stays for calendar-only requests ("block 30 minutes
+    // tomorrow"), which have no thread and shouldn't be forced through a
+    // thread-shaped tool.
+
+    // ── getThreadMeetings ───────────────────────────────────────────
+    this.register({
+      name: "getThreadMeetings",
+      description:
+        "List the calendar meetings already scheduled from an email thread. " +
+        "Call this before scheduling from a thread, so you move an existing " +
+        "meeting instead of creating a duplicate.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        threadId: z.string().min(1),
+      }),
+      outputSchema: z.object({
+        meetings: z.array(
+          z.object({
+            title: z.string(),
+            start: z.string(),
+            end: z.string(),
+            attendees: z.array(z.string()),
+          }),
+        ),
+      }),
+      execute: async () => ({ meetings: [] }),
+    });
+
+    // ── scheduleThreadMeeting ───────────────────────────────────────
+    this.register({
+      name: "scheduleThreadMeeting",
+      description:
+        "Schedule a NEW calendar meeting arising from an email thread, and " +
+        "remember which thread it belongs to. Use this instead of createEvent " +
+        "whenever there is an email behind the meeting.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({
+        threadId: z.string().min(1),
+        title: z.string().min(1),
+        start: z.string().min(1),
+        end: z.string().min(1),
+        attendees: z.array(z.string().email()).optional(),
+        description: z.string().optional(),
+        organizer: z.string().email().optional(),
+      }),
+      outputSchema: z.object({
+        draft: z.boolean(),
+        id: z.string().optional(),
+      }),
+      execute: async () => ({ draft: true }),
+    });
+
+    // ── rescheduleThreadMeeting ─────────────────────────────────────
+    this.register({
+      name: "rescheduleThreadMeeting",
+      description:
+        "Move the meeting scheduled from an email thread to a new time. " +
+        "Use this — never a second createEvent — when the user asks to " +
+        "postpone, prepone, push back or otherwise change the time of a " +
+        "meeting that already exists. Attendees are notified automatically.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({
+        threadId: z.string().min(1),
+        start: z.string().min(1),
+        end: z.string().min(1),
+        title: z.string().optional(),
+        description: z.string().optional(),
+      }),
+      outputSchema: z.object({
+        draft: z.boolean(),
+        id: z.string().optional(),
+      }),
+      execute: async () => ({ draft: true }),
+    });
+
+    // ── cancelThreadMeeting ─────────────────────────────────────────
+    this.register({
+      name: "cancelThreadMeeting",
+      description:
+        "Cancel and delete the meeting scheduled from an email thread. " +
+        "Attendees are notified automatically.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({
+        threadId: z.string().min(1),
+      }),
+      outputSchema: z.object({
+        cancelled: z.boolean(),
+      }),
+      execute: async () => ({ cancelled: false }),
+    });
+
     // ── generateExecutiveBrief ───────────────────────────────────────
     const generateExecutiveBriefExec = new GenerateExecutiveBriefExecutor();
     this.register({

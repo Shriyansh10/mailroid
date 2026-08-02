@@ -8,8 +8,25 @@ import {
   buildForwardPreview,
 } from "./gmail";
 import type { SearchEmailsInput, SendEmailInput, ReplyToEmailInput, ForwardEmailInput } from "./gmail";
-import { CorsairGetEventsExecutor, CorsairCreateEventExecutor } from "./calendar";
-import type { GetEventsInput, CreateEventInput } from "./calendar";
+import {
+  CorsairGetEventsExecutor,
+  CorsairCreateEventExecutor,
+  ThreadMeetingsExecutor,
+  ScheduleThreadMeetingExecutor,
+  RescheduleThreadMeetingExecutor,
+  CancelThreadMeetingExecutor,
+  buildCreateEventPreview,
+  buildRescheduleMeetingPreview,
+  buildCancelMeetingPreview,
+} from "./calendar";
+import type {
+  GetEventsInput,
+  CreateEventInput,
+  GetThreadMeetingsInput,
+  ScheduleThreadMeetingInput,
+  RescheduleThreadMeetingInput,
+  CancelThreadMeetingInput,
+} from "./calendar";
 import { CorsairGenerateBriefExecutor } from "./brief";
 import type { GenerateExecutiveBriefInput } from "./brief";
 import { CorsairSummarizeEmailExecutor } from "./summarize";
@@ -82,17 +99,79 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.warn("[registerProductionExecutors] ⚠️ getEvents NOT found in registry — mock still active");
   }
 
-  // Replace createEvent with Corsair-backed executor
+  // Replace createEvent with Corsair-backed executor + a real preview (it had
+  // none, so its approval card was showing raw args)
   const createDef = registry.get("createEvent");
   if (createDef) {
     registry.register({
       ...createDef,
       execute: (args, ctx) =>
         createExec.execute(args as CreateEventInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildCreateEventPreview(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ createEvent replaced with Corsair executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ createEvent NOT found in registry — mock still active");
+  }
+
+  // Thread-scoped meeting tools. These are registered as no-op stubs in
+  // registry.ts, so unlike the tools above they do NOT work at all until
+  // replaced here — a missing warning below means the assistant silently
+  // cannot schedule or move meetings.
+  const threadMeetingsExec = new ThreadMeetingsExecutor();
+  const scheduleThreadExec = new ScheduleThreadMeetingExecutor();
+  const rescheduleThreadExec = new RescheduleThreadMeetingExecutor();
+  const cancelThreadExec = new CancelThreadMeetingExecutor();
+
+  const threadMeetingsDef = registry.get("getThreadMeetings");
+  if (threadMeetingsDef) {
+    registry.register({
+      ...threadMeetingsDef,
+      execute: (args, ctx) =>
+        threadMeetingsExec.execute(args as GetThreadMeetingsInput, ctx as ToolExecutionContext),
+    });
+    console.log("[registerProductionExecutors] ✅ getThreadMeetings wired");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ getThreadMeetings NOT found in registry");
+  }
+
+  const scheduleThreadDef = registry.get("scheduleThreadMeeting");
+  if (scheduleThreadDef) {
+    registry.register({
+      ...scheduleThreadDef,
+      execute: (args, ctx) =>
+        scheduleThreadExec.execute(args as ScheduleThreadMeetingInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildCreateEventPreview(args, ctx),
+    });
+    console.log("[registerProductionExecutors] ✅ scheduleThreadMeeting wired");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ scheduleThreadMeeting NOT found in registry");
+  }
+
+  const rescheduleThreadDef = registry.get("rescheduleThreadMeeting");
+  if (rescheduleThreadDef) {
+    registry.register({
+      ...rescheduleThreadDef,
+      execute: (args, ctx) =>
+        rescheduleThreadExec.execute(args as RescheduleThreadMeetingInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildRescheduleMeetingPreview(args, ctx),
+    });
+    console.log("[registerProductionExecutors] ✅ rescheduleThreadMeeting wired");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ rescheduleThreadMeeting NOT found in registry");
+  }
+
+  const cancelThreadDef = registry.get("cancelThreadMeeting");
+  if (cancelThreadDef) {
+    registry.register({
+      ...cancelThreadDef,
+      execute: (args, ctx) =>
+        cancelThreadExec.execute(args as CancelThreadMeetingInput, ctx as ToolExecutionContext),
+      buildPreview: (args, ctx) => buildCancelMeetingPreview(args, ctx),
+    });
+    console.log("[registerProductionExecutors] ✅ cancelThreadMeeting wired");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ cancelThreadMeeting NOT found in registry");
   }
 
   // Replace generateExecutiveBrief with Corsair-backed executor

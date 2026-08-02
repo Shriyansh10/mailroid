@@ -41,7 +41,12 @@ import {
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
-import { useCreateEvent } from "@web/hooks/api/calendar";
+import {
+  useCreateEvent,
+  useUpdateEvent,
+  useThreadMeetings,
+  useAcknowledgeThreadMeeting,
+} from "@web/hooks/api/calendar";
 import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
 import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
 import {
@@ -55,6 +60,7 @@ import {
   MeetingInviteFields,
   emptyMeetingState,
   meetingStateFromTemplate,
+  meetingStateFromExisting,
   buildEventInput,
   type MeetingState,
 } from "@web/components/inbox/meeting-invite-fields";
@@ -113,6 +119,8 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
+  const { updateEventAsync } = useUpdateEvent();
+  const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
   const form = useForm({
     resolver: zodResolver(composeSchema),
@@ -130,6 +138,10 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const ccValue = form.watch("cc");
   const bccValue = form.watch("bcc");
   const recipientsRef = useRef<RecipientFieldsHandle>(null);
+
+  // A reply-shaped compose carries a threadId, so it can find and move that
+  // thread's meeting. A fresh compose has none — no banner, no link, correct.
+  const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
 
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   // A pending template/AI apply awaiting overwrite confirmation.
@@ -158,6 +170,23 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     open, prefill?.to, prefill?.cc, prefill?.bcc,
     prefill?.subject, prefill?.body, prefill?.draftId, form,
   ]);
+
+  // Seed the meeting fields from the thread's existing meeting so scheduling
+  // moves it rather than duplicating it. Kept out of the reset effect above:
+  // that one owns the whole form, and re-running it when this query resolves
+  // or refetches would wipe whatever the user had typed. Seeded once per event
+  // id, so "Create a second meeting instead" isn't undone by a refetch.
+  const seededEventIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!open) {
+      seededEventIdRef.current = null;
+      return;
+    }
+    if (!primaryMeeting) return;
+    if (seededEventIdRef.current === primaryMeeting.eventId) return;
+    seededEventIdRef.current = primaryMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
+  }, [open, primaryMeeting]);
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   //
@@ -266,18 +295,23 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
       try {
         // An open draft is sent via drafts.send so Gmail consumes the draft
         // itself. Sending a fresh copy instead would leave the draft behind.
-        if (draftId) {
-          await sendDraftAsync({ draftId });
-        } else {
-          await sendEmailAsync({
-            to: values.to.trim(),
-            cc: values.cc.trim(),
-            bcc: values.bcc.trim(),
-            subject: values.subject.trim(),
-            body: values.body,
-            ...(threadId ? { threadId } : {}),
-          });
-        }
+        const sent = draftId
+          ? await sendDraftAsync({ draftId })
+          : await sendEmailAsync({
+              to: values.to.trim(),
+              cc: values.cc.trim(),
+              bcc: values.bcc.trim(),
+              subject: values.subject.trim(),
+              body: values.body,
+              ...(threadId ? { threadId } : {}),
+            });
+
+        // A fresh compose has no threadId to prefill — Gmail only assigns one
+        // when the message is sent, and both send mutations return it. Without
+        // this, an invite composed alongside a brand-new email is created with
+        // no link, and the first reply on that thread finds nothing to move
+        // and schedules a second meeting instead.
+        const sentThreadId = sent?.threadId ?? threadId;
 
         toast.success("Email sent!", {
           description: `Message sent to ${values.to.trim()}`,
@@ -290,7 +324,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         // To + Cc only, deduped. Bcc is deliberately excluded: a calendar
         // invite shows its attendee list to everyone on it, which would undo
         // the one thing a blind copy is for.
-        const eventInput = buildEventInput(
+        const action = buildEventInput(
           meetingState,
           values.subject.trim(),
           visibleRecipients(values),
@@ -304,16 +338,48 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         // Calendar invite is independent of the send: never block or roll back
         // an email that already went out. On failure, offer a Retry that only
         // re-attempts the event.
-        if (eventInput) {
-          const createEvent = () =>
-            createEventAsync(eventInput)
-              .then(() => toast.success("Calendar invite created"))
+        if (action?.kind === "update") {
+          const run = () =>
+            updateEventAsync({ id: action.eventId, ...action.input })
+              .then(() => toast.success("Meeting moved"))
               .catch(() =>
-                toast.error("Email sent, but the calendar invite couldn't be created", {
-                  action: { label: "Retry", onClick: createEvent },
+                toast.error("Email sent, but the meeting couldn't be moved", {
+                  action: { label: "Retry", onClick: run },
                 }),
               );
-          void createEvent();
+          void run();
+        } else if (action) {
+          const run = () =>
+            createEventAsync({
+              ...action.input,
+              ...(sentThreadId ? { threadId: sentThreadId } : {}),
+            })
+              .then((event) => {
+                if (event.linked) {
+                  toast.success("Calendar invite created");
+                  return;
+                }
+                // Partial success — the event exists, only the link failed.
+                // No Retry: it would create a second event.
+                toast.warning("Meeting created, but not linked to this thread", {
+                  description:
+                    "It's on your calendar — scheduling again here will create a second one.",
+                  ...(event.htmlLink
+                    ? {
+                        action: {
+                          label: "Open",
+                          onClick: () => window.open(event.htmlLink, "_blank"),
+                        },
+                      }
+                    : {}),
+                });
+              })
+              .catch(() =>
+                toast.error("Email sent, but the calendar invite couldn't be created", {
+                  action: { label: "Retry", onClick: run },
+                }),
+              );
+          void run();
         }
       } catch (err) {
         const message =
@@ -321,7 +387,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         toast.error("Failed to send", { description: message });
       }
     },
-    [sendEmailAsync, sendDraftAsync, createEventAsync, meetingState, draftId, threadId, form, onOpenChange, onSent],
+    [sendEmailAsync, sendDraftAsync, createEventAsync, updateEventAsync, meetingState, draftId, threadId, form, onOpenChange, onSent],
   );
 
   /**
@@ -482,6 +548,9 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
               value={meetingState}
               onChange={setMeetingState}
               disabled={isSubmitting}
+              existing={primaryMeeting}
+              deletedLink={deletedLink}
+              onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
             />
 
             <DialogFooter>

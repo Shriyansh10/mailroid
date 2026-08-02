@@ -8,6 +8,7 @@ export * from './models/message-metadata';
 export * from './models/gmail-tenant-mappings';
 export * from './models/calendar-tenant-mappings';
 export * from './models/calendar-events';
+export * from './models/thread-calendar-events';
 export * from './models/daily-briefs';
 export * from './models/assistant-chats';
 export * from './models/feedbacks';

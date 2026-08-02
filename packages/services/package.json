@@ -54,6 +54,8 @@
     "./calendar/sync-events.js": "./calendar/sync-events.ts",
     "./calendar/version": "./calendar/version.ts",
     "./calendar/version.js": "./calendar/version.ts",
+    "./calendar/thread-links": "./calendar/thread-links.ts",
+    "./calendar/thread-links.js": "./calendar/thread-links.ts",
     "./tenant/index": "./tenant/index.ts",
     "./tenant/index.js": "./tenant/index.ts",
     "./profile/index": "./profile/index.ts",
