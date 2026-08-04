@@ -171,7 +171,15 @@ export class ToolRegistry {
         title: z.string().min(1),
         start: z.string().min(1),
         end: z.string().min(1),
+        // `attendees` remains for the compose surfaces, which genuinely hold
+        // real addresses the user typed. The MODEL must use attendeeRefs: it
+        // has only ever seen "[EMAIL]", so any address it supplies here is
+        // invented. See MEETING WORKFLOW in the system prompt.
         attendees: z.array(z.string().email()).optional(),
+        attendeeRefs: z
+          .array(z.string())
+          .optional()
+          .describe("Attendee handles from resolveRecipient — use this, not attendees"),
         description: z.string().optional(),
         organizer: z.string().email().optional(),
       }),
@@ -215,6 +223,13 @@ export class ToolRegistry {
       outputSchema: z.object({
         meetings: z.array(
           z.object({
+            // Opaque, server-issued, and the ONLY way to name one of these
+            // meetings to reschedule or cancel it. Deliberately not an event
+            // id (see the note above — no event id appears in any of these
+            // schemas) and deliberately not a position, because the list is
+            // ordered newest-first and renumbers whenever a meeting is added
+            // or cancelled while the user is deciding.
+            selectionId: z.string(),
             title: z.string(),
             start: z.string(),
             end: z.string(),
@@ -231,7 +246,9 @@ export class ToolRegistry {
       description:
         "Schedule a NEW calendar meeting arising from an email thread, and " +
         "remember which thread it belongs to. Use this instead of createEvent " +
-        "whenever there is an email behind the meeting.",
+        "whenever there is an email behind the meeting. " +
+        "If the thread already has a meeting, this refuses and hands you the " +
+        "list — nothing is created, so ask the user rather than retrying.",
       riskLevel: RiskLevel.DANGEROUS,
       requiresApproval: true,
       enabled: true,
@@ -241,8 +258,18 @@ export class ToolRegistry {
         start: z.string().min(1),
         end: z.string().min(1),
         attendees: z.array(z.string().email()).optional(),
+        attendeeRefs: z
+          .array(z.string())
+          .optional()
+          .describe("Attendee handles from resolveRecipient — use this, not attendees"),
         description: z.string().optional(),
         organizer: z.string().email().optional(),
+        acknowledgedExistingMeetings: z
+          .boolean()
+          .optional()
+          .describe(
+            "Set true ONLY after you have shown the user this thread's existing meetings and they chose to add another one alongside them. Never set it to get past a refusal — that overrides a decision the user has not made.",
+          ),
       }),
       outputSchema: z.object({
         draft: z.boolean(),
@@ -268,6 +295,21 @@ export class ToolRegistry {
         end: z.string().min(1),
         title: z.string().optional(),
         description: z.string().optional(),
+        selectionId: z
+          .string()
+          .optional()
+          .describe(
+            "Which meeting, copied verbatim from a list a tool gave you. Required when the thread has more than one. Never invent or guess one.",
+          ),
+        // Server-injected, and declared here only because the orchestrator
+        // validates with Zod, which strips undeclared keys — same reason
+        // refineMeetingSlots declares previousCandidates/timeZone. The route
+        // OVERWRITES this unconditionally from the meeting-selection ledger
+        // before execution, so a model that fills it in gets it discarded —
+        // left writable, the model could fabricate agreement with a stale
+        // listing rather than the drift check catching a real mismatch.
+        // Do not describe this to the model.
+        expectedStart: z.string().optional(),
       }),
       outputSchema: z.object({
         draft: z.boolean(),
@@ -287,11 +329,253 @@ export class ToolRegistry {
       enabled: true,
       inputSchema: z.object({
         threadId: z.string().min(1),
+        selectionId: z
+          .string()
+          .optional()
+          .describe(
+            "Which meeting, copied verbatim from a list a tool gave you. Required when the thread has more than one. Never invent or guess one.",
+          ),
+        // Server-injected — see the identical field on rescheduleThreadMeeting.
+        expectedStart: z.string().optional(),
       }),
       outputSchema: z.object({
         cancelled: z.boolean(),
       }),
       execute: async () => ({ cancelled: false }),
+    });
+
+    // ── Scheduling engine ───────────────────────────────────────────
+    //
+    // All read-only and approval-free except deleteSchedulingRule. The engine
+    // never books anything itself: it proposes, and the existing DANGEROUS
+    // tools above are still the only things that write to a calendar.
+    //
+    // Every executor here is a no-op stub until apps/web/lib/executors/
+    // scheduling.ts replaces it, same as the thread-meeting tools.
+
+    // `start`/`end` are offset-less LOCAL wall-clock ("2026-08-05T09:00:00"),
+    // matching the system prompt's TIME RULES and every other tool.
+    //
+    // No format regex here on purpose: this same schema validates
+    // refineMeetingSlots' `previousCandidates` on the INPUT side, so a strict
+    // pattern would hard-fail any refine replaying a proposal stored before the
+    // format changed.
+    const SlotCandidateSchema = z.object({
+      start: z.string(),
+      end: z.string(),
+      score: z.number(),
+      reasons: z.array(
+        z.object({
+          code: z.string(),
+          text: z.string(),
+          ruleId: z.string().optional(),
+        }),
+      ),
+    });
+
+    // ── resolveRecipient ────────────────────────────────────────────
+    this.register({
+      name: "resolveRecipient",
+      description:
+        "Turn a person's NAME into an attendee handle you can schedule with. " +
+        "You never see real email addresses — they are masked for privacy — so " +
+        "this is the ONLY way to name an attendee. Pass the resulting handle as " +
+        "attendeeRefs to findMeetingSlots, scheduleThreadMeeting or createEvent. " +
+        "If it returns ambiguous:true, ask the user which person they mean; if " +
+        "notFound:true, tell them and ask for the address. Never invent one.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        name: z.string().min(1).describe("The person's name as the user said it"),
+        threadId: z
+          .string()
+          .optional()
+          .describe("Thread in context, so its participants are searched first"),
+      }),
+      outputSchema: z.object({
+        candidates: z.array(
+          z.object({
+            handle: z.string(),
+            displayName: z.string(),
+            hint: z.string(),
+            source: z.string(),
+          }),
+        ),
+        ambiguous: z.boolean(),
+        notFound: z.boolean(),
+        message: z.string().optional(),
+      }),
+      execute: async () => ({ candidates: [], ambiguous: false, notFound: true }),
+    });
+
+    // ── findMeetingSlots ────────────────────────────────────────────
+    this.register({
+      name: "findMeetingSlots",
+      description:
+        "Find and rank times to hold a meeting, honouring the user's working " +
+        "hours, calendar and stored scheduling rules. ALWAYS use this instead " +
+        "of picking a time yourself — it is the only thing that knows what is " +
+        "already booked. Supply `intent` (LUNCH, COFFEE, INTERVIEW, DEMO, " +
+        "RECRUITER_CALL, ONE_ON_ONE, FOCUS_BLOCK, GENERAL_MEETING, or one of " +
+        "the user's own types) so their rules for that kind of meeting apply. " +
+        "Present the returned candidates with their reasons, and never offer a " +
+        "time this tool did not return. " +
+        "Every candidate's start/end is the user's LOCAL wall-clock time, " +
+        "written without an offset (e.g. 2026-08-05T09:00:00 means 9am for " +
+        "them). Read those digits as-is when you describe a slot, and copy the " +
+        "chosen one through unchanged when you book it — do not shift them.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        intent: z
+          .string()
+          .optional()
+          .describe("What kind of meeting this is; drives which rules apply"),
+        attendeeRefs: z
+          .array(z.string())
+          .optional()
+          .describe("Attendee handles from resolveRecipient — never addresses"),
+        from: z
+          .string()
+          .optional()
+          .describe(
+            "Start of the search range, as the user's local time without an offset (YYYY-MM-DDTHH:MM:SS)",
+          ),
+        to: z
+          .string()
+          .optional()
+          .describe(
+            "End of the search range, as the user's local time without an offset (YYYY-MM-DDTHH:MM:SS)",
+          ),
+        durationMinutes: z.number().int().optional(),
+      }),
+      outputSchema: z.object({
+        intent: z.string(),
+        durationMinutes: z.number(),
+        candidates: z.array(SlotCandidateSchema),
+        requiresConfirmation: z.boolean(),
+        appliedRules: z.array(
+          z.object({ id: z.string(), label: z.string(), source: z.string() }),
+        ),
+        conflicts: z.array(z.string()),
+        message: z.string().optional(),
+      }),
+      execute: async () => ({
+        intent: "GENERAL_MEETING",
+        durationMinutes: 30,
+        candidates: [],
+        requiresConfirmation: false,
+        appliedRules: [],
+        conflicts: [],
+      }),
+    });
+
+    // ── refineMeetingSlots ──────────────────────────────────────────
+    this.register({
+      name: "refineMeetingSlots",
+      description:
+        "Adjust the times you just offered — use this when the user says " +
+        "'earlier', 'later', 'another day' rather than calling findMeetingSlots " +
+        "again, so they get the same options re-ordered instead of an unrelated " +
+        "new set. If it returns exhausted:true, TELL the user nothing among the " +
+        "offered times fits before searching a wider range. " +
+        "Candidates come back in the same shape findMeetingSlots returns: local " +
+        "wall-clock, no offset, read and copied through as written.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        adjustment: z.enum(["EARLIER", "LATER", "DIFFERENT_DAY", "SHORTER", "LONGER"]),
+        // Server-injected, and declared here only because the orchestrator
+        // validates with Zod, which strips undeclared keys — without this the
+        // injected set would vanish and every refine would report exhausted.
+        //
+        // The route OVERWRITES both fields unconditionally from the stored
+        // slot ledger before execution, so a model that fills them in gets
+        // them discarded. That matters: left writable, the model could invent
+        // meeting times and have them come back looking like verified free
+        // slots. Do not describe these to the model.
+        previousCandidates: z.array(SlotCandidateSchema).optional(),
+        timeZone: z.string().optional(),
+      }),
+      outputSchema: z.object({
+        candidates: z.array(SlotCandidateSchema),
+        exhausted: z.boolean(),
+        message: z.string().optional(),
+      }),
+      execute: async () => ({ candidates: [], exhausted: true }),
+    });
+
+    // ── listSchedulingRules ─────────────────────────────────────────
+    this.register({
+      name: "listSchedulingRules",
+      description:
+        "Show the user's stored scheduling rules — how they like meetings of " +
+        "each kind arranged. Use for 'what are my scheduling preferences'.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        includeInactive: z.boolean().optional(),
+      }),
+      outputSchema: z.object({
+        rules: z.array(z.record(z.string(), z.unknown())),
+      }),
+      execute: async () => ({ rules: [] }),
+    });
+
+    // ── upsertSchedulingRule ────────────────────────────────────────
+    this.register({
+      name: "upsertSchedulingRule",
+      description:
+        "Create or update a scheduling rule when the user states a preference " +
+        "— 'never schedule lunch before 2', 'interviews are 45 minutes, not on " +
+        "Fridays', 'always ask before booking anything with the leadership " +
+        "group'. Times are 24-hour HH:mm; days are 0=Sunday..6=Saturday. Use " +
+        "excludeDays for 'never on X' and preferDays for 'ideally on X'.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        id: z.string().optional().describe("Omit to create, supply to update"),
+        label: z.string().min(1).describe('What the user calls it, e.g. "Lunch"'),
+        intent: z.string().optional().describe("Meeting type this applies to"),
+        group: z.string().optional().describe("Contact group this applies to"),
+        earliest: z.string().optional().describe("HH:mm — never start before this"),
+        latest: z.string().optional().describe("HH:mm — never end after this"),
+        days: z.array(z.number().int().min(0).max(6)).optional(),
+        excludeDays: z.array(z.number().int().min(0).max(6)).optional(),
+        durationMinutes: z.number().int().optional(),
+        bufferMinutes: z.number().int().optional(),
+        requireConfirmation: z
+          .boolean()
+          .optional()
+          .describe("Never book this kind of meeting without asking first"),
+        preferDays: z.array(z.number().int().min(0).max(6)).optional(),
+        priority: z.number().int().optional(),
+        active: z.boolean().optional(),
+      }),
+      outputSchema: z.object({ id: z.string(), label: z.string() }),
+      execute: async () => ({ id: "", label: "" }),
+    });
+
+    // ── deleteSchedulingRule ────────────────────────────────────────
+    // The one destructive memory operation, so it earns an approval card.
+    // A forgotten preference cannot be recovered from the UI, and it silently
+    // changes every future suggestion.
+    this.register({
+      name: "deleteSchedulingRule",
+      description:
+        "Permanently forget a scheduling rule. Call listSchedulingRules first " +
+        "to get its id. This cannot be undone.",
+      riskLevel: RiskLevel.DANGEROUS,
+      requiresApproval: true,
+      enabled: true,
+      inputSchema: z.object({ id: z.string().min(1) }),
+      outputSchema: z.object({ deleted: z.boolean() }),
+      execute: async () => ({ deleted: false }),
     });
 
     // ── generateExecutiveBrief ───────────────────────────────────────

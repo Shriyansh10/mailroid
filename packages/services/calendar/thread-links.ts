@@ -2,7 +2,9 @@ import { db, and, eq, desc, isNull } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { threadCalendarEvents } from "@repo/database/models/thread-calendar-events";
 
-import { getEvent } from "./index.ts";
+import { getEvent, getEventOrganizerEmail } from "./index.ts";
+import { findGuestThreadMeetings, type GuestResolution } from "./guest-links.ts";
+import { getAccountEmail } from "../gmail/index.ts";
 
 /**
  * Thread ↔ calendar-event links.
@@ -23,6 +25,33 @@ import { getEvent } from "./index.ts";
 
 const DEFAULT_CALENDAR_ID = "primary";
 
+/**
+ * The token the model uses to name one of a thread's meetings.
+ *
+ * Derived from the event id rather than stored, which is what makes it stable:
+ * the same meeting always yields the same token, so a token stays valid no
+ * matter how many meetings are scheduled or cancelled around it. That is the
+ * whole point — a position ("meeting 2") silently means a *different* meeting
+ * once the list changes, and the list is ordered newest-first.
+ *
+ * Opaque, not secret. Nothing is protected by its unguessability: resolution
+ * only ever searches the meetings already active on this user's thread
+ * (`resolveSelection` below), so a forged token can at most match something
+ * the user already owns there. It exists so no real Google event id crosses
+ * the model boundary — an event id pasted into an email body must stay
+ * inexpressible, per the note on the thread tools in the registry.
+ */
+export function selectionIdFor(eventId: string): string {
+  // FNV-1a, 32-bit. Not cryptographic and doesn't need to be; it needs to be
+  // stable, short enough to copy without error, and dependency-free.
+  let hash = 0x811c9dc5;
+  for (let i = 0; i < eventId.length; i++) {
+    hash ^= eventId.charCodeAt(i);
+    hash = Math.imul(hash, 0x01000193) >>> 0;
+  }
+  return `m-${hash.toString(36).padStart(7, "0")}`;
+}
+
 export interface ThreadMeeting {
   eventId: string;
   calendarId: string;
@@ -31,6 +60,11 @@ export interface ThreadMeeting {
   end: string;
   attendees: string[];
   htmlLink?: string;
+  /**
+   * Whether this user owns the meeting or was only invited. Write paths must
+   * check it: only the organiser can move or cancel.
+   */
+  role: "ORGANIZER" | "GUEST";
 }
 
 /** Just enough to name a meeting that no longer exists. */
@@ -49,6 +83,13 @@ export interface LinkThreadEventInput {
   eventId: string;
   calendarId?: string;
   entityId?: string;
+  /**
+   * ORGANIZER (the default) means this user created the meeting and may move
+   * or cancel it. GUEST means they were invited and the link exists only so
+   * they can SEE it — see resolveTargetOrThrow, which refuses writes on a
+   * guest row.
+   */
+  role?: "ORGANIZER" | "GUEST";
 }
 
 /**
@@ -70,6 +111,7 @@ export async function linkThreadEvent(
       eventId: input.eventId,
       calendarId: input.calendarId ?? DEFAULT_CALENDAR_ID,
       entityId: input.entityId ?? null,
+      role: input.role ?? "ORGANIZER",
     })
     .onConflictDoNothing({
       target: [
@@ -138,7 +180,7 @@ export async function acknowledgeThreadLink(
  */
 async function resolveLinks(
   userId: string,
-  links: Array<{ eventId: string; calendarId: string }>,
+  links: Array<{ eventId: string; calendarId: string; role?: "ORGANIZER" | "GUEST" }>,
 ): Promise<ThreadMeeting[]> {
   if (links.length === 0) return [];
 
@@ -172,6 +214,7 @@ async function resolveLinks(
         end: row.endTime.toISOString(),
         attendees: extractAttendees(row.attendees),
         htmlLink: row.htmlLink ?? undefined,
+        role: link.role ?? "ORGANIZER",
       });
       continue;
     }
@@ -196,6 +239,7 @@ async function resolveLinks(
         end: live.end,
         attendees: live.attendees ?? [],
         htmlLink: live.htmlLink,
+        role: link.role ?? "ORGANIZER",
       });
     } catch (error) {
       if (isNotFound(error)) {
@@ -227,10 +271,27 @@ export async function getActiveThreadMeetings(
   userId: string,
   threadId: string,
 ): Promise<ThreadMeeting[]> {
+  const { meetings } = await resolveThreadMeetings(userId, threadId);
+  return meetings;
+}
+
+/**
+ * As `getActiveThreadMeetings`, but says *why* the list is empty.
+ *
+ * The single seam where "this user's meetings for this thread" is decided,
+ * covering both the organiser (who has link rows) and a guest (who never
+ * will). Callers get the answer without needing to know which side produced
+ * it, or whether it came from the local cache or from Google.
+ */
+export async function resolveThreadMeetings(
+  userId: string,
+  threadId: string,
+): Promise<{ meetings: ThreadMeeting[]; resolution: GuestResolution }> {
   const links = await db
     .select({
       eventId: threadCalendarEvents.eventId,
       calendarId: threadCalendarEvents.calendarId,
+      role: threadCalendarEvents.role,
     })
     .from(threadCalendarEvents)
     .where(
@@ -242,7 +303,46 @@ export async function getActiveThreadMeetings(
     )
     .orderBy(desc(threadCalendarEvents.createdAt));
 
-  return resolveLinks(userId, links);
+  if (links.length > 0) {
+    return { meetings: await resolveLinks(userId, links), resolution: "none" };
+  }
+
+  // No link rows. Either there is genuinely no meeting, or this user was
+  // invited to one rather than scheduling it — in which case the join runs
+  // through the thread's Message-IDs instead.
+  const guest = await findGuestThreadMeetings(userId, threadId);
+  if (guest.eventIds.length === 0) {
+    return { meetings: [], resolution: guest.resolution };
+  }
+
+  // Make it durable. linkThreadEvent is idempotent, so the remote lookup that
+  // found this fires at most once per thread — every later load takes the
+  // ordinary link path above.
+  for (const eventId of guest.eventIds) {
+    try {
+      await linkThreadEvent({ userId, threadId, eventId, role: "GUEST" });
+    } catch (error) {
+      // A meeting we found but failed to link is still a meeting to show; it
+      // just costs another lookup next time.
+      console.error("[thread-links] failed to persist guest link", {
+        userId,
+        threadId,
+        eventId,
+        error: String(error),
+      });
+    }
+  }
+
+  const meetings = await resolveLinks(
+    userId,
+    guest.eventIds.map((eventId) => ({
+      eventId,
+      calendarId: DEFAULT_CALENDAR_ID,
+      role: "GUEST" as const,
+    })),
+  );
+
+  return { meetings, resolution: "guest-linked" };
 }
 
 /**
@@ -288,7 +388,13 @@ export async function getUnacknowledgedDeletion(
     .from(threadCalendarEvents)
     .leftJoin(
       calendarEvents,
-      eq(calendarEvents.eventId, threadCalendarEvents.eventId),
+      // Both halves of the key: (userId, eventId) is what identifies one user's
+      // copy of an event. Joining on eventId alone matched every attendee's row
+      // and multiplied the result.
+      and(
+        eq(calendarEvents.userId, threadCalendarEvents.userId),
+        eq(calendarEvents.eventId, threadCalendarEvents.eventId),
+      ),
     )
     .where(
       and(
@@ -321,6 +427,59 @@ export type WriteTarget =
   | { kind: "ambiguous"; meetings: ThreadMeeting[] };
 
 /**
+ * Resolve a `selectionId` the model copied from a list back to a meeting.
+ *
+ * Matching happens against the thread's *current* active meetings, so a token
+ * naming a meeting that has since been cancelled resolves to `notFound` rather
+ * than to whatever now sits in its old position — the failure the whole token
+ * scheme exists to make impossible.
+ */
+export type SelectionResult =
+  | { kind: "found"; meeting: ThreadMeeting }
+  | { kind: "notFound"; meetings: ThreadMeeting[] };
+
+export async function resolveSelection(
+  userId: string,
+  threadId: string,
+  selectionId: string,
+): Promise<SelectionResult> {
+  const meetings = await getActiveThreadMeetings(userId, threadId);
+  const match = meetings.find((m) => selectionIdFor(m.eventId) === selectionId);
+  return match ? { kind: "found", meeting: match } : { kind: "notFound", meetings };
+}
+
+export type SelectionDrift = "missing" | "changed" | null;
+
+/**
+ * Does `expectedStart` (what a prior listing showed) still match
+ * `actualStart` (the meeting's current start)?
+ *
+ * `selectionId` is a stable hash of the event id, so it survives a reschedule
+ * of the SAME event — it keeps resolving fine even though what the model told
+ * the user is now stale. This is the other half of drift detection: the token
+ * only catches cancellation (it stops matching anything); this catches a
+ * same-event time change, by comparing against what was actually shown.
+ *
+ * "missing" and "changed" are refused identically by callers, on purpose:
+ * both mean the server cannot prove this is the meeting the user was shown —
+ * a hole in the safety record is not "nothing to check", it is its own
+ * failure mode. `expectedStart` is `undefined` when no `getThreadMeetings`
+ * ledger entry exists for this conversation to compare against (see
+ * `apps/web/lib/assistant/tool-memory.ts`'s `MeetingSelectionRef`).
+ *
+ * Pure and total — no I/O — so it is testable without any of the DB/ledger
+ * plumbing that produces its inputs.
+ */
+export function checkSelectionDrift(
+  expectedStart: string | undefined,
+  actualStart: string,
+): SelectionDrift {
+  if (expectedStart === undefined) return "missing";
+  if (expectedStart !== actualStart) return "changed";
+  return null;
+}
+
+/**
  * The only entry point for rescheduling or cancelling a thread's meeting.
  *
  * There is deliberately no "newest" branch. A write path cannot silently pick
@@ -337,6 +496,100 @@ export async function resolveWriteTarget(
   if (meetings.length === 0) return { kind: "none" };
   if (meetings.length === 1) return { kind: "one", meeting: meetings[0]! };
   return { kind: "ambiguous", meetings };
+}
+
+/**
+ * Can this user WRITE to this event — move it, cancel it — or only see it?
+ *
+ * Exists because `userOwnsEvent` below answers a different, weaker question
+ * ("is this event in your calendar at all?") and was never a write guard —
+ * true for an invited attendee just as much as the organiser. The assistant's
+ * tools have their own guard (`refuseIfGuest` in
+ * `apps/web/lib/executors/calendar.ts`, checking `ThreadMeeting.role`), but
+ * the `/calendar` page's `update`/`delete` tRPC mutations called `updateEvent`/
+ * `deleteEvent` directly with no check at all — any signed-in user could move
+ * or cancel any event their own `calendar_events` cache happened to contain,
+ * including ones they were only invited to. Confirmed as a real bug: a guest
+ * rescheduling a thread-linked meeting from `/calendar` succeeded on THEIR OWN
+ * calendar but never propagated to the organiser's — Google silently scoping
+ * the write to the requester's copy rather than the shared event, which is
+ * arguably worse than an outright rejection because both calendars now
+ * disagree with no one told.
+ *
+ * Three sources, most authoritative first:
+ *   1. `thread_calendar_events.role`, when this event is thread-linked — the
+ *      fact this whole feature exists to make correct.
+ *   2. `calendar_events.organizerEmail` vs. the signed-in account's own
+ *      address, for events with no thread link at all (created outside
+ *      Mailroid, or linked to a thread this user never opened here).
+ *   3. A live Google Calendar lookup, when neither local source has an
+ *      opinion (an event never synced locally, or a stale/deleted row) — the
+ *      one case this used to return "UNKNOWN" and let the caller allow the
+ *      write on no evidence at all. It no longer does: "UNKNOWN" now only
+ *      happens after this live lookup has also failed to produce an answer —
+ *      ownership could not be established, and callers don't need to know
+ *      why, only that they cannot safely authorize the write — so it must be
+ *      treated as a refusal, not a pass. A genuine lookup error
+ *      (network/auth/unexpected) is intentionally NOT mapped to "UNKNOWN" —
+ *      it propagates as a thrown error instead, so an infra problem surfaces
+ *      as an infra problem rather than masquerading as an ordinary permission
+ *      decision (the route layer turns it into a clean user-facing refusal).
+ *      A write with no evidence for "you may do this" is a bigger risk than a
+ *      rare false-positive refusal, which the user can just retry.
+ */
+export async function getEventWriteRole(
+  userId: string,
+  eventId: string,
+): Promise<"ORGANIZER" | "GUEST" | "UNKNOWN"> {
+  const [link] = await db
+    .select({ role: threadCalendarEvents.role })
+    .from(threadCalendarEvents)
+    .where(
+      and(
+        eq(threadCalendarEvents.userId, userId),
+        eq(threadCalendarEvents.eventId, eventId),
+      ),
+    )
+    .orderBy(desc(threadCalendarEvents.createdAt))
+    .limit(1);
+
+  if (link) return link.role;
+
+  const [row] = await db
+    .select({ organizerEmail: calendarEvents.organizerEmail })
+    .from(calendarEvents)
+    .where(
+      and(
+        eq(calendarEvents.userId, userId),
+        eq(calendarEvents.eventId, eventId),
+      ),
+    )
+    .limit(1);
+
+  const selfEmail = (await getAccountEmail(userId)).toLowerCase();
+
+  if (row?.organizerEmail) {
+    return row.organizerEmail.toLowerCase() === selfEmail ? "ORGANIZER" : "GUEST";
+  }
+
+  // No local evidence at all. Ask Google directly rather than guessing — a
+  // genuine error here is deliberately left to propagate (see JSDoc above).
+  const lookup = await getEventOrganizerEmail(userId, eventId);
+  if (lookup.status === "NOT_FOUND" || !lookup.email) return "UNKNOWN";
+
+  // Backfill the local cache now that we have authoritative data, regardless
+  // of which way the decision goes — a cached GUEST answer is exactly as
+  // useful as a cached ORGANIZER one, and both save the live call on the next
+  // write to this event. Only ever an UPDATE of an existing row's
+  // organizer_email — never an INSERT, since we don't have title/start/end
+  // here and that column set is NOT NULL. A no-op when there's no local
+  // `calendar_events` row for this event at all yet.
+  await db
+    .update(calendarEvents)
+    .set({ organizerEmail: lookup.email })
+    .where(and(eq(calendarEvents.userId, userId), eq(calendarEvents.eventId, eventId)));
+
+  return lookup.email.toLowerCase() === selfEmail ? "ORGANIZER" : "GUEST";
 }
 
 /**

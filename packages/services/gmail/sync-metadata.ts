@@ -5,6 +5,7 @@ import { logger } from "@repo/logger";
 
 import {CATEGORY_TO_GMAIL_QUERY, CATEGORY_TO_GMAIL_LABEL, ALL_CATEGORIES, extractHeader} from './metadata.ts';
 import { withGmailRetry } from './retry.ts';
+import { normalizeMessageId } from './message-id.ts';
 import {
   markSyncQueued,
   markSyncRunning,
@@ -98,6 +99,11 @@ snippet?: string;
   threadId?: string;
   /** Gmail draft resource id. Only the drafts sync path sets this. */
   draftId?: string;
+  /**
+   * Normalised RFC822 Message-ID. Shared across every mailbox holding this
+   * message, unlike entityId/threadId — see message-id.ts.
+   */
+  rfc822MessageId?: string;
 }
 
 export async function upsertMessageMetadata(input: MetadataInput): Promise<void> {
@@ -134,6 +140,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           receivedAt: input.receivedAt,
           threadId: input.threadId,
           draftId: input.draftId,
+          rfc822MessageId: input.rfc822MessageId,
         })),
       )
       .onConflictDoUpdate({
@@ -156,6 +163,11 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           // and a bare `excluded.draft_id` would null out the id we need to
           // edit or send that draft later.
           draftId: sql`coalesce(excluded.draft_id, ${messageMetadata.draftId})`,
+          // COALESCE for the same reason as draftId: not every path that
+          // touches a row carries the header (drafts have none until sent),
+          // and nulling out a captured id silently un-links a guest's view of
+          // an existing meeting.
+          rfc822MessageId: sql`coalesce(excluded.rfc822_message_id, ${messageMetadata.rfc822MessageId})`,
           updatedAt: new Date(),
         },
       });
@@ -189,6 +201,12 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
   const raw = msg as Record<string, unknown>;
   const sender = extractHeader(raw, "From");
   const subject = extractHeader(raw, "Subject");
+  // threads.get(format:"metadata") returns the full header set — no
+  // metadataHeaders restriction is set anywhere — so this path can capture the
+  // Message-ID too. It matters that it does: this is the walk that covers the
+  // bulk of a large mailbox, and a thread it imported would otherwise have no
+  // Message-ID to match a guest's meeting against.
+  const rfc822MessageId = normalizeMessageId(extractHeader(raw, "Message-ID"));
   const snippet = msg.snippet ?? "";
   const labels: string[] = msg.labelIds ?? [];
   const internalDate = Number(msg.internalDate);
@@ -207,6 +225,7 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
     ...flags,
     receivedAt,
     threadId: msg.threadId,
+    rfc822MessageId: rfc822MessageId || undefined,
   };
 }
 

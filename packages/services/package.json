@@ -43,7 +43,7 @@
     "./gmail/daily-briefing.js": "./gmail/daily-briefing.ts",
     "./gmail/drafts": "./gmail/drafts.ts",
     "./gmail/drafts.js": "./gmail/drafts.ts",
-     "./calendar/index": "./calendar/index.ts",
+    "./calendar/index": "./calendar/index.ts",
     "./calendar/index.js": "./calendar/index.ts",
     "./calendar/watch": "./calendar/watch.ts",
     "./calendar/watch.js": "./calendar/watch.ts",
@@ -60,18 +60,38 @@
     "./tenant/index.js": "./tenant/index.ts",
     "./profile/index": "./profile/index.ts",
     "./profile/index.js": "./profile/index.ts",
+    "./settings/index": "./settings/index.ts",
+    "./settings/index.js": "./settings/index.ts",
+    "./scheduling/index": "./scheduling/index.ts",
+    "./scheduling/index.js": "./scheduling/index.ts",
+    "./scheduling/contacts": "./scheduling/contacts.ts",
+    "./scheduling/contacts.js": "./scheduling/contacts.ts",
+    "./scheduling/memory": "./scheduling/memory.ts",
+    "./scheduling/memory.js": "./scheduling/memory.ts",
+    "./scheduling/scorer": "./scheduling/scorer.ts",
+    "./scheduling/scorer.js": "./scheduling/scorer.ts",
+    "./scheduling/learning": "./scheduling/learning.ts",
+    "./scheduling/learning.js": "./scheduling/learning.ts",
     "./clients/index": "./clients/index.ts",
     "./clients/index.js": "./clients/index.ts",
     "./assistant/index": "./assistant/index.ts",
     "./assistant/index.js": "./assistant/index.ts",
     "./mail-templates/index": "./mail-templates/index.ts",
-    "./mail-templates/index.js": "./mail-templates/index.ts"
+    "./mail-templates/index.js": "./mail-templates/index.ts",
+    "./gmail/thread-headers": "./gmail/thread-headers.ts",
+    "./gmail/thread-headers.js": "./gmail/thread-headers.ts",
+    "./gmail/message-id": "./gmail/message-id.ts",
+    "./gmail/message-id.js": "./gmail/message-id.ts",
+    "./calendar/guest-links": "./calendar/guest-links.ts",
+    "./calendar/guest-links.js": "./calendar/guest-links.ts"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
     "dotenv-cli": "^11.0.0",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "@types/node": "^22.15.3",
+    "tsx": "^4.21.0"
   },
   "dependencies": {
     "@repo/corsair": "workspace:*",
@@ -84,5 +104,8 @@
     "google-auth-library": "^10.5.0",
     "openai": "^6.42.0",
     "zod": "^4.3.5"
+  },
+  "scripts": {
+    "test": "node --import tsx --test calendar/*.test.ts gmail/*.test.ts"
   }
 }

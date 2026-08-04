@@ -91,6 +91,66 @@ export class ToolOrchestrator {
       return result;
     }
 
+    // ── 1.5 Precheck ───────────────────────────────────────────────
+    //
+    // Runs before the permission branch below, so a refusal happens before any
+    // approval card is minted — the model gets prose it can turn into a
+    // question instead of the user approving something that then fails.
+    //
+    // NOT gated on skipPermissionCheck, on purpose. Minutes pass between
+    // minting a card and clicking Approve, and the world can change in that
+    // window; re-running here is what closes it. An acknowledgement the model
+    // set lives in the stored approval `args`, so a legitimate replay passes
+    // the same gate it passed the first time.
+    if (tool.precheck) {
+      let refusal: string | null = null;
+      try {
+        refusal = await tool.precheck(rawArgs, {
+          userId,
+          userTimeZone: ctx.userTimeZone,
+          userEmail: ctx.userEmail,
+        });
+      } catch (error) {
+        // Never swallowed into "allowed". A precheck that cannot read the
+        // state it guards must stop the call, not wave it through.
+        const message =
+          error instanceof Error ? error.message : String(error);
+        this.audit.log({
+          requestId,
+          userId,
+          toolName,
+          args: redactArgs(rawArgs),
+          status: ToolExecutionStatus.FAILED,
+          blockReason: `Precheck failed: ${message}`,
+        });
+        return makeResult(
+          toolName,
+          ToolExecutionStatus.FAILED,
+          requestId,
+          undefined,
+          `Could not verify it was safe to run "${toolName}": ${message}. Nothing was done. Tell the user rather than retrying.`,
+        );
+      }
+
+      if (refusal) {
+        this.audit.log({
+          requestId,
+          userId,
+          toolName,
+          args: redactArgs(rawArgs),
+          status: ToolExecutionStatus.FAILED,
+          blockReason: "Precheck refused: clarification required",
+        });
+        return makeResult(
+          toolName,
+          ToolExecutionStatus.FAILED,
+          requestId,
+          undefined,
+          refusal,
+        );
+      }
+    }
+
     // ── 2. Permission check (skipped when approval was already granted) ──
     if (!skipPermissionCheck) {
       const perm = this.permissions.checkPermission(tool, userId);

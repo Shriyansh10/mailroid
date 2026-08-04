@@ -5,6 +5,15 @@ export const ApprovalStatus = {
   APPROVED: "APPROVED",
   CANCELLED: "CANCELLED",
   EXECUTED: "EXECUTED",
+  /**
+   * Approved by the user, then the tool did not complete — it failed, was
+   * blocked, or a precheck refused it.
+   *
+   * Distinct from EXECUTED because the approve route used to stamp EXECUTED
+   * unconditionally, which made "the user approved it" and "it actually
+   * happened" indistinguishable in both the DB and the card.
+   */
+  FAILED: "FAILED",
 } as const;
 
 export type ApprovalStatus = (typeof ApprovalStatus)[keyof typeof ApprovalStatus];
@@ -20,6 +29,8 @@ export interface PendingApproval {
   requestId: string;
   status: ApprovalStatus;
   preview: string | null;
+  /** How many times this draft has been refined. Bounded by the refine route. */
+  refineCount?: number;
   createdAt: Date;
   approvedAt: Date | null;
   cancelledAt: Date | null;
@@ -59,6 +70,30 @@ export interface PendingApprovalStore {
    * Prevents approval replay attacks.
    */
   useOnce(id: string): Promise<boolean>;
+
+  /**
+   * Replace a pending approval's arguments and preview — the write behind
+   * "refine this draft before I approve it".
+   *
+   * Only ever succeeds while the row is still PENDING and owned by `userId`.
+   * Both conditions are enforced in the UPDATE itself, not by a read-then-
+   * write: rewriting the args of an approval that has already been claimed
+   * would let refined text execute under consent the user gave to different
+   * text, which is the whole risk this method has to close.
+   *
+   * Increments `refineCount`, and when `maxRefinements` is supplied refuses
+   * once that many rewrites have happened — enforced in the same statement,
+   * so concurrent requests cannot both pass the check and exceed the cap.
+   *
+   * Returns the updated row, or undefined if it was not eligible.
+   */
+  updateArgs(
+    id: string,
+    userId: string,
+    args: Record<string, unknown>,
+    preview?: string,
+    maxRefinements?: number,
+  ): Promise<PendingApproval | undefined>;
 
   /**
    * Count the number of PENDING approvals for a user.

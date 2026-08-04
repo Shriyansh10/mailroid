@@ -49,7 +49,7 @@ export class DrizzleApprovalStore implements PendingApprovalStore {
       args: result[0]!.args as Record<string, unknown>,
       userId: result[0]!.userId,
       requestId: result[0]!.requestId,
-      status: result[0]!.status as "PENDING" | "APPROVED" | "CANCELLED" | "EXECUTED",
+      status: result[0]!.status as ApprovalStatus,
       preview: result[0]!.preview,
       createdAt: result[0]!.createdAt,
       approvedAt: result[0]!.approvedAt,
@@ -76,8 +76,9 @@ export class DrizzleApprovalStore implements PendingApprovalStore {
       args: r.args as Record<string, unknown>,
       userId: r.userId,
       requestId: r.requestId,
-      status: r.status as "PENDING" | "APPROVED" | "CANCELLED" | "EXECUTED",
+      status: r.status as ApprovalStatus,
       preview: r.preview,
+      refineCount: r.refineCount ?? 0,
       createdAt: r.createdAt,
       approvedAt: r.approvedAt,
       cancelledAt: r.cancelledAt,
@@ -130,6 +131,52 @@ export class DrizzleApprovalStore implements PendingApprovalStore {
       .returning({ id: pendingApprovals.id });
 
     return result.length > 0;
+  }
+
+  /**
+   * Replace a pending approval's args (and preview) in a single conditional
+   * UPDATE. The `status = PENDING` and `userId` predicates live in the WHERE
+   * clause so a concurrent approve/cancel cannot slip between a read and a
+   * write — if the row has already been claimed, this simply matches nothing
+   * and returns undefined rather than rewriting what is about to execute.
+   */
+  async updateArgs(
+    id: string,
+    userId: string,
+    args: Record<string, unknown>,
+    preview?: string,
+    maxRefinements?: number,
+  ): Promise<PendingApproval | undefined> {
+    const setValues: Record<string, unknown> = {
+      args,
+      // Counted in the same statement that rewrites the args, so the count can
+      // never drift from the number of rewrites that actually happened.
+      refineCount: sql`${pendingApprovals.refineCount} + 1`,
+    };
+    if (preview !== undefined) setValues.preview = preview;
+
+    const conditions = [
+      eq(pendingApprovals.id, id),
+      eq(pendingApprovals.userId, userId),
+      eq(pendingApprovals.status, "PENDING"),
+    ];
+
+    // The cap lives in the WHERE clause rather than in a prior SELECT: two
+    // concurrent refines would both pass a check-then-write and produce a
+    // fourth rewrite past a limit of three.
+    if (maxRefinements !== undefined) {
+      conditions.push(sql`${pendingApprovals.refineCount} < ${maxRefinements}`);
+    }
+
+    const updated = await this.db
+      .update(pendingApprovals)
+      .set(setValues)
+      .where(and(...conditions))
+      .returning({ id: pendingApprovals.id });
+
+    if (updated.length === 0) return undefined;
+
+    return this.get(id);
   }
 
   /**

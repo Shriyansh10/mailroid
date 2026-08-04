@@ -1,3 +1,4 @@
+import { TRPCError } from "@trpc/server";
 import { z } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
@@ -12,9 +13,12 @@ import {
   closeThreadLink,
   acknowledgeThreadLink,
   getActiveThreadMeetings,
+  resolveThreadMeetings,
   getUnacknowledgedDeletion,
+  getEventWriteRole,
 } from "../../../services/index.js";
 import { getCalendarVersion } from "@repo/services/calendar/version.js";
+import { buildThreadSharedProperties } from "@repo/services/gmail/thread-headers.js";
 
 import {
   calendarEventListOutputModel,
@@ -27,6 +31,38 @@ import {
 
 const TAGS = ["Calendar"];
 const getPath = generatePath("/calendar");
+
+/**
+ * Refuses a write unless `getEventWriteRole` comes back "ORGANIZER" — deny by
+ * default, not allow by default. A lookup error (network/auth/unexpected,
+ * deliberately propagated by `getEventWriteRole`'s live-fallback branch
+ * rather than swallowed) is caught here and turned into the same clean
+ * FORBIDDEN a genuine "couldn't verify" gets, so an infra hiccup reads as a
+ * refusal to the user instead of an unrelated 500 — logged first so it's
+ * still diagnosable.
+ */
+async function requireOrganizer(userId: string, eventId: string, verb: "move" | "cancel") {
+  let role: Awaited<ReturnType<typeof getEventWriteRole>>;
+  try {
+    role = await getEventWriteRole(userId, eventId);
+  } catch (err) {
+    console.error("[calendar:writeRole] lookup failed", { eventId, err });
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message: "We couldn't verify you're the organiser of this meeting — try again in a moment.",
+    });
+  }
+
+  if (role !== "ORGANIZER") {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+      message:
+        role === "GUEST"
+          ? `You're a guest on this meeting — only the organiser can ${verb} it.`
+          : "We couldn't verify you're the organiser of this meeting — try again in a moment.",
+    });
+  }
+}
 
 export const calendarRouter = router({
   events: protectedProcedure
@@ -85,7 +121,17 @@ export const calendarRouter = router({
     .output(createEventOutputModel)
     .mutation(async ({ ctx, input }) => {
       const { threadId, entityId, ...eventInput } = input;
-      const event = await createEvent(ctx.user!.id, eventInput);
+
+      // Same stamp the assistant's scheduleThreadMeeting applies — a meeting
+      // created from the UI has to be just as findable by its guests.
+      const sharedProperties = threadId
+        ? await buildThreadSharedProperties(ctx.user!.id, threadId)
+        : undefined;
+
+      const event = await createEvent(ctx.user!.id, {
+        ...eventInput,
+        ...(sharedProperties ? { sharedProperties } : {}),
+      });
 
       if (!threadId) return { ...event, linked: true };
 
@@ -130,7 +176,10 @@ export const calendarRouter = router({
     .input(z.object({ threadId: z.string() }))
     .output(threadMeetingsOutputModel)
     .query(async ({ ctx, input }) => {
-      const meetings = await getActiveThreadMeetings(
+      // resolveThreadMeetings rather than getActiveThreadMeetings: it covers
+      // the guest join as well as the organiser's links, and reports why an
+      // empty list is empty so the page can be honest about not knowing.
+      const { meetings, resolution } = await resolveThreadMeetings(
         ctx.user!.id,
         input.threadId,
       );
@@ -138,7 +187,7 @@ export const calendarRouter = router({
         ctx.user!.id,
         input.threadId,
       );
-      return { meetings, deletedLink };
+      return { meetings, deletedLink, resolution };
     }),
 
   // Dismiss the "this meeting no longer exists" banner.
@@ -169,6 +218,15 @@ export const calendarRouter = router({
     .output(calendarEventOutputModel)
     .mutation(async ({ ctx, input }) => {
       const { id, ...rest } = input;
+      // This used to call updateEvent with no ownership check at all — any
+      // signed-in user could move any event their own calendar_events cache
+      // happened to contain, including ones they were only invited to. The
+      // assistant's tools already refuse this (refuseIfGuest in
+      // apps/web/lib/executors/calendar.ts); the UI page never did. Confirmed
+      // as a real bug: a guest rescheduling from here succeeded on THEIR OWN
+      // calendar but never touched the organiser's, so the two silently
+      // disagreed afterward.
+      await requireOrganizer(ctx.user!.id, id, "move");
       return updateEvent(ctx.user!.id, id, rest);
     }),
 
@@ -183,6 +241,7 @@ export const calendarRouter = router({
     .input(z.object({ id: z.string() }))
     .output(z.object({ success: z.boolean() }))
     .mutation(async ({ ctx, input }) => {
+      await requireOrganizer(ctx.user!.id, input.id, "cancel");
       await deleteEvent(ctx.user!.id, input.id);
       // Close any thread link for this event. Keyed by eventId, so no threadId
       // input is needed. CANCELLED, not DELETED_EXTERNALLY: we did this.

@@ -22,7 +22,8 @@ import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
 import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
-import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel } from "@web/lib/assistant/history";
+import { knownIntents } from "@repo/services/scheduling/memory";
+import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel, getLatestSlotProposal, getLatestMeetingSelection } from "@web/lib/assistant/history";
 import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
@@ -251,12 +252,18 @@ export async function POST(request: Request) {
     }
 
     // ── Build the model's view of the conversation, server-side ────
-    const [history, emailContext] = await Promise.all([
+    const [history, emailContext, userIntents] = await Promise.all([
       loadConversationHistory(conversationId),
       getActiveEmailContext(conversationId, userId),
+      knownIntents(userId),
     ]);
 
-    const systemPrompt = buildSystemPrompt({ userTimeZone: userTimeZone ?? "UTC", userEmail: session.user.email, emailContext });
+    const systemPrompt = buildSystemPrompt({
+      userTimeZone: userTimeZone ?? "UTC",
+      userEmail: session.user.email,
+      emailContext,
+      knownIntents: userIntents,
+    });
     const trimmedHistory = trimHistoryForModel(history);
 
     const agentMessages: ChatMessage[] = [
@@ -277,8 +284,48 @@ export async function POST(request: Request) {
       runAgentLoop({
         messages: agentMessages,
         registry,
-        execute: (name, args) =>
-          orchestrator.executeTool(name, args, userId, crypto.randomUUID(), false, userTimeZone, session.user.email),
+        execute: async (name, args) => {
+          // refineMeetingSlots adjusts the times already on screen, so it needs
+          // the previous proposal. That comes from the conversation ledger, not
+          // from the model — asking the model to echo a dozen ISO timestamps
+          // back would be both wasteful and a chance to alter them silently.
+          if (name === "refineMeetingSlots") {
+            const proposal = await getLatestSlotProposal(conversationId);
+            // Overwritten unconditionally, never merged: whatever the model
+            // put in these fields is discarded. If it could supply candidates
+            // it could invent meeting times and have them returned as though
+            // they had been checked against the calendar.
+            args = {
+              ...args,
+              previousCandidates: proposal?.candidates ?? [],
+              timeZone: userTimeZone,
+            };
+          }
+
+          // Same reasoning, for drift instead of re-ranking: the model names a
+          // meeting by the selectionId a prior getThreadMeetings call issued,
+          // and the server — not the model — supplies the start time THAT call
+          // showed for it, so the resolver in thread-links.ts can tell whether
+          // the meeting moved since. Overwritten unconditionally, same as
+          // above: a model-supplied expectedStart would let it fabricate
+          // agreement with whatever it's about to do.
+          if (name === "rescheduleThreadMeeting" || name === "cancelThreadMeeting") {
+            const selectionId = typeof args.selectionId === "string" ? args.selectionId : undefined;
+            const selection = selectionId ? await getLatestMeetingSelection(conversationId) : undefined;
+            const shown = selection?.meetings.find((m) => m.selectionId === selectionId);
+            args = { ...args, expectedStart: shown?.start };
+          }
+
+          return orchestrator.executeTool(
+            name,
+            args,
+            userId,
+            crypto.randomUUID(),
+            false,
+            userTimeZone,
+            session.user.email,
+          );
+        },
         userId,
         deriveToolMessageMetadata,
       }),

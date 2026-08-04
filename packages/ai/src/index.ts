@@ -124,6 +124,16 @@ export {
 export type { EmailSummaryResult, SummaryData } from "./prompts/summarize.ts";
 export { generateEmailContent } from "./prompts/generate-email.ts";
 export type { GenerateEmailInput, GenerateEmailResult } from "./prompts/generate-email.ts";
+export {
+  refineEmailBody,
+  REFINE_DIRECTIVES,
+  REFINE_DIRECTIVE_VALUES,
+} from "./prompts/refine-email.ts";
+export type {
+  RefineDirective,
+  RefineEmailInput,
+  RefineEmailResult,
+} from "./prompts/refine-email.ts";
 export { analyzeDocument, DocumentType } from "./prompts/analyze-document.ts";
 export type { DocumentAnalysis } from "./prompts/analyze-document.ts";
 export { evaluateFeedback } from "./prompts/feedback-evaluator.ts";

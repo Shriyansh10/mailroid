@@ -1,7 +1,8 @@
 "use client";
 
 import React, { useState, useCallback, useRef, useMemo, useEffect } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { toast } from "sonner";
 import { 
   ChevronLeft as ChevronLeftIcon, 
   ChevronRight as ChevronRightIcon, 
@@ -91,6 +92,7 @@ function formatEventTime(event: EventTimes): string {
 
 export default function CalendarPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
   const { data: session } = useSession();
 
   // Date range for current view
@@ -221,6 +223,89 @@ export default function CalendarPage() {
     [events]
   );
 
+  // ── Deep link: /calendar?event=<id>&date=<yyyy-MM-dd> ──────────────
+  //
+  // How a thread's meeting card gets the user to the meeting itself. The date
+  // moves the view; the id opens the same edit modal a click on the event
+  // would, so arriving by link and arriving by clicking land in one place.
+
+  const deepLinkEventId = searchParams.get("event");
+  const deepLinkDate = searchParams.get("date");
+  const deepLinkHandledRef = useRef<string | null>(null);
+
+  useEffect(() => {
+    if (!deepLinkDate) return;
+    const target = parseLocalDateKey(deepLinkDate);
+    if (!target) return;
+    const api = calendarRef.current?.getApi();
+    if (!api) return;
+    api.gotoDate(target);
+    setViewTitle(api.view.title || "");
+  }, [deepLinkDate]);
+
+  useEffect(() => {
+    if (!deepLinkEventId || deepLinkHandledRef.current === deepLinkEventId) return;
+
+    // `gotoDate` above changes the visible range, which refetches. Until the
+    // events for the range holding the target date have arrived, "not found"
+    // would only mean "not loaded yet" — and saying a meeting is missing when
+    // it isn't is worse than saying nothing.
+    const target = deepLinkDate ? parseLocalDateKey(deepLinkDate) : null;
+    if (target) {
+      const rangeStart = new Date(dateRange.timeMin);
+      const rangeEnd = new Date(dateRange.timeMax);
+      if (target < rangeStart || target >= rangeEnd) return;
+    }
+    if (!events) return;
+
+    deepLinkHandledRef.current = deepLinkEventId;
+    const match = events.find((e) => e.id === deepLinkEventId);
+
+    if (match) {
+      setModalData({
+        id: match.id,
+        title: match.title,
+        start: match.start,
+        end: match.end || match.start,
+        allDay: match.allDay,
+        description: match.description,
+        location: match.location,
+        attendees: match.attendees,
+      });
+      setModalMode("edit");
+      setModalOpen(true);
+    } else {
+      // Drift is surfaced, never swallowed: the link is stale because the
+      // event was deleted or moved out of this window, and a silent no-op
+      // would look like a broken button.
+      toast.error("That meeting isn't on your calendar any more", {
+        description: deepLinkDate
+          ? "It may have been deleted in Google Calendar. Showing the date it was on."
+          : "It may have been deleted in Google Calendar.",
+      });
+    }
+
+    // Clear the params so a refresh doesn't reopen what was already handled.
+    router.replace("/calendar", { scroll: false });
+  }, [deepLinkEventId, deepLinkDate, events, dateRange, router]);
+
+  /**
+   * Say why a drag or resize didn't stick.
+   *
+   * Both handlers used to `catch { info.revert(); }` — a bare catch that threw
+   * the error away. The event slid back to where it started and the user was
+   * told nothing, which is indistinguishable from the app ignoring the gesture.
+   * The revert is right; doing it silently is not, and it left "my change
+   * didn't reach Google" with no evidence attached to it.
+   */
+  const reportEventWriteFailure = useCallback((action: string, err: unknown) => {
+    console.error(`[calendar] ${action} failed`, err);
+    toast.error(`Couldn't ${action} the event`, {
+      description:
+        err instanceof Error ? err.message : "It has been put back where it was.",
+    });
+  }, []);
+
   const handleEventDrop = useCallback(
     async (info: EventDropArg) => {
       try {
@@ -232,11 +317,12 @@ export default function CalendarPage() {
           allDay: info.event.allDay,
         });
         refetch();
-      } catch {
+      } catch (err) {
+        reportEventWriteFailure("move", err);
         info.revert();
       }
     },
-    [updateEventAsync, refetch]
+    [updateEventAsync, refetch, reportEventWriteFailure]
   );
 
   const handleEventResize = useCallback(
@@ -250,11 +336,12 @@ export default function CalendarPage() {
           allDay: info.event.allDay,
         });
         refetch();
-      } catch {
+      } catch (err) {
+        reportEventWriteFailure("resize", err);
         info.revert();
       }
     },
-    [updateEventAsync, refetch]
+    [updateEventAsync, refetch, reportEventWriteFailure]
   );
 
   const handleModalSave = useCallback(
@@ -294,10 +381,12 @@ export default function CalendarPage() {
         setModalOpen(false);
         refetch();
       } catch (err) {
-        console.error("Failed to save event:", err);
+        // The modal deliberately stays open so the edit isn't lost — but it
+        // has to say why, or it just looks like Save did nothing.
+        reportEventWriteFailure(modalMode === "create" ? "create" : "save", err);
       }
     },
-    [modalMode, createEventAsync, updateEventAsync, refetch]
+    [modalMode, createEventAsync, updateEventAsync, refetch, reportEventWriteFailure]
   );
 
   const handleModalDelete = useCallback(
@@ -307,10 +396,10 @@ export default function CalendarPage() {
         setModalOpen(false);
         refetch();
       } catch (err) {
-        console.error("Failed to delete event:", err);
+        reportEventWriteFailure("delete", err);
       }
     },
-    [deleteEventAsync, refetch]
+    [deleteEventAsync, refetch, reportEventWriteFailure]
   );
 
   // ── Data Grouping & AI Calculations ──────────────────────────────

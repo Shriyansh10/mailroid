@@ -248,16 +248,28 @@ export function InlineReplyBox({
   // built before onClose() unmounts this box.
   const fireMeeting = useCallback(
     (attendees: string[]) => {
-      const action = buildEventInput(meetingState, subject, attendees);
+      // This box has no attendee editor — `attendees` is inferred from the
+      // reply's own To/Cc line. Fine as a guess on CREATE, but never sent on
+      // a MOVE: updateEvent treats a supplied attendees array as the whole
+      // guest list, so a recomputed subset would read as "everyone else was
+      // removed" and cancel the meeting for them. `undefined` leaves the
+      // event's real attendees untouched, the same way `title: undefined`
+      // already does below.
+      const isMovingMeeting = meetingState.mode === "update" && !!meetingState.target;
+      const action = buildEventInput(
+        meetingState,
+        subject,
+        isMovingMeeting ? undefined : attendees,
+      );
       if (!action) return;
 
       if (action.kind === "update") {
-        // Title is deliberately dropped when moving. This box has no title
-        // field, so `action.input.title` is just the thread subject — which on
-        // a reply carries a "Re: " prefix. Sending it would rename an existing
+        // A move never renames. This box has no title field, so
+        // `action.input.title` is just the thread subject — which on a reply
+        // carries a "Re: " prefix, and sending it would rename an existing
         // "Team sync" to "Re: Team sync" every time someone reschedules it.
-        // Omitting it leaves the event's own title alone (updateEvent only
-        // writes fields that are defined).
+        // Omitting it leaves the event's own title alone — updateEvent reads
+        // the event and writes back only the fields named here.
         const moveInput = { ...action.input, title: undefined };
         const run = () =>
           updateEventAsync({ id: action.eventId, ...moveInput })
@@ -303,7 +315,14 @@ export function InlineReplyBox({
           );
       void run();
     },
-    [meetingState, subject, threadId, entityId, createEventAsync, updateEventAsync],
+    [
+      meetingState,
+      subject,
+      threadId,
+      entityId,
+      createEventAsync,
+      updateEventAsync,
+    ],
   );
 
   const containerRef = useRef<HTMLDivElement>(null);

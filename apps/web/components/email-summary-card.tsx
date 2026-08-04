@@ -188,7 +188,13 @@ export function EmailSummaryCard({
       setFullText(payload.fullText ?? null);
       setFlags(payload.flags ?? null);
       setData(payload.data ?? null);
-      if (!payload.cached) toast.success("Summary generated — 1 action used");
+      if (!payload.cached) {
+        toast.success("Summary generated — 1 action used");
+        // The server already charged a daily action for this. DailyUsageWidget
+        // only refetches on mount or on this event, so without it the count
+        // stays stale until a full page reload.
+        window.dispatchEvent(new Event("assistant-action-completed"));
+      }
     } catch {
       toast.error("Could not reach the summarizer");
     } finally {
@@ -217,6 +223,9 @@ export function EmailSummaryCard({
         toast.error(data.error ?? "Could not start a chat about this email");
         return;
       }
+      // Same reasoning as handleSummarize: the seed route charges a daily
+      // action when it had to generate, so tell the usage widget to refetch.
+      if (!data.cached) window.dispatchEvent(new Event("assistant-action-completed"));
       router.push(`/assistant?conversationId=${encodeURIComponent(data.conversationId)}`);
     } catch {
       toast.error("Could not reach the assistant");

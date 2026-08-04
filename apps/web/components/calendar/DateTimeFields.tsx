@@ -22,6 +22,7 @@ import {
   parseDurationInput,
   parseTimeInput,
 } from "./event-form-utils";
+import { fieldClasses, type FieldDensity } from "./field-density";
 
 // ── Combo input: type freely, or pick from the list ──────────────────
 
@@ -33,6 +34,7 @@ interface ComboInputProps {
   placeholder?: string;
   invalid?: boolean;
   disabled?: boolean;
+  density?: FieldDensity;
   "aria-label"?: string;
 }
 
@@ -44,6 +46,7 @@ function ComboInput({
   placeholder,
   invalid,
   disabled,
+  density = "default",
   "aria-label": ariaLabel,
 }: ComboInputProps) {
   const [open, setOpen] = useState(false);
@@ -69,7 +72,9 @@ function ComboInput({
           aria-label={ariaLabel}
           aria-invalid={invalid}
           autoComplete="off"
-          className="pr-8"
+          // Density first so `pr-8` still wins the right padding the chevron
+          // sits in — compact's `px-2` would otherwise close the gap.
+          className={cn(fieldClasses[density].input, "pr-8")}
           onChange={(e) => onChange(e.target.value)}
           onFocus={() => setOpen(true)}
           onKeyDown={(e) => {
@@ -135,6 +140,8 @@ interface DateTimeFieldsProps {
     days?: string;
   };
   disabled?: boolean;
+  /** Sizing only — behaviour is identical in both. See field-density.ts. */
+  density?: FieldDensity;
 }
 
 export function DateTimeFields({
@@ -149,8 +156,10 @@ export function DateTimeFields({
   allDay,
   errors,
   disabled,
+  density = "default",
 }: DateTimeFieldsProps) {
   const [calendarOpen, setCalendarOpen] = useState(false);
+  const classes = fieldClasses[density];
 
   const timeOptions = useMemo(() => buildTimeOptions(), []);
   const durationOptions = useMemo(() => buildDurationOptions(), []);
@@ -198,11 +207,14 @@ export function DateTimeFields({
                 aria-invalid={!!errors?.date}
                 className={cn(
                   "w-full justify-start gap-2 font-normal",
+                  classes.input,
                   !date && "text-muted-foreground",
                 )}
               >
                 <CalendarIcon className="size-4 shrink-0" />
-                {date ? format(date, "EEE, MMM d, yyyy") : "Pick a date"}
+                {date
+                  ? format(date, density === "compact" ? "EEE, MMM d" : "EEE, MMM d, yyyy")
+                  : "Pick a date"}
               </Button>
             </PopoverTrigger>
             <PopoverContent align="start" className="w-auto p-0">
@@ -227,6 +239,7 @@ export function DateTimeFields({
             <Input
               value={days}
               disabled={disabled}
+              className={classes.input}
               inputMode="numeric"
               aria-label="Number of days"
               aria-invalid={!!errors?.days}
@@ -244,6 +257,7 @@ export function DateTimeFields({
               aria-label="Start time"
               invalid={!!errors?.startTime}
               disabled={disabled}
+              density={density}
             />
 
             {/* Duration */}
@@ -255,17 +269,18 @@ export function DateTimeFields({
               aria-label="Duration"
               invalid={!!errors?.duration}
               disabled={disabled}
+              density={density}
             />
           </>
         )}
       </div>
 
       {errors?.date || errors?.startTime || errors?.duration || errors?.days ? (
-        <p className="text-destructive text-xs">
+        <p className={cn("text-destructive", classes.note)}>
           {errors.date ?? errors.startTime ?? errors.duration ?? errors.days}
         </p>
       ) : endsLabel ? (
-        <p className="text-muted-foreground text-xs">{endsLabel}</p>
+        <p className={cn("text-muted-foreground", classes.note)}>{endsLabel}</p>
       ) : null}
     </div>
   );

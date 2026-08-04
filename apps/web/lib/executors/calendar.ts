@@ -10,9 +10,15 @@ import {
   linkThreadEvent,
   closeThreadLink,
   resolveWriteTarget,
+  resolveSelection,
+  selectionIdFor,
+  checkSelectionDrift,
   getActiveThreadMeetings,
   userOwnsEvent,
+  type ThreadMeeting,
 } from "@repo/services/calendar/thread-links";
+import { resolveAttendeeRefs } from "@repo/services/scheduling/contacts";
+import { buildThreadSharedProperties } from "@repo/services/gmail/thread-headers";
 import { db, eq } from "@repo/database";
 import { user } from "@repo/database/schema";
 
@@ -41,6 +47,41 @@ async function getAuthenticatedEmail(userId: string): Promise<string> {
     throw new Error(`User ${userId} not found`);
   }
   return dbUser.email;
+}
+
+/**
+ * Merge literal `attendees` with resolved `attendeeRefs` into one address list.
+ *
+ * This is the ONLY place a contact handle becomes an email address. The model
+ * cannot supply addresses — every one it has seen was masked to "[EMAIL]" —
+ * so it names people by handle and the resolution happens here, server-side,
+ * at the moment of writing the invite.
+ *
+ * An unknown handle throws rather than being skipped. Quietly dropping it
+ * would send the invite to fewer people than the user agreed to, on an
+ * outward-facing action — the exact silent degradation CLAUDE.md forbids.
+ */
+async function resolveAttendees(
+  userId: string,
+  attendees?: string[],
+  attendeeRefs?: string[],
+): Promise<string[] | undefined> {
+  const literal = attendees ?? [];
+
+  if (!attendeeRefs?.length) {
+    return literal.length > 0 ? literal : undefined;
+  }
+
+  const { emails: resolved, unknown } = await resolveAttendeeRefs(userId, attendeeRefs);
+  if (unknown.length > 0) {
+    throw new Error(
+      `Could not resolve ${unknown.length} attendee reference(s). ` +
+        `Call resolveRecipient again for those people rather than scheduling without them.`,
+    );
+  }
+
+  const merged = [...new Set([...literal, ...resolved])];
+  return merged.length > 0 ? merged : undefined;
 }
 
 export interface GetEventsInput {
@@ -109,6 +150,8 @@ export interface CreateEventInput {
   start: string;
   end: string;
   attendees?: string[];
+  /** Contact handles from resolveRecipient; what the model actually supplies. */
+  attendeeRefs?: string[];
   description?: string;
   organizer?: string;
 }
@@ -151,12 +194,14 @@ export class CorsairCreateEventExecutor
         }
       }
 
+      const attendees = await resolveAttendees(ctx.userId, args.attendees, args.attendeeRefs);
+
       const result = await corsairCreateEvent(ctx.userId, {
         title: args.title,
         start: args.start,
         end: args.end,
         allDay: false,
-        attendees: args.attendees,
+        attendees,
         description: args.description,
       }, (ctx as any).userTimeZone);
 
@@ -183,6 +228,8 @@ export interface GetThreadMeetingsInput {
 
 export interface GetThreadMeetingsOutput {
   meetings: Array<{
+    /** How the model names this meeting when rescheduling or cancelling it. */
+    selectionId: string;
     title: string;
     start: string;
     end: string;
@@ -201,7 +248,10 @@ export class ThreadMeetingsExecutor
     try {
       const meetings = await getActiveThreadMeetings(ctx.userId, args.threadId);
       return {
+        // Projected explicitly: eventId and calendarId stay server-side, and
+        // selectionId is what crosses the boundary in their place.
         meetings: meetings.map((m) => ({
+          selectionId: selectionIdFor(m.eventId),
           title: m.title,
           start: m.start,
           end: m.end,
@@ -220,8 +270,60 @@ export interface ScheduleThreadMeetingInput {
   start: string;
   end: string;
   attendees?: string[];
+  /** Contact handles from resolveRecipient; what the model actually supplies. */
+  attendeeRefs?: string[];
   description?: string;
   organizer?: string;
+  /** Set by the model only after the user has seen the thread's existing meetings and chosen to add another. */
+  acknowledgedExistingMeetings?: boolean;
+}
+
+/**
+ * Refuses to book a second meeting on a thread until the user has been asked.
+ *
+ * Runs BEFORE the approval card is minted (see `precheck` in
+ * packages/ai/src/tools/types.ts). That placement is the point: "move the
+ * existing one, or add a second, or neither" has three answers and an approval
+ * card has two, so the question can only be asked in conversation — which
+ * means before any card exists. Refusing at execute time would ask it after
+ * the user had already approved something else.
+ *
+ * Cheap and idempotent, per the precheck contract: one read of links we own,
+ * no writes. It deliberately runs again on the approve-side replay, and the
+ * acknowledgement rides in the stored args, so an approved call passes the
+ * same gate it passed the first time.
+ */
+export async function precheckScheduleThreadMeeting(
+  args: Record<string, unknown>,
+  ctx: { userId: string; userTimeZone?: string },
+): Promise<string | null> {
+  const threadId = args.threadId as string | undefined;
+  if (!threadId) return null; // Let the schema report the missing field.
+
+  // The user has already been shown the list and asked for another anyway.
+  if (args.acknowledgedExistingMeetings === true) return null;
+
+  // Deliberately NOT wrapped in a try/catch that returns null. If we cannot
+  // tell whether this thread already has a meeting, the safe answer is to stop
+  // — swallowing the error would re-open the duplicate-invite path on exactly
+  // the calendar outage that makes duplicates hardest to notice.
+  const meetings = await getActiveThreadMeetings(ctx.userId, threadId);
+  if (meetings.length === 0) return null;
+
+  const noun = meetings.length === 1 ? "meeting" : "meetings";
+  return [
+    `This thread already has ${meetings.length} ${noun} scheduled. NOTHING was created.`,
+    describeMeetings(meetings, ctx.userTimeZone),
+    ``,
+    `Do not choose for the user. Show them this list and ask which they want:`,
+    `  (a) move an existing meeting to the new time — call rescheduleThreadMeeting with that meeting's selectionId;`,
+    `  (b) keep it and add a SECOND, separate meeting — call scheduleThreadMeeting again with acknowledgedExistingMeetings: true;`,
+    `  (c) neither — do nothing.`,
+    meetings.length === 1
+      ? `Someone asking for a different time almost always means (a).`
+      : `If they choose (a), ask WHICH meeting by name and time before acting.`,
+    `Calling this tool again unchanged will report the same thing.`,
+  ].join("\n");
 }
 
 export class ScheduleThreadMeetingExecutor
@@ -244,6 +346,15 @@ export class ScheduleThreadMeetingExecutor
         }
       }
 
+      const attendees = await resolveAttendees(ctx.userId, args.attendees, args.attendeeRefs);
+
+      // Stamps the thread's root Message-ID onto the event, which is what lets
+      // an invited guest find this meeting from their own copy of the thread.
+      const sharedProperties = await buildThreadSharedProperties(
+        ctx.userId,
+        args.threadId,
+      );
+
       const result = await corsairCreateEvent(
         ctx.userId,
         {
@@ -251,8 +362,9 @@ export class ScheduleThreadMeetingExecutor
           start: args.start,
           end: args.end,
           allDay: false,
-          attendees: args.attendees,
+          attendees,
           description: args.description,
+          sharedProperties,
         },
         ctx.userTimeZone,
       );
@@ -283,6 +395,10 @@ export interface RescheduleThreadMeetingInput {
   end: string;
   title?: string;
   description?: string;
+  /** Names one of the thread's meetings; required once there is more than one. */
+  selectionId?: string;
+  /** Server-injected drift check — see the schema comment in registry.ts. */
+  expectedStart?: string;
 }
 
 export class RescheduleThreadMeetingExecutor
@@ -297,6 +413,8 @@ export class RescheduleThreadMeetingExecutor
         ctx.userId,
         args.threadId,
         "reschedule",
+        args.selectionId,
+        args.expectedStart,
       );
 
       const result = await corsairUpdateEvent(
@@ -324,6 +442,10 @@ export class RescheduleThreadMeetingExecutor
 
 export interface CancelThreadMeetingInput {
   threadId: string;
+  /** Names one of the thread's meetings; required once there is more than one. */
+  selectionId?: string;
+  /** Server-injected drift check — see the schema comment in registry.ts. */
+  expectedStart?: string;
 }
 
 export class CancelThreadMeetingExecutor
@@ -338,6 +460,8 @@ export class CancelThreadMeetingExecutor
         ctx.userId,
         args.threadId,
         "cancel",
+        args.selectionId,
+        args.expectedStart,
       );
 
       await corsairDeleteEvent(ctx.userId, target.eventId);
@@ -381,6 +505,28 @@ function formatWhen(iso: string | undefined, timeZone?: string): string {
   } catch {
     return date.toISOString();
   }
+}
+
+/**
+ * Render a thread's meetings as a numbered list the model can read back to the
+ * user, each tagged with the token needed to act on it.
+ *
+ * Titles come from Google, i.e. they are user content and can carry anything a
+ * meeting organiser typed. These strings are interpolated into tool *errors*,
+ * and `firewall.sanitizeToolOutput` in the agent loop only runs on the success
+ * path — so newlines are stripped and the title is capped here, where the
+ * untrusted value actually enters the prompt.
+ */
+function describeMeetings(
+  meetings: ThreadMeeting[],
+  timeZone?: string,
+): string {
+  return meetings
+    .map((m, i) => {
+      const title = m.title.replace(/\s+/g, " ").trim().slice(0, 80) || "(untitled)";
+      return `  ${i + 1}. "${title}" — ${formatWhen(m.start, timeZone)} (selectionId: ${selectionIdFor(m.eventId)})`;
+    })
+    .join("\n");
 }
 
 function describeEvent(
@@ -494,7 +640,68 @@ async function resolveTargetOrThrow(
   userId: string,
   threadId: string,
   verb: string,
+  selectionId?: string,
+  expectedStart?: string,
 ): Promise<{ eventId: string; calendarId: string }> {
+  // A token was supplied: it names one meeting exactly, whatever else has
+  // happened to the thread since the list was shown.
+  // Only the organiser can move or cancel. A guest holds a link row purely so
+  // the meeting is VISIBLE to them; Google would reject the write anyway, or
+  // apply it partially, and either way an attendee must not be able to move
+  // everyone else's meeting.
+  const refuseIfGuest = (meeting: ThreadMeeting) => {
+    if (meeting.role === "GUEST") {
+      throw new Error(
+        `You're a guest on "${meeting.title}" — only the organiser can ${verb} it. Nothing was changed. Suggest replying on the thread to ask them instead.`,
+      );
+    }
+  };
+
+  if (selectionId) {
+    const selected = await resolveSelection(userId, threadId, selectionId);
+    if (selected.kind === "notFound") {
+      throw new Error(
+        selected.meetings.length === 0
+          ? `That meeting is no longer on this thread — it may have been cancelled already. Nothing was changed. Tell the user rather than picking another one.`
+          : `No meeting on this thread matches that selection; it was probably cancelled since you listed them. Nothing was changed. The thread now has:\n${describeMeetings(selected.meetings)}\nRe-confirm with the user which one they mean.`,
+      );
+    }
+
+    // The token survives a reschedule (it's derived from the eventId, not the
+    // time), so a same-event drift check needs a SEPARATE signal:
+    // expectedStart, injected server-side from the ledger of what
+    // getThreadMeetings last showed this conversation (see
+    // apps/web/app/api/chat/route.ts — never trust the model's own copy of
+    // this value). "missing" (no ledger entry, e.g. the model acted on a
+    // precheck refusal's list without a prior getThreadMeetings call) refuses
+    // exactly like "changed" — a hole in the safety record is not "nothing to
+    // check", it's its own failure mode. See checkSelectionDrift.
+    const drift = checkSelectionDrift(expectedStart, selected.meeting.start);
+    if (drift === "missing") {
+      throw new Error(
+        `I can't verify "${selected.meeting.title}" is the same meeting previously shown in this ` +
+          `conversation, because there is no recorded meeting list to check it against. Nothing was ` +
+          `changed. Call getThreadMeetings first, then ${verb} again with the selectionId it gives you.`,
+      );
+    }
+    if (drift === "changed") {
+      throw new Error(
+        `"${selected.meeting.title}" changed since it was listed — it was ${formatWhen(expectedStart)}, ` +
+          `it's now ${formatWhen(selected.meeting.start)}. Nothing was changed. Re-list this thread's ` +
+          `meetings and confirm with the user before acting.`,
+      );
+    }
+
+    refuseIfGuest(selected.meeting);
+    if (!(await userOwnsEvent(userId, selected.meeting.eventId))) {
+      throw new Error("That event does not belong to this account.");
+    }
+    return {
+      eventId: selected.meeting.eventId,
+      calendarId: selected.meeting.calendarId,
+    };
+  }
+
   const target = await resolveWriteTarget(userId, threadId);
 
   if (target.kind === "none") {
@@ -504,17 +711,20 @@ async function resolveTargetOrThrow(
   }
 
   if (target.kind === "ambiguous") {
-    const list = target.meetings
-      .map((m) => `"${m.title}" starting ${m.start}`)
-      .join("; ");
     throw new Error(
-      `This thread has ${target.meetings.length} scheduled meetings (${list}). ` +
-        `Ask the user which one to ${verb} — do not guess.`,
+      `This thread has ${target.meetings.length} scheduled meetings. Nothing was changed.\n` +
+        `${describeMeetings(target.meetings)}\n` +
+        `Ask the user which one to ${verb}, then call this tool again with that meeting's selectionId. Do not guess.`,
     );
   }
 
+  refuseIfGuest(target.meeting);
+
   // Defence in depth: the schemas never accept an eventId, so this can only
   // fail if a link outlived the calendar it pointed at.
+  //
+  // Note this is NOT a substitute for the guest check above — userOwnsEvent
+  // asks "is this event in your calendar?", which is true for an attendee too.
   if (!(await userOwnsEvent(userId, target.meeting.eventId))) {
     throw new Error("That event does not belong to this account.");
   }

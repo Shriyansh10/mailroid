@@ -241,7 +241,7 @@ export async function runAgentLoop(
     registry,
     execute,
     userId: _userId,
-    maxIterations = 5,
+    maxIterations = 10,
     deriveToolMessageMetadata,
   } = options;
 
@@ -475,15 +475,16 @@ export async function runAgentLoop(
     `iterations=${maxIterations} | ` +
     `maxIterations=${maxIterations}`,
   );
+  const limitContent = `I've completed the maximum number of steps (${maxIterations}). Please try a more specific request.`;
   const limitMsg: AgentLoopNewMessage = {
     role: "assistant",
-    content: "I've completed the maximum number of steps (5). Please try a more specific request.",
+    content: limitContent,
   };
   newMessages.push(limitMsg);
   return {
     response: {
       role: "assistant",
-      content: "I've completed the maximum number of steps (5). Please try a more specific request.",
+      content: limitContent,
     },
     newMessages,
     contextChars: lastApproxChars,

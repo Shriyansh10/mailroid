@@ -7,19 +7,19 @@ import {
   PermissionService,
   ConsoleAuditLogger,
   ToolOrchestrator,
-  deepseek,
-  DEEPSEEK_CHAT_MODEL,
-  toOpenAiToolDefs,
-  healConversation,
-  chatCompletion,
+  runAgentLoop,
   withAiUsage,
+  firewall,
 } from "@repo/ai";
+import type { ChatMessage, ApprovalRequiredResponse } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
+import { knownIntents } from "@repo/services/scheduling/memory";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
 import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
-import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel } from "@web/lib/assistant/history";
+import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel, getLatestSlotProposal, getLatestMeetingSelection } from "@web/lib/assistant/history";
 import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
+import { SCHEDULING_TOOLS, recordProposalOutcome } from "@web/lib/assistant/scheduling-outcome";
 import crypto from "node:crypto";
 
 export const runtime = "nodejs";
@@ -114,21 +114,45 @@ export async function POST(request: Request) {
     const conversationId = body.conversationId;
     const newMessagesToInsert: any[] = [];
 
-    // Persist the executed tool's result to assistant_messages immediately
+    // ── Learning signal: did the user change the time we proposed? ──
+    // Recorded here because this is the only point where both halves exist:
+    // what the engine offered (the slot ledger) and what the user actually
+    // approved (this approval's args). Never blocks the approval itself.
+    if (result.status === "success" && conversationId && SCHEDULING_TOOLS.has(approval.toolName)) {
+      void recordProposalOutcome({
+        userId,
+        conversationId,
+        approvalId: body.approvalId,
+        args: approval.args as Record<string, unknown>,
+        timeZone: userTimeZone ?? "UTC",
+      });
+    }
+
+    // Persist the executed tool's result to assistant_messages immediately.
+    //
+    // Sanitised and XML-framed exactly as the agent loop frames its own
+    // results (packages/ai/src/chat/agent.ts). This row is read straight back
+    // by the resume below, and it used to be written as bare JSON — so the
+    // model was handed one unattributable blob starting `{"draft":false,...}`
+    // among a history of tagged results, could not tell that the meeting had
+    // just been booked, and re-issued the call.
     if (conversationId) {
+      const safeData = firewall.sanitizeToolOutput(approval.toolName, result.data);
       await db.insert(assistantMessages).values({
         conversationId,
         role: "tool",
         toolCallId: approval.toolCallId,
-        content: result.status === "success"
-          ? JSON.stringify(result.data)
-          : JSON.stringify({ error: result.error ?? "Tool execution failed" }),
+        content:
+          result.status === "success"
+            ? `<tool_result tool="${approval.toolName}">\n${JSON.stringify(safeData)}\n</tool_result>`
+            : `<tool_error tool="${approval.toolName}">\n${JSON.stringify({ error: result.error ?? "Tool execution failed" })}\n</tool_error>`,
         metadata: deriveToolMessageMetadata(approval.toolName, approval.args as Record<string, unknown>, result) ?? null,
       });
     }
 
     // ── Resume conversation if conversationId is valid ──────────────────
     let finalContent = `Tool "${approval.toolName}" executed: ${result.status}`;
+    let approvalRequired: ApprovalRequiredResponse["approvalRequired"] | undefined;
 
     if (conversationId) {
       try {
@@ -137,203 +161,106 @@ export async function POST(request: Request) {
         // route used to accept a client-supplied `messages[0]` system prompt
         // verbatim, which a crafted request could use to replace the SENDER
         // IDENTITY rules outright. Never trust it from the client again.
-        const [dbMsgs, emailContext] = await Promise.all([
+        const [dbMsgs, emailContext, userIntents] = await Promise.all([
           loadConversationHistory(conversationId),
           getActiveEmailContext(conversationId, userId),
+          knownIntents(userId),
         ]);
 
         const systemPrompt = buildSystemPrompt({
           userTimeZone: userTimeZone ?? "UTC",
           userEmail: session.user.email,
           emailContext,
+          knownIntents: userIntents,
         });
 
         const trimmedHistory = trimHistoryForModel(dbMsgs);
 
-        // Map database messages to OpenAI message format
-        const rawConversation: any[] = [
-          {
-            role: "system" as const,
-            content: systemPrompt,
-          },
-          ...trimmedHistory.map((m) => {
-            if (m.role === "assistant") {
-              return {
-                role: "assistant" as const,
-                content: m.content || null,
-                tool_calls: m.tool_calls as any[] | undefined,
-              };
-            }
-            if (m.role === "tool") {
-              return {
-                role: "tool" as const,
-                tool_call_id: m.tool_call_id!,
-                content: m.content || "",
-              };
-            }
-            return {
-              role: m.role as "user",
-              content: m.content || "",
-            };
-          }),
+        const agentMessages: ChatMessage[] = [
+          { role: "system", content: systemPrompt },
+          ...trimmedHistory.map((m) => ({
+            role: m.role,
+            content: m.content,
+            tool_calls: m.tool_calls as any,
+            tool_call_id: m.tool_call_id,
+          })),
         ];
 
-        const conversation = healConversation(rawConversation);
+        // Resume through the same agent loop /api/chat uses, rather than the
+        // single completion + one-round-of-tools this route used to hand-roll.
+        // That older shape could only ever take ONE more step, so a plan like
+        // "create the event, then mail the attendees, then confirm" stalled
+        // after the first chained call and reported success for work it had
+        // not finished. The loop also owns healing, prompt-injection auditing,
+        // tool-output sanitisation and XML framing — none of which the
+        // hand-rolled path applied, so approved turns were being fed back to
+        // the model less safely than ordinary ones.
+        //
+        // skipPermissionCheck stays FALSE: this approval authorised exactly
+        // one call, which already executed above. Anything the model asks for
+        // now is a new action and must earn its own approval card.
+        const { response, newMessages } = await withAiUsage({ userId }, () =>
+          runAgentLoop({
+            messages: agentMessages,
+            registry,
+            execute: async (name, args) => {
+              // Same slot-ledger injection as /api/chat — a resumed turn must
+              // be able to adjust the times already offered, not start over.
+              if (name === "refineMeetingSlots") {
+                const proposal = await getLatestSlotProposal(conversationId);
+                // Overwritten unconditionally — see the note in /api/chat.
+                args = {
+                  ...args,
+                  previousCandidates: proposal?.candidates ?? [],
+                  timeZone: userTimeZone,
+                };
+              }
 
-        // Include tools so DeepSeek can call remaining tools (e.g. sendEmail
-        // after createEvent was approved)
-        const toolDefs = toOpenAiToolDefs(registry);
+              // Same drift-ledger injection as /api/chat — see the note there.
+              if (name === "rescheduleThreadMeeting" || name === "cancelThreadMeeting") {
+                const selectionId = typeof args.selectionId === "string" ? args.selectionId : undefined;
+                const selection = selectionId ? await getLatestMeetingSelection(conversationId) : undefined;
+                const shown = selection?.meetings.find((m) => m.selectionId === selectionId);
+                args = { ...args, expectedStart: shown?.start };
+              }
 
-        const completion = await withAiUsage({ userId }, () =>
-          chatCompletion(
-            deepseek,
-            {
-              model: DEEPSEEK_CHAT_MODEL,
-              messages: conversation,
-              ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
-            } as Parameters<typeof chatCompletion>[1],
-            { feature: "chat:approve-resume" },
-          ),
+              return orchestrator.executeTool(
+                name,
+                args,
+                userId,
+                crypto.randomUUID(),
+                false,
+                userTimeZone,
+                session.user.email,
+              );
+            },
+            userId,
+            deriveToolMessageMetadata,
+          }),
         );
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const msg = (completion as any).choices[0]?.message;
+        finalContent = response.content ?? finalContent;
 
-        // If DeepSeek wants to call another tool (e.g. sendEmail), execute it.
-        // Only tool calls actually attempted are persisted below — if one of
-        // them needs its own approval (e.g. createEvent is DANGEROUS), we
-        // stop there rather than force-executing it, so a second approval
-        // card can be surfaced instead of silently bypassing consent.
-        if (msg?.tool_calls?.length > 0) {
-          const attemptedToolCalls: any[] = [];
-          const toolResultInserts: any[] = [];
-          const results: string[] = [];
-          let approvalNeeded = false;
-
-          for (const tc of msg.tool_calls) {
-            const fn = tc.function;
-            if (!fn) continue;
-
-            let args: Record<string, unknown>;
-            try { args = JSON.parse(fn.arguments); } catch { args = {}; }
-
-            // Attach the tool call ID so the orchestrator can store it for approval
-            args._toolCallId = tc.id;
-
-            console.log("[api:approvals:resume-tool]", { toolName: fn.name, args });
-
-            const toolResult = await orchestrator.executeTool(
-              fn.name,
-              args,
-              userId,
-              crypto.randomUUID(),
-              false, // do NOT skip permission checks — this may be a new dangerous tool needing its own approval
-              userTimeZone,
-              session.user.email,
-            );
-
-            attemptedToolCalls.push({ id: tc.id, type: "function", function: fn });
-
-            if (toolResult.status === "approval_required") {
-              console.log("[api:approvals:resume-tool] approval required for chained call", {
-                toolName: fn.name,
-                approvalId: toolResult.approvalId,
-                toolCallId: tc.id,
-              });
-              approvalNeeded = true;
-              break;
-            }
-
-            if (toolResult.status === "success") {
-              results.push(`✅ ${fn.name} completed successfully.`);
-            } else {
-              results.push(`❌ ${fn.name} failed: ${toolResult.error ?? "unknown error"}`);
-            }
-
-            if (conversationId) {
-              toolResultInserts.push({
-                conversationId,
-                role: "tool",
-                toolCallId: tc.id,
-                content: toolResult.status === "success"
-                  ? JSON.stringify(toolResult.data)
-                  : JSON.stringify({ error: toolResult.error }),
-                metadata: deriveToolMessageMetadata(fn.name, args, toolResult) ?? null,
-              });
-            }
-
-            // Push tool result into conversation for final DeepSeek summary
-            conversation.push({
-              role: "assistant" as const,
-              content: null,
-              tool_calls: [{ id: tc.id, type: "function", function: fn }],
-            });
-            conversation.push({
-              role: "tool" as const,
-              tool_call_id: tc.id,
-              content: toolResult.status === "success"
-                ? JSON.stringify(toolResult.data)
-                : JSON.stringify({ error: toolResult.error }),
-            });
-          }
-
-          if (conversationId) {
-            newMessagesToInsert.push({
-              conversationId,
-              role: "assistant",
-              content: msg.content ?? null,
-              toolCalls: attemptedToolCalls,
-            });
-            newMessagesToInsert.push(...toolResultInserts);
-          }
-
-          if (approvalNeeded) {
-            // A chained tool call needs its own approval — surface that
-            // instead of summarizing, and stop here (no forced execution).
-            finalContent = msg.content ?? "I'd like to perform another action. Please approve it.";
-          } else {
-            // One more DeepSeek call for a final summary (no tools this time)
-            try {
-              const summary = await withAiUsage({ userId }, () =>
-                chatCompletion(
-                  deepseek,
-                  { model: DEEPSEEK_CHAT_MODEL, messages: conversation } as Parameters<typeof chatCompletion>[1],
-                  { feature: "chat:approve-summary" },
-                ),
-              );
-
-              // eslint-disable-next-line @typescript-eslint/no-explicit-any
-              finalContent = (summary as any).choices[0]?.message?.content ?? results.join("\n");
-
-              if (conversationId) {
-                newMessagesToInsert.push({
-                  conversationId,
-                  role: "assistant",
-                  content: finalContent,
-                });
-              }
-            } catch {
-              finalContent = results.join("\n");
-              if (conversationId) {
-                newMessagesToInsert.push({
-                  conversationId,
-                  role: "assistant",
-                  content: finalContent,
-                });
-              }
-            }
-          }
-        } else {
-          finalContent = msg?.content ?? finalContent;
-          if (conversationId && msg) {
-            newMessagesToInsert.push({
-              conversationId,
-              role: "assistant",
-              content: msg.content ?? null,
-              toolCalls: msg.tool_calls || null,
-            });
-          }
+        if ("approvalRequired" in response) {
+          // A chained call needs its own approval — surface it so the client
+          // renders a second card, instead of silently dropping the request.
+          approvalRequired = response.approvalRequired;
+          console.log("[api:approvals:approve:chained-approval]", {
+            toolName: response.approvalRequired.toolName,
+            approvalId: response.approvalRequired.approvalId,
+          });
         }
+
+        newMessagesToInsert.push(
+          ...newMessages.map((m) => ({
+            conversationId,
+            role: m.role,
+            content: m.content,
+            toolCalls: m.toolCalls,
+            toolCallId: m.toolCallId,
+            metadata: m.metadata ?? null,
+          })),
+        );
       } catch (err) {
         console.warn("[api:approvals:approve:resume-failed]", {
           error: err instanceof Error ? err.message : String(err),
@@ -357,17 +284,37 @@ export async function POST(request: Request) {
         .where(eq(conversations.id, conversationId));
     }
 
-    // ── Mark EXECUTED (after DeepSeek call to avoid losing state on error) ──
-    await approvalStore.update(body.approvalId, {
-      status: "EXECUTED",
-      executedAt: new Date(),
-    });
+    // ── Mark the outcome (after the model call, to avoid losing state on error) ──
+    //
+    // Branches on the actual result. This was unconditional, so a failed,
+    // blocked or precheck-refused call still recorded EXECUTED — the card read
+    // "Approved & Executed" for something that never happened, and nothing
+    // downstream could tell a real write from an attempted one.
+    if (result.status === "success") {
+      await approvalStore.update(body.approvalId, {
+        status: "EXECUTED",
+        executedAt: new Date(),
+      });
+    } else {
+      await approvalStore.update(body.approvalId, {
+        status: "FAILED",
+        executedAt: new Date(),
+      });
+    }
 
     // ── Increment Daily Limit (charge successful action only) ──────
-    let shouldCharge = result.status === "success";
+    // A chained call still awaiting its own approval has not run yet, so this
+    // turn has not produced a second billable action.
+    let shouldCharge = result.status === "success" && !approvalRequired;
     if (shouldCharge) {
       for (const m of newMessagesToInsert) {
         if (m.role === "tool" && m.content) {
+          // Tool results from the agent loop are XML-framed, so they are not
+          // JSON and the parse below never sees them — check the frame first.
+          if (m.content.includes("<tool_error")) {
+            shouldCharge = false;
+            break;
+          }
           try {
             const parsed = JSON.parse(m.content);
             if (parsed && typeof parsed === "object" && "error" in parsed) {
@@ -407,6 +354,15 @@ export async function POST(request: Request) {
       role: "assistant",
       content: finalContent,
       newMessages: newMessagesToInsert,
+      // What actually happened, so the client's optimistic update doesn't have
+      // to assume success and briefly show "Executed" for a call that failed.
+      approvalStatus: result.status === "success" ? "EXECUTED" : "FAILED",
+      ...(result.status !== "success" ? { toolError: result.error } : {}),
+      // Present when the resumed loop asked for a further dangerous action.
+      // The client re-reads from the database right after, where the pending
+      // row surfaces as a second approval card — this just lets it react
+      // without waiting for that round-trip.
+      ...(approvalRequired ? { approvalRequired } : {}),
     });
   } catch (error) {
     console.error("[api:approvals:approve:error]", {

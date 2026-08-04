@@ -105,6 +105,27 @@ export interface ToolDefinition<
     args: Record<string, unknown>,
     ctx: { userId: string; userTimeZone?: string; userEmail?: string },
   ) => Promise<string> | string;
+  /**
+   * Gate that runs BEFORE an approval card is minted. Return a string to abort
+   * the call with that text as the model-facing error — no card, no write.
+   * Return null to let the call proceed.
+   *
+   * This exists because an approval card is a yes/no about one described
+   * action, so a question with three answers ("move the existing meeting, or
+   * add a second one, or neither?") can only be asked in conversation — which
+   * means before any card exists. Throwing from `execute` would ask it after
+   * the user already approved something else.
+   *
+   * CONTRACT — a precheck must be DETERMINISTIC, IDEMPOTENT and CHEAP: one
+   * read of state we already own. It deliberately runs again when an approved
+   * call is replayed (see orchestrator.ts), so anything expensive here is paid
+   * on every approval. It is a gate, not a second executor; real work belongs
+   * in `execute`, behind the approval the user already gave.
+   */
+  precheck?: (
+    args: Record<string, unknown>,
+    ctx: { userId: string; userTimeZone?: string; userEmail?: string },
+  ) => Promise<string | null> | string | null;
 }
 
 // ── Tool call (from LLM / API) ───────────────────────────────────────

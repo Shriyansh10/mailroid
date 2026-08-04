@@ -2,7 +2,7 @@ import { db, eq, and, asc, sql } from "@repo/database";
 import { assistantMessages } from "@repo/database/schema";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import type { EmailContext } from "./system-prompt";
-import type { EmailRef } from "./tool-memory";
+import type { EmailRef, ActionRef, SlotProposalRef, MeetingSelectionRef } from "./tool-memory";
 
 export interface DbChatMessage {
   role: "user" | "assistant" | "tool";
@@ -85,6 +85,70 @@ export async function getActiveEmailContext(
   };
 }
 
+/**
+ * The meeting times most recently offered in this conversation.
+ *
+ * Same "newest write wins" shape as the email ledger above: the latest tool
+ * message carrying a slotProposal is the set currently on screen. Read when
+ * the user asks to adjust ("earlier", "another day") so the engine re-ranks
+ * what they were shown instead of searching afresh and quietly answering a
+ * different question.
+ */
+export async function getLatestSlotProposal(
+  conversationId: string,
+): Promise<SlotProposalRef | undefined> {
+  const rows = await db
+    .select({ metadata: assistantMessages.metadata })
+    .from(assistantMessages)
+    .where(
+      and(
+        eq(assistantMessages.conversationId, conversationId),
+        sql`${assistantMessages.metadata} -> 'slotProposal' IS NOT NULL`,
+      ),
+    )
+    .orderBy(sql`${assistantMessages.createdAt} DESC`)
+    .limit(1);
+
+  const proposal = (rows[0]?.metadata as { slotProposal?: SlotProposalRef } | undefined)
+    ?.slotProposal;
+
+  return proposal?.candidates?.length ? proposal : undefined;
+}
+
+/**
+ * The thread meetings most recently listed to the user, for the drift check
+ * in `resolveSelection` (`packages/services/calendar/thread-links.ts`) — see
+ * `MeetingSelectionRef` for why this exists. Mirrors `getLatestSlotProposal`
+ * exactly: newest `assistant_messages` row in the conversation whose metadata
+ * carries the ref.
+ *
+ * Scoped to the newest ref regardless of thread — a conversation moving
+ * between threads means an older ref for a DIFFERENT thread would never match
+ * the `threadId` the reschedule/cancel call is actually for, so the caller
+ * still ends up with nothing to compare against for a stale ref. Filtering by
+ * threadId here would only complicate the query for the same outcome.
+ */
+export async function getLatestMeetingSelection(
+  conversationId: string,
+): Promise<MeetingSelectionRef | undefined> {
+  const rows = await db
+    .select({ metadata: assistantMessages.metadata })
+    .from(assistantMessages)
+    .where(
+      and(
+        eq(assistantMessages.conversationId, conversationId),
+        sql`${assistantMessages.metadata} -> 'meetingSelection' IS NOT NULL`,
+      ),
+    )
+    .orderBy(sql`${assistantMessages.createdAt} DESC`)
+    .limit(1);
+
+  const selection = (rows[0]?.metadata as { meetingSelection?: MeetingSelectionRef } | undefined)
+    ?.meetingSelection;
+
+  return selection?.meetings?.length ? selection : undefined;
+}
+
 // ── Trimming ─────────────────────────────────────────────────────────
 //
 // Applied only to the copy sent to the model — DB rows are never modified,
@@ -143,7 +207,29 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
   const trimmed = messages.map((m, i) => {
     if (m.role !== "tool" || recentToolIndices.has(i)) return m;
 
-    const meta = m.metadata as { emailRef?: EmailRef; toolName?: string } | null;
+    const meta = m.metadata as
+      | { emailRef?: EmailRef; actionRef?: ActionRef; toolName?: string }
+      | null;
+
+    // Completed outward-facing actions keep their "this already happened"
+    // marker even after the raw result would have been truncated away.
+    // Without this branch the actionRef ledger was written and never read, so
+    // a resumed loop saw only prose and re-sent the mail / re-booked the
+    // meeting the user had already approved once.
+    if (meta?.actionRef) {
+      const stub = {
+        done: meta.actionRef.kind,
+        id: meta.actionRef.id,
+        threadId: meta.actionRef.threadId,
+        subject: meta.actionRef.subject,
+        note: "already completed in this conversation — do not do it again",
+      };
+      return {
+        ...m,
+        content: `<tool_result tool="${meta.toolName ?? "unknown"}">\n${JSON.stringify(stub)}\n</tool_result>`,
+      };
+    }
+
     if (meta?.emailRef) {
       const stub = {
         entityId: meta.emailRef.entityId,
