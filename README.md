@@ -581,6 +581,78 @@ pnpm dev
 
 ---
 
+# Operations
+
+## Gmail watches expire every 7 days
+
+**This is critical path.** A Gmail watch is what makes Google push new mail to
+Mailroid. It lasts **7 days**. When it lapses, mail simply stops arriving — no
+error, no banner, nothing in the UI. Everything looks healthy while the mailbox
+quietly goes stale.
+
+Renewal normally runs itself: `gmail-watch-cron`
+(`packages/services/gmail/watch-cron.ts`) renews anything expiring within 48
+hours, daily. But the schedule lives in **Inngest Cloud**, and Inngest executes
+it by calling back into `POST /api/inngest` on `apps/api`. If that endpoint is
+unreachable — API down, tunnel dead, Caddy route missing — the cron fires on
+time and fails every time, silently. The same callback drives mail sync,
+classification, hydration and the search index, so when watches expire it is
+usually a symptom that **all** background work has stopped.
+
+### Check the state
+
+```sql
+select email_address, watch_expiration,
+       watch_expiration > now() as watch_alive
+from gmail_tenant_mappings;
+```
+
+### Renew
+
+Registering a watch is an **outbound** call to Google, so this works from
+anywhere with database and Corsair credentials — the machine does not need to
+be publicly reachable:
+
+```bash
+cd packages/services && npx tsx scratch/renew_gmail_watches.ts
+```
+
+It prints the current state, renews every tenant, and reads the new expirations
+back. Safe to re-run; Gmail treats a repeat watch call as an extension. **No
+OAuth flow is involved** — the token comes from Corsair and is refreshed if
+stale, so accounts never need to be disconnected and reconnected.
+
+To renew via the scheduler instead, send the `gmail/watch.renew` event, which
+`gmail-watch-cron` listens for alongside its cron.
+
+### Renewing is not the same as receiving
+
+A live watch only means Google will **push**. Those pushes go to the Pub/Sub
+subscription's endpoint and land on `POST /api/webhook` (`apps/api`). They will
+never reach `localhost`, so in local development new mail does not arrive live
+regardless of watch state — use a tunnel, or read the deployed database.
+
+Note also that the inbox refresh button only invalidates local caches; it does
+not pull from Gmail. `POST /api/gmail/resync` backfills mail already in Gmail.
+
+## Stuck "Building your search index"
+
+The progress bar counts embedded emails. Embedding runs through the Inngest
+chain `initial-sync → hydrate-batch → index-batch`, so a stalled percentage
+means Inngest work is not executing — the same failure as an expired watch, not
+a separate bug. Fix the callback first, then backfill anything the retries
+already gave up on:
+
+```
+POST /api/gmail/generate-embeddings
+```
+
+That runs in-process rather than through Inngest, so it works even while the
+background pipeline is down. `POST /api/gmail/pending-embeddings` reports how
+many remain.
+
+---
+
 # Future Roadmap
 
 ## Agent Workflows

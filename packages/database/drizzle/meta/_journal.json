@@ -232,6 +232,34 @@
       "when": 1785516676727,
       "tag": "0034_big_thing",
       "breakpoints": true
+    },
+    {
+      "idx": 35,
+      "version": "7",
+      "when": 1785606073288,
+      "tag": "0035_blue_kitty_pryde",
+      "breakpoints": true
+    },
+    {
+      "idx": 36,
+      "version": "7",
+      "when": 1785775360922,
+      "tag": "0036_cooing_ted_forrester",
+      "breakpoints": true
+    },
+    {
+      "idx": 37,
+      "version": "7",
+      "when": 1785791851682,
+      "tag": "0037_abnormal_tony_stark",
+      "breakpoints": true
+    },
+    {
+      "idx": 38,
+      "version": "7",
+      "when": 1785797534404,
+      "tag": "0038_tough_mandroid",
+      "breakpoints": true
     }
   ]
 }

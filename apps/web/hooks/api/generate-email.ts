@@ -9,11 +9,26 @@ export interface GenerateEmailContext {
   body?: string;
 }
 
+/**
+ * The calendar invite being attached to this email, when the user has one
+ * switched on. Without it the model writes blind: it invents a time ("today
+ * at 5 PM" when the invite says Tuesday) and asks the recipient to confirm
+ * their availability for a meeting it is simultaneously inviting them to.
+ */
+export interface GenerateEmailMeeting {
+  /** ISO start of the invite as currently configured. */
+  start: string;
+  /** ISO end of the invite. */
+  end: string;
+  location?: string;
+}
+
 export interface GenerateEmailRequest {
   mode: "compose" | "reply" | "forward";
   prompt: string;
   generateSubject?: boolean;
   context?: GenerateEmailContext;
+  meeting?: GenerateEmailMeeting;
 }
 
 export interface GenerateEmailResponse {

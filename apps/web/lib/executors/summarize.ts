@@ -1,6 +1,7 @@
 import type { ToolExecutor } from "@repo/ai";
 import { ToolExecutionError } from "@repo/ai";
 import { getOrCreateSummary, type EmailCandidate } from "@web/lib/summarize/get-or-create-summary";
+import { getActiveThreadMeetings } from "@repo/services/calendar/thread-links";
 
 export interface SummarizeEmailInput {
   entityId?: string;
@@ -30,6 +31,43 @@ export interface SummarizeEmailOutput {
   /** True when `query` matched more than one email — `candidates` lists them so the model can ask which one. */
   ambiguous?: boolean;
   candidates?: EmailCandidate[];
+  /** Meetings already scheduled from this thread, so the assistant can mention them unprompted. */
+  meetings?: Array<{
+    title: string;
+    start: string;
+    end: string;
+    attendees: string[];
+  }>;
+}
+
+/**
+ * The thread's live meetings, as a best-effort attachment to a summary.
+ *
+ * Never allowed to fail the summary: resolving a link can hit the Calendar
+ * API, and "I couldn't read your calendar" is not a reason to withhold the
+ * email digest the user actually asked for.
+ */
+async function loadThreadMeetings(
+  userId: string,
+  threadId: string | undefined,
+): Promise<SummarizeEmailOutput["meetings"]> {
+  if (!threadId) return undefined;
+  try {
+    const meetings = await getActiveThreadMeetings(userId, threadId);
+    if (meetings.length === 0) return undefined;
+    return meetings.map((m) => ({
+      title: m.title,
+      start: m.start,
+      end: m.end,
+      attendees: m.attendees,
+    }));
+  } catch (error) {
+    console.warn("[executor:summarizeEmail] thread meetings lookup failed", {
+      threadId,
+      error: String(error),
+    });
+    return undefined;
+  }
 }
 
 /**
@@ -107,6 +145,7 @@ export class CorsairSummarizeEmailExecutor
           sender: outcome.sender,
           receivedAt: outcome.receivedAt,
           message: outcome.message,
+          meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
         };
       }
 
@@ -134,6 +173,7 @@ export class CorsairSummarizeEmailExecutor
       summary: outcome.digest,
       overview: outcome.summary,
       guardrails: outcome.flags,
+      meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
     };
   }
 }

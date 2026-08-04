@@ -1,0 +1,2 @@
+ALTER TABLE "calendar_events" DROP CONSTRAINT "calendar_events_event_id_unique";--> statement-breakpoint
+CREATE UNIQUE INDEX "calendar_events_user_event_idx" ON "calendar_events" USING btree ("user_id","event_id");

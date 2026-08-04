@@ -1,4 +1,4 @@
-import { pgTable, uuid, text, timestamp, customType } from "drizzle-orm/pg-core";
+import { pgTable, uuid, text, timestamp, customType, index } from "drizzle-orm/pg-core";
 
 /**
  * Custom vector type for pgvector PostgreSQL extension.
@@ -19,22 +19,35 @@ export const vector = customType<{ data: number[]; driverData: string }>({
   },
 });
 
-export const emails = pgTable("emails", {
-  id: uuid("id").primaryKey().defaultRandom(),
-  userId: text("user_id").notNull(),
-  gmailMessageId: text("gmail_message_id").notNull().unique(),
-  threadId: text("thread_id").notNull(),
-  subject: text("subject"),
-  from: text("from"),
-  to: text("to"),
-  snippet: text("snippet"),
-  bodyText: text("body_text"),
-  receivedAt: timestamp("received_at", { withTimezone: true }),
-  embedding: vector("embedding"),
-  lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
-  createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
-  updatedAt: timestamp("updated_at", { withTimezone: true })
-    .notNull()
-    .defaultNow()
-    .$onUpdate(() => new Date()),
-});
+export const emails = pgTable(
+  "emails",
+  {
+    id: uuid("id").primaryKey().defaultRandom(),
+    userId: text("user_id").notNull(),
+    // Gmail's per-mailbox API id. NOT the RFC822 Message-ID header — see
+    // rfc822MessageId below; the two are unrelated and only the latter is
+    // shared between an organiser's and a guest's copy of a message.
+    gmailMessageId: text("gmail_message_id").notNull().unique(),
+    threadId: text("thread_id").notNull(),
+    subject: text("subject"),
+    from: text("from"),
+    to: text("to"),
+    snippet: text("snippet"),
+    bodyText: text("body_text"),
+    receivedAt: timestamp("received_at", { withTimezone: true }),
+    /** Mirrors message_metadata.rfc822MessageId — see the note there. */
+    rfc822MessageId: text("rfc822_message_id"),
+    embedding: vector("embedding"),
+    lastSyncedAt: timestamp("last_synced_at", { withTimezone: true }),
+    createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
+    updatedAt: timestamp("updated_at", { withTimezone: true })
+      .notNull()
+      .defaultNow()
+      .$onUpdate(() => new Date()),
+  },
+  (t) => [
+    // There was no index on thread_id at all, though the table is queried by
+    // (user, thread) on every thread view.
+    index("idx_emails_user_thread").on(t.userId, t.threadId),
+  ],
+);

@@ -30,7 +30,12 @@ import {
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
-import { useCreateEvent } from "@web/hooks/api/calendar";
+import {
+  useCreateEvent,
+  useUpdateEvent,
+  useThreadMeetings,
+  useAcknowledgeThreadMeeting,
+} from "@web/hooks/api/calendar";
 import { TemplatePicker, type MailTemplate } from "@web/components/inbox/template-picker";
 import { AiGeneratePanel } from "@web/components/inbox/ai-generate-panel";
 import {
@@ -45,6 +50,8 @@ import {
   MeetingInviteFields,
   emptyMeetingState,
   meetingStateFromTemplate,
+  meetingStateFromExisting,
+  meetingTimesFor,
   buildEventInput,
   type MeetingState,
 } from "@web/components/inbox/meeting-invite-fields";
@@ -176,6 +183,9 @@ export function InlineReplyBox({
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
+  const { updateEventAsync } = useUpdateEvent();
+  const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
+  const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
   const isFreshForward = mode === "forward" && !draftId;
 
@@ -195,6 +205,18 @@ export function InlineReplyBox({
     kind: "body" | "meeting";
     run: () => void;
   }>(null);
+
+  // Seed the meeting fields from the thread's existing meeting, so scheduling
+  // again moves it rather than creating a second one. Seeded once per event id:
+  // once the user clicks "Create a second meeting instead" (clearing `target`),
+  // a refetch must not quietly put them back into move mode.
+  const seededEventIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!primaryMeeting) return;
+    if (seededEventIdRef.current === primaryMeeting.eventId) return;
+    seededEventIdRef.current = primaryMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
+  }, [primaryMeeting]);
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   // Reply/forward never touch subject (it isn't shown inline).
@@ -226,19 +248,62 @@ export function InlineReplyBox({
   // built before onClose() unmounts this box.
   const fireMeeting = useCallback(
     (attendees: string[]) => {
-      const eventInput = buildEventInput(meetingState, subject, attendees);
-      if (!eventInput) return;
-      const createEvent = () =>
-        createEventAsync(eventInput)
-          .then(() => toast.success("Calendar invite created"))
+      const action = buildEventInput(meetingState, subject, attendees);
+      if (!action) return;
+
+      if (action.kind === "update") {
+        // Title is deliberately dropped when moving. This box has no title
+        // field, so `action.input.title` is just the thread subject — which on
+        // a reply carries a "Re: " prefix. Sending it would rename an existing
+        // "Team sync" to "Re: Team sync" every time someone reschedules it.
+        // Omitting it leaves the event's own title alone (updateEvent only
+        // writes fields that are defined).
+        const moveInput = { ...action.input, title: undefined };
+        const run = () =>
+          updateEventAsync({ id: action.eventId, ...moveInput })
+            .then(() => toast.success("Meeting moved"))
+            .catch(() =>
+              toast.error("Sent, but the meeting couldn't be moved", {
+                action: { label: "Retry", onClick: run },
+              }),
+            );
+        void run();
+        return;
+      }
+
+      const run = () =>
+        createEventAsync({ ...action.input, threadId, entityId })
+          .then((event) => {
+            if (event.linked) {
+              toast.success("Calendar invite created");
+              return;
+            }
+            // Partial success: the event exists, only the link is missing.
+            // Deliberately no Retry — retrying would create a second event,
+            // which is the exact bug this feature exists to prevent. Say what
+            // happened instead, and point at the thing that does exist.
+            toast.warning("Meeting created, but not linked to this thread", {
+              description:
+                "It's on your calendar — scheduling again here will create a second one.",
+              ...(event.htmlLink
+                ? {
+                    action: {
+                      label: "Open",
+                      onClick: () => window.open(event.htmlLink, "_blank"),
+                    },
+                  }
+                : {}),
+            });
+          })
           .catch(() =>
+            // The create itself failed: nothing exists, so Retry is free.
             toast.error("Sent, but the calendar invite couldn't be created", {
-              action: { label: "Retry", onClick: createEvent },
+              action: { label: "Retry", onClick: run },
             }),
           );
-      void createEvent();
+      void run();
     },
-    [meetingState, subject, createEventAsync],
+    [meetingState, subject, threadId, entityId, createEventAsync, updateEventAsync],
   );
 
   const containerRef = useRef<HTMLDivElement>(null);
@@ -411,6 +476,10 @@ export function InlineReplyBox({
             subject: quoted.subject,
             body: quoted.body,
           }}
+          // The invite attached to this reply, so the drafted body states its
+          // real time rather than asking about availability for a slot the
+          // invite already books.
+          meeting={meetingTimesFor(meetingState) ?? undefined}
           onGenerated={applyGenerated}
           disabled={submitting}
         />
@@ -426,7 +495,14 @@ export function InlineReplyBox({
         className="resize-none"
       />
 
-      <MeetingInviteFields value={meetingState} onChange={setMeetingState} disabled={submitting} />
+      <MeetingInviteFields
+        value={meetingState}
+        onChange={setMeetingState}
+        disabled={submitting}
+        existing={primaryMeeting}
+        deletedLink={deletedLink}
+        onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
+      />
 
       {/*
         Reply/Reply All (fresh or resumed-as-draft) get the collapsed

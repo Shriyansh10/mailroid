@@ -15,16 +15,25 @@ import {
 import {
   useGenerateEmail,
   type GenerateEmailContext,
+  type GenerateEmailMeeting,
 } from "@web/hooks/api/generate-email";
 
 export function AiGeneratePanel({
   mode,
   context,
+  meeting,
   onGenerated,
   disabled,
 }: {
   mode: "compose" | "reply" | "forward";
   context?: GenerateEmailContext;
+  /**
+   * The invite currently switched on in the compose surface. Passed so the
+   * draft states the real time rather than inventing one — read at generate
+   * time, so toggling the invite or changing the time before clicking
+   * Generate is always reflected.
+   */
+  meeting?: GenerateEmailMeeting;
   onGenerated: (result: { subject?: string; body: string }) => void;
   disabled?: boolean;
 }) {
@@ -43,6 +52,7 @@ export function AiGeneratePanel({
         prompt: trimmed,
         generateSubject: mode === "compose" ? alsoSubject : undefined,
         context,
+        meeting,
       });
       onGenerated(result);
       setLastPrompt(trimmed);

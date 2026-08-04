@@ -9,7 +9,13 @@ import {
   useSetRead,
   useDraft,
 } from "@web/hooks/api/gmail";
-import { useCreateEvent } from "@web/hooks/api/calendar";
+import {
+  useCreateEvent,
+  useUpdateEvent,
+  useDeleteEvent,
+  useThreadMeetings,
+  useAcknowledgeThreadMeeting,
+} from "@web/hooks/api/calendar";
 import Link from "next/link";
 import { toast } from "sonner";
 import { Button } from "@web/components/ui/button";
@@ -39,6 +45,32 @@ import {
   parseAddressList,
   removeAddresses,
 } from "@web/lib/email-addresses";
+import {
+  emptyMeetingState,
+  meetingStateFromExisting,
+  buildEventInput,
+  type MeetingState,
+} from "@web/components/inbox/meeting-invite-fields";
+import { ThreadMeetingCard } from "@web/components/inbox/thread-meeting-card";
+import {
+  toLocalDateKey,
+  parseLocalDateKey,
+  parseTimeInput,
+  parseDurationInput,
+} from "@web/components/calendar/event-form-utils";
+
+/**
+ * `<input type="time">` needs 24-hour `HH:mm`. MeetingState holds whatever
+ * form the value came in as — "10:00" from this form, but "5:00 PM" when
+ * seeded from an existing meeting — so normalize on the way into the input.
+ */
+function toTimeInputValue(raw: string): string {
+  const minutes = parseTimeInput(raw);
+  if (minutes === null) return "";
+  const hh = String(Math.floor(minutes / 60)).padStart(2, "0");
+  const mm = String(minutes % 60).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
 
 /**
  * Which action opened the inline box, and — separately — whether it's
@@ -69,9 +101,11 @@ export default function ThreadDetailPage() {
 
   const [isScheduling, setIsScheduling] = useState(false);
   const [meetingTitle, setMeetingTitle] = useState("");
-  const [meetingDate, setMeetingDate] = useState("");
-  const [meetingTime, setMeetingTime] = useState("");
-  const [meetingDuration, setMeetingDuration] = useState("60");
+  // Date/time/duration live in the shared MeetingState so this form goes
+  // through the same buildEventInput as the compose surfaces — including its
+  // create-vs-move decision. The dossier chrome below is unchanged; only the
+  // state behind it moved.
+  const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   const [submittingMeeting, setSubmittingMeeting] = useState(false);
 
   const { trashThreadAsync } = useTrashThread();
@@ -169,32 +203,112 @@ export default function ThreadDetailPage() {
       setMeetingTitle(`Discussion: ${thread.subject || "Untitled"}`);
       const tomorrow = new Date();
       tomorrow.setDate(tomorrow.getDate() + 1);
-      setMeetingDate(tomorrow.toISOString().split("T")[0] || "");
-      setMeetingTime("10:00");
+      setMeetingState({
+        ...emptyMeetingState(),
+        enabled: true,
+        date: tomorrow,
+        startTime: "10:00",
+        duration: "60",
+      });
       setIsScheduling(false);
     }
   }, [thread]);
 
   const { createEventAsync } = useCreateEvent();
+  const { updateEventAsync } = useUpdateEvent();
+  const { deleteEventAsync } = useDeleteEvent();
+  const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
+  const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
+
+  // Seed from the thread's existing meeting so "Schedule Meeting" moves it
+  // rather than adding a second one. Once per event id, so an explicit choice
+  // to create another isn't undone by a refetch.
+  const seededEventIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!primaryMeeting) return;
+    if (seededEventIdRef.current === primaryMeeting.eventId) return;
+    seededEventIdRef.current = primaryMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
+  }, [primaryMeeting]);
+
+  // Cancelling from the card. The tRPC delete route already closes the thread
+  // link as CANCELLED, so there is no second call to keep in step.
+  const [isCancellingMeeting, setIsCancellingMeeting] = useState(false);
+  const handleCancelMeeting = async () => {
+    if (!primaryMeeting) return;
+    if (
+      !window.confirm(
+        `Cancel "${primaryMeeting.title}"? Attendees will be notified.`,
+      )
+    ) {
+      return;
+    }
+    setIsCancellingMeeting(true);
+    try {
+      await deleteEventAsync({ id: primaryMeeting.eventId });
+      toast.success("Meeting cancelled", {
+        description: "Attendees have been notified",
+      });
+      // The form may still be open in "move" mode pointing at the event that
+      // no longer exists.
+      setIsScheduling(false);
+      setMeetingState((prev) => ({ ...prev, mode: "create", target: undefined }));
+      seededEventIdRef.current = null;
+    } catch (err: unknown) {
+      toast.error("Couldn't cancel the meeting", {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    } finally {
+      setIsCancellingMeeting(false);
+    }
+  };
 
   const handleConfirmMeeting = async (e: React.FormEvent) => {
     e.preventDefault();
+
+    const action = buildEventInput(
+      { ...meetingState, enabled: true },
+      meetingTitle,
+      senderEmail ? [senderEmail] : [],
+    );
+    if (!action) {
+      toast.error("Check the meeting date, time and duration");
+      return;
+    }
+
+    const description = `Scheduled from Mailroid Dossier: ${thread?.subject || ""}\nSender: ${lastMsg?.from}`;
+
     setSubmittingMeeting(true);
     try {
-      const startDateTime = new Date(`${meetingDate}T${meetingTime}`);
-      const endDateTime = new Date(startDateTime.getTime() + parseInt(meetingDuration, 10) * 60 * 1000);
-
-      await createEventAsync({
-        title: meetingTitle,
-        start: startDateTime.toISOString(),
-        end: endDateTime.toISOString(),
-        description: `Scheduled from Mailroid Dossier: ${thread?.subject || ""}\nSender: ${lastMsg?.from}`,
-        attendees: senderEmail ? [senderEmail] : [],
-      });
-
-      toast.success("Meeting Scheduled", {
-        description: `Successfully scheduled with ${senderEmail}`,
-      });
+      if (action.kind === "update") {
+        await updateEventAsync({
+          id: action.eventId,
+          ...action.input,
+          description,
+        });
+        toast.success("Meeting moved", {
+          description: `Attendees have been notified`,
+        });
+      } else {
+        const event = await createEventAsync({
+          ...action.input,
+          description,
+          threadId,
+          ...(lastMsg?.id ? { entityId: lastMsg.id } : {}),
+        });
+        if (event.linked) {
+          toast.success("Meeting Scheduled", {
+            description: `Successfully scheduled with ${senderEmail}`,
+          });
+        } else {
+          // The event exists; only the link failed. No retry affordance —
+          // retrying would schedule a second meeting.
+          toast.warning("Meeting created, but not linked to this thread", {
+            description:
+              "It's on your calendar — scheduling again here will create a second one.",
+          });
+        }
+      }
       setIsScheduling(false);
     } catch (err: any) {
       console.error(err);
@@ -402,11 +516,16 @@ export default function ThreadDetailPage() {
         <Button
           variant="ghost"
           size="icon"
-          className="size-8"
+          className="size-8 relative"
           onClick={() => setIsScheduling((s) => !s)}
-          title="Schedule Meeting"
+          title={primaryMeeting ? "Move this thread's meeting" : "Schedule Meeting"}
         >
           <CalendarIcon className={cn("size-4", isScheduling ? "text-primary" : "text-muted-foreground")} />
+          {/* Without the dot this icon looks identical whether the thread has
+              a meeting or not, so there was no reason to ever click it. */}
+          {primaryMeeting && (
+            <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
+          )}
         </Button>
         <Button
           variant="ghost"
@@ -422,8 +541,36 @@ export default function ThreadDetailPage() {
       {isScheduling && (
         <form onSubmit={handleConfirmMeeting} className="mb-6 p-4 rounded-xl border bg-card space-y-3">
           <div className="text-[9px] font-mono uppercase tracking-wider text-muted-foreground font-bold">
-            Schedule a meeting
+            {meetingState.mode === "update" && meetingState.target
+              ? "Move this thread's meeting"
+              : "Schedule a meeting"}
           </div>
+
+          {/* The deleted-link warning lives on ThreadMeetingCard above, not
+              here — it is thread state, not form state, and belongs where the
+              user sees it before opening anything. */}
+
+          {meetingState.mode === "update" && meetingState.target && primaryMeeting && (
+            <div className="flex flex-wrap items-center justify-between gap-2 rounded bg-muted/60 px-2 py-1.5 text-[10px]">
+              <span className="text-muted-foreground">
+                Moving the existing meeting — attendees will be notified.
+              </span>
+              <button
+                type="button"
+                className="font-mono uppercase underline underline-offset-2"
+                onClick={() =>
+                  setMeetingState((prev) => ({
+                    ...prev,
+                    mode: "create",
+                    target: undefined,
+                  }))
+                }
+              >
+                Create a second meeting
+              </button>
+            </div>
+          )}
+
           <div className="space-y-1">
             <label className="text-[9px] text-muted-foreground uppercase font-mono">Title</label>
             <Input
@@ -439,8 +586,13 @@ export default function ThreadDetailPage() {
               <label className="text-[9px] text-muted-foreground uppercase font-mono">Date</label>
               <Input
                 type="date"
-                value={meetingDate}
-                onChange={(e) => setMeetingDate(e.target.value)}
+                value={meetingState.date ? toLocalDateKey(meetingState.date) : ""}
+                onChange={(e) =>
+                  setMeetingState((prev) => ({
+                    ...prev,
+                    date: parseLocalDateKey(e.target.value) ?? undefined,
+                  }))
+                }
                 className="h-8 text-xs font-mono px-2 bg-transparent"
                 required
               />
@@ -449,8 +601,10 @@ export default function ThreadDetailPage() {
               <label className="text-[9px] text-muted-foreground uppercase font-mono">Time</label>
               <Input
                 type="time"
-                value={meetingTime}
-                onChange={(e) => setMeetingTime(e.target.value)}
+                value={toTimeInputValue(meetingState.startTime)}
+                onChange={(e) =>
+                  setMeetingState((prev) => ({ ...prev, startTime: e.target.value }))
+                }
                 className="h-8 text-xs font-mono px-2 bg-transparent"
                 required
               />
@@ -459,8 +613,10 @@ export default function ThreadDetailPage() {
           <div className="space-y-1">
             <label className="text-[9px] text-muted-foreground uppercase font-mono">Duration</label>
             <select
-              value={meetingDuration}
-              onChange={(e) => setMeetingDuration(e.target.value)}
+              value={String(parseDurationInput(meetingState.duration) ?? 60)}
+              onChange={(e) =>
+                setMeetingState((prev) => ({ ...prev, duration: e.target.value }))
+              }
               className="w-full h-8 bg-transparent border border-input rounded px-2 text-xs font-mono outline-none"
             >
               <option value="30">30m</option>
@@ -480,13 +636,33 @@ export default function ThreadDetailPage() {
               Cancel
             </Button>
             <Button size="sm" type="submit" disabled={submittingMeeting} className="h-7 text-[10px] font-mono uppercase">
-              {submittingMeeting ? "Saving..." : "Confirm"}
+              {submittingMeeting
+                ? "Saving..."
+                : meetingState.mode === "update" && meetingState.target
+                  ? "Move"
+                  : "Confirm"}
             </Button>
           </div>
         </form>
       )}
 
       <div className="space-y-6">
+        {/* The thread's meeting, if it has one. Rendered before the summary so
+            "this mail has a meeting attached" is the first thing seen — the
+            link existed for a while before anything displayed it, which meant
+            the only way to discover a meeting was to click an unlabelled
+            calendar icon and hope. */}
+        {(primaryMeeting || deletedLink) && (
+          <ThreadMeetingCard
+            meeting={primaryMeeting}
+            deletedLink={deletedLink}
+            busy={submittingMeeting || isCancellingMeeting}
+            onReschedule={() => setIsScheduling(true)}
+            onCancel={handleCancelMeeting}
+            onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
+          />
+        )}
+
         {/* On-demand AI summary. Previously this card rendered priorityReason
             (a classification rationale) or, failing that, the raw Gmail
             snippet — neither of which was a summary, and the snippet leaked

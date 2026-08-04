@@ -250,6 +250,12 @@ export async function updateEvent(
   const raw = await tenant.googlecalendar.api.events.update({
     id: eventId,
     event: eventPayload as Parameters<typeof tenant.googlecalendar.api.events.update>[0]["event"],
+    // Tell the attendees. Rescheduling from a mail thread is otherwise
+    // invisible to everyone but the organizer — the event quietly moves and
+    // the guests keep the old time. Deliberately NOT set on createEvent: the
+    // plugin's eventsCreate schema declares sendUpdates but its implementation
+    // builds the POST with no query string, so it would be dead code there.
+    sendUpdates: "all",
   });
 
   return normalizeEvent(raw as unknown as RawEvent);
@@ -264,5 +270,9 @@ export async function deleteEvent(
 ): Promise<void> {
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.googlecalendar.api.events.delete({ id: eventId });
+  // Send the cancellation to attendees — see the note in updateEvent.
+  await tenant.googlecalendar.api.events.delete({
+    id: eventId,
+    sendUpdates: "all",
+  });
 }

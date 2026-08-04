@@ -38,6 +38,15 @@ const GenerateEmailRequestSchema = z.object({
       body: z.string().optional(),
     })
     .optional(),
+  // The invite being attached alongside this email, so the body can state the
+  // real time instead of inventing one and hedging about availability.
+  meeting: z
+    .object({
+      start: z.string(),
+      end: z.string(),
+      location: z.string().optional(),
+    })
+    .optional(),
 });
 
 export async function POST(request: Request) {
@@ -139,6 +148,8 @@ export async function POST(request: Request) {
         prompt: input.prompt,
         generateSubject: input.generateSubject,
         context: input.context,
+        meeting: input.meeting,
+        timeZone: userTimeZone,
       }),
     );
 

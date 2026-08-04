@@ -1,11 +1,12 @@
 "use client";
 
-import { CalendarClockIcon } from "lucide-react";
+import { AlertTriangleIcon, CalendarClockIcon, RotateCcwIcon } from "lucide-react";
 
 import { Switch } from "@web/components/ui/switch";
 import { Label } from "@web/components/ui/label";
 import { Input } from "@web/components/ui/input";
 import { Textarea } from "@web/components/ui/textarea";
+import { Button } from "@web/components/ui/button";
 import { DateTimeFields } from "@web/components/calendar/DateTimeFields";
 import {
   parseTimeInput,
@@ -13,7 +14,28 @@ import {
   combineDateAndTime,
   formatTimeOfDay,
   formatDuration,
+  formatMeetingWindow,
+  formatMeetingStart,
 } from "@web/components/calendar/event-form-utils";
+
+// ── Thread meeting shapes (mirror the tRPC output) ────────────────────
+
+export interface ThreadMeeting {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  start: string;
+  end: string;
+  attendees: string[];
+  htmlLink?: string;
+}
+
+export interface ThreadMeetingRef {
+  eventId: string;
+  calendarId: string;
+  title: string;
+  start: string;
+}
 
 // ── Meeting state ─────────────────────────────────────────────────────
 
@@ -26,6 +48,15 @@ export interface MeetingState {
   duration: string;
   location: string;
   description: string;
+  /**
+   * Whether sending moves the thread's existing meeting or creates another.
+   * Defaults to "update" the moment a live meeting is found, so the common
+   * case — "let's push it to 6" — costs zero clicks. The escape hatch is a
+   * visible link, not a question asked every time.
+   */
+  mode: "create" | "update";
+  /** The event `mode: "update"` will move. Set alongside mode. */
+  target?: { calendarId: string; eventId: string };
 }
 
 /** The event input shape accepted by useCreateEvent().createEventAsync. */
@@ -37,6 +68,20 @@ export interface MeetingEventInput {
   location?: string;
   attendees?: string[];
 }
+
+/**
+ * What the caller should do with the meeting fields. Discriminated so a caller
+ * can't accidentally create when it meant to move — the eventId only exists on
+ * the update branch.
+ */
+export type MeetingAction =
+  | { kind: "create"; input: MeetingEventInput }
+  | {
+      kind: "update";
+      calendarId: string;
+      eventId: string;
+      input: MeetingEventInput;
+    };
 
 function nextHour(): { date: Date; startTime: string } {
   const now = new Date();
@@ -54,6 +99,33 @@ export function emptyMeetingState(): MeetingState {
     duration: formatDuration(60),
     location: "",
     description: "",
+    mode: "create",
+  };
+}
+
+/**
+ * Seed the fields from an existing meeting so the user edits the real thing
+ * rather than re-entering it. Keeps `enabled` from the current state — finding
+ * a meeting shouldn't switch the invite on by itself.
+ */
+export function meetingStateFromExisting(
+  base: MeetingState,
+  meeting: ThreadMeeting,
+): MeetingState {
+  const start = new Date(meeting.start);
+  const end = new Date(meeting.end);
+  const durationMinutes = Math.max(
+    1,
+    Math.round((end.getTime() - start.getTime()) / 60_000),
+  );
+
+  return {
+    ...base,
+    date: start,
+    startTime: formatTimeOfDay(start.getHours() * 60 + start.getMinutes()),
+    duration: formatDuration(durationMinutes),
+    mode: "update",
+    target: { calendarId: meeting.calendarId, eventId: meeting.eventId },
   };
 }
 
@@ -76,15 +148,43 @@ export function meetingStateFromTemplate(t: {
 }
 
 /**
- * Build the calendar event input from the current state, or null if the
- * meeting is disabled or the date/time/duration don't parse. Pure — the
- * caller supplies the title and attendees it owns.
+ * The invite's resolved start/end, or null when it is off or unparseable.
+ *
+ * Exists so the AI draft can be told what it is inviting people to. Without
+ * it the generated body invents a time and asks the recipient to confirm
+ * availability for a slot the attached invite is already booking.
+ */
+export function meetingTimesFor(
+  state: MeetingState,
+): { start: string; end: string; location?: string } | null {
+  if (!state.enabled || !state.date) return null;
+  const minutesOfDay = parseTimeInput(state.startTime);
+  const durationMinutes = parseDurationInput(state.duration);
+  if (minutesOfDay === null || durationMinutes === null) return null;
+
+  const start = combineDateAndTime(state.date, minutesOfDay);
+  const end = new Date(start.getTime() + durationMinutes * 60_000);
+  return {
+    start: start.toISOString(),
+    end: end.toISOString(),
+    ...(state.location.trim() ? { location: state.location.trim() } : {}),
+  };
+}
+
+/**
+ * Build the calendar action from the current state, or null if the meeting is
+ * disabled or the date/time/duration don't parse. Pure — the caller supplies
+ * the title and attendees it owns.
+ *
+ * Returns a discriminated action rather than a bare input: when the thread
+ * already has a meeting the correct behaviour is to *move* it, and a caller
+ * that can only see an input would have no way to express that.
  */
 export function buildEventInput(
   state: MeetingState,
   title: string,
   attendees: string[],
-): MeetingEventInput | null {
+): MeetingAction | null {
   if (!state.enabled || !state.date) return null;
   const minutesOfDay = parseTimeInput(state.startTime);
   const durationMinutes = parseDurationInput(state.duration);
@@ -93,7 +193,7 @@ export function buildEventInput(
   const start = combineDateAndTime(state.date, minutesOfDay);
   const end = new Date(start.getTime() + durationMinutes * 60_000);
 
-  return {
+  const input: MeetingEventInput = {
     title: title.trim() || "Meeting",
     start: start.toISOString(),
     end: end.toISOString(),
@@ -101,7 +201,18 @@ export function buildEventInput(
     ...(state.location.trim() ? { location: state.location.trim() } : {}),
     ...(attendees.length > 0 ? { attendees } : {}),
   };
+
+  if (state.mode === "update" && state.target) {
+    return {
+      kind: "update",
+      calendarId: state.target.calendarId,
+      eventId: state.target.eventId,
+      input,
+    };
+  }
+  return { kind: "create", input };
 }
+
 
 // ── Component ─────────────────────────────────────────────────────────
 
@@ -109,19 +220,82 @@ export function MeetingInviteFields({
   value,
   onChange,
   disabled,
+  existing,
+  deletedLink,
+  onAcknowledgeDeleted,
 }: {
   value: MeetingState;
   onChange: (next: MeetingState) => void;
   disabled?: boolean;
+  /** The thread's current meeting, if it has one. Drives the "moving" banner. */
+  existing?: ThreadMeeting | null;
+  /**
+   * A meeting scheduled from this thread that has since been deleted in
+   * Google and not yet dismissed. Persistent state, not a one-shot flag.
+   */
+  deletedLink?: ThreadMeetingRef | null;
+  /** Dismiss the deleted-meeting warning. */
+  onAcknowledgeDeleted?: (eventId: string) => void;
 }) {
   const set = (patch: Partial<MeetingState>) => onChange({ ...value, ...patch });
+
+  const isMoving = value.mode === "update" && !!value.target;
+
+  // A vanished meeting is never silently recreated: with no update target, the
+  // only safe default is to say so and let the user decide. Recreating on its
+  // own would fire a fresh invite at every attendee of a meeting somebody
+  // deliberately (or accidentally) deleted.
+  if (deletedLink) {
+    return (
+      <div className="rounded-lg border border-destructive/50 bg-destructive/5 p-3 flex flex-col gap-3">
+        <div className="flex items-start gap-2">
+          <AlertTriangleIcon className="size-4 mt-0.5 shrink-0 text-destructive" />
+          <div className="text-sm">
+            <p className="font-medium">
+              The meeting previously scheduled from this thread no longer exists
+            </p>
+            <p className="text-muted-foreground">
+              {deletedLink.title}
+              {formatMeetingStart(deletedLink.start)
+                ? ` — was ${formatMeetingStart(deletedLink.start)}`
+                : ""}
+              . It was deleted in Google Calendar.
+            </p>
+          </div>
+        </div>
+        <div className="flex items-center gap-2 justify-end">
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            disabled={disabled}
+            onClick={() => onAcknowledgeDeleted?.(deletedLink.eventId)}
+          >
+            Dismiss
+          </Button>
+          <Button
+            type="button"
+            variant="outline"
+            size="sm"
+            disabled={disabled}
+            onClick={() => {
+              onAcknowledgeDeleted?.(deletedLink.eventId);
+              set({ enabled: true, mode: "create", target: undefined });
+            }}
+          >
+            Schedule a new one
+          </Button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="rounded-lg border p-3 flex flex-col gap-3">
       <div className="flex items-center justify-between">
         <Label className="flex items-center gap-2 font-normal">
           <CalendarClockIcon className="size-4" />
-          Add a calendar invite
+          {isMoving ? "Move the calendar invite" : "Add a calendar invite"}
         </Label>
         <Switch
           checked={value.enabled}
@@ -129,6 +303,24 @@ export function MeetingInviteFields({
           disabled={disabled}
         />
       </div>
+
+      {value.enabled && isMoving && existing && (
+        <div className="flex flex-wrap items-center justify-between gap-2 rounded-md bg-muted/60 px-2.5 py-2 text-xs">
+          <span className="flex items-center gap-1.5 text-muted-foreground">
+            <RotateCcwIcon className="size-3.5 shrink-0" />
+            Moving this thread&apos;s meeting — was{" "}
+            {formatMeetingWindow(existing.start, existing.end)}
+          </span>
+          <button
+            type="button"
+            className="underline underline-offset-2 hover:text-foreground disabled:opacity-50"
+            disabled={disabled}
+            onClick={() => set({ mode: "create", target: undefined })}
+          >
+            Create a second meeting instead
+          </button>
+        </div>
+      )}
 
       {value.enabled && (
         <div className="flex flex-col gap-3">
