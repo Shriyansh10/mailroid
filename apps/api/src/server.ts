@@ -63,41 +63,6 @@ app.use("/api/auth/gmail-callback", gmailOAuthRouter);
 app.use("/api/auth/calendar-callback", calendarOAuthRouter);
 app.use("/api/auth", authHandler);
 
-// Inngest, mounted here for EXACTLY the same reason as the auth routes above:
-// it verifies an HMAC over the RAW request bytes. Behind express.json() the
-// body is parsed to an object and has to be re-serialised, which does not
-// reproduce the original bytes, so every signature check fails with
-// "Signature validation failed / Invalid signature" even though the signing key
-// is correct.
-//
-// Symptom when this is wrong: Inngest Cloud reaches the server and is rejected
-// continuously, so NO cron or event function ever runs — watch renewal,
-// cooldown resume, classification, hydration and embeddings all stop silently
-// while ordinary mail delivery keeps working (the webhook path runs inline in
-// Express and never touches Inngest). Verified in production: 55 rejections in
-// the 3 hours after a deploy, with INNGEST_SIGNING_KEY byte-identical to the
-// dashboard's current key.
-//
-// DO NOT move this below express.json().
-app.use(
-  "/api/inngest",
-  serve({
-    client: inngest,
-    functions: [
-      gmailWatchCron,
-      calendarWatchCron,
-      emailPriority,
-      gmailInitialSync,
-      classificationBatch,
-      hydrateBatch,
-      indexBatch,
-      reconciliationCron,
-      gmailCooldownResumeCron,
-      gmailWebhookSync,
-    ],
-  })
-);
-
 app.use(express.json());
 
 // Paths that stay up during whole-app maintenance. Each one is here for a
@@ -108,11 +73,10 @@ const MAINTENANCE_EXEMPT = [
   // is what caused a 7-hour outage once already. The handler's own pause check
   // short-circuits the work and acks; blocking the route here would not.
   "/api/webhook",
-  // Belt and braces only — /api/inngest is now mounted ABOVE this middleware
-  // (it needs the raw body), so it never reaches here. Kept so the exemption
-  // survives if the mount order is ever revisited: Inngest Cloud introspects
-  // and PUTs to this endpoint, and blocking it risks the app being
-  // deregistered, which outlives the maintenance window.
+  // Load-bearing: /api/inngest is mounted below this middleware (it needs
+  // express.json() to have run), so without this exemption maintenance mode
+  // would 503 Inngest Cloud's introspection and PUT requests, risking the app
+  // being deregistered — an outcome that outlives the maintenance window.
   "/api/inngest",
   // Liveness, and the alarm for expired Google watches. Maintenance must not
   // also blind the thing that tells you the system is broken.
@@ -125,11 +89,10 @@ const MAINTENANCE_EXEMPT = [
  * Whole-app maintenance gate.
  *
  * Mounted after express.json() and before every route that does real work.
- * Auth/OAuth and Inngest are mounted earlier (they need raw bodies) and so sit
- * outside this gate entirely — which is correct in both cases: cutting an
+ * Auth/OAuth routes are mounted earlier (they need the raw, undrained stream)
+ * and so sit outside this gate entirely — which is correct: cutting an
  * in-flight Google OAuth callback mid-handshake leaves the user in a broken
- * half-linked state that outlasts the maintenance window, and blocking Inngest
- * risks deregistering the app.
+ * half-linked state that outlasts the maintenance window.
  *
  * Fails OPEN. If the flag cannot be read, the app keeps serving — a database
  * blip must not be able to take the whole product down on its own.
@@ -246,6 +209,34 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/calendar", calendarWatchRouter);
+
+// Inngest serve endpoint.
+//
+// MUST stay AFTER express.json(). Inngest's Express adapter reads `req.body`
+// and canonicalises it for signature verification — it does not read the raw
+// stream. Mounting it before the body parser was tried and produces
+// "[Inngest] error - Missing body when executing, possibly due to missing
+// request body middleware", which fails just as hard as a bad signature but is
+// harder to recognise. This is the opposite of better-auth above; the two have
+// genuinely different requirements, so don't "make them consistent".
+app.use(
+  "/api/inngest",
+  serve({
+    client: inngest,
+    functions: [
+      gmailWatchCron,
+      calendarWatchCron,
+      emailPriority,
+      gmailInitialSync,
+      classificationBatch,
+      hydrateBatch,
+      indexBatch,
+      reconciliationCron,
+      gmailCooldownResumeCron,
+      gmailWebhookSync,
+    ],
+  })
+);
 
 logger.debug(`openapi.json: ${env.BASE_URL}/openapi.json`);
 app.get("/openapi.json", (req, res) => {
