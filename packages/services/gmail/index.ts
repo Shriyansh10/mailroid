@@ -296,7 +296,7 @@ export async function getThreads(
         pageToken: opts?.pageToken,
         labelIds: ["INBOX"],
       }),
-    { tenantId },
+    { tenantId, trigger: "ui" },
   );
   logger.info("[GMAIL] threads.list (getThreads)", {
     tenantId, threadCount: (result.threads ?? []).length,
@@ -319,7 +319,7 @@ export async function getThreads(
             id: t.id!,
             format: "metadata",
           }),
-        { tenantId },
+        { tenantId, trigger: "ui" },
       )
     )
   );
@@ -375,7 +375,7 @@ export async function getThread(
           id: threadId,
           format: "full",
         }),
-      { tenantId },
+      { tenantId, trigger: "ui" },
     );
     logger.info("[GMAIL] threads.get (getThread)", {
       tenantId, threadId, durationMs: Date.now() - gmailStart,
@@ -919,7 +919,7 @@ export async function searchEmails(
         maxResults: opts?.maxResults ?? 20,
         pageToken: opts?.pageToken,
       }),
-    { tenantId },
+    { tenantId, trigger: "ui" },
   );
   logger.info("[GMAIL] threads.list (searchEmails)", {
     tenantId, query: searchQuery,
@@ -942,7 +942,7 @@ export async function searchEmails(
             id: t.id!,
             format: "metadata",
           }),
-        { tenantId },
+        { tenantId, trigger: "ui" },
       )
     )
   );
@@ -1052,7 +1052,7 @@ export async function ingestMessage(
     msg = await withGmailRetry<unknown>(
       `messages.get ${messageId}`,
       () => tenant.gmail.api.messages.get({ id: messageId, format: "full" }),
-      { tenantId },
+      { tenantId, trigger: source },
     );
   } catch (err) {
     if (isMessageGone(err)) {

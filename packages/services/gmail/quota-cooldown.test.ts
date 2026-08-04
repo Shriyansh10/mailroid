@@ -21,6 +21,7 @@ import {
   isGmailUnavailable,
   extractRetryAfter,
   defaultCooldownUntil,
+  escalatedCooldownUntil,
 } from "./quota-cooldown.ts";
 
 /** The real corsair ApiError shape, copied from production logs. */
@@ -144,4 +145,61 @@ test("an unusual wording around a valid instant is still parsed", () => {
 
 test("the default window is five minutes out", () => {
   assert.equal(defaultCooldownUntil(NOW).toISOString(), "2026-08-04T04:03:00.000Z");
+});
+
+// -------------------------------------------------------------- escalation
+//
+// Why this exists: trusting each fresh 429's Retry-After independently means
+// that when Google's real block outlasts a single window, every resume
+// attempt lands on the boundary, gets refused, and believes the NEXT window —
+// forever. Seen in prod as one renewal roughly every 15 minutes for over an
+// hour on one mailbox. escalatedCooldownUntil widens the window on each
+// consecutive failed resumption so the probe interval stops being one already
+// proven insufficient.
+//
+// NOTE: the "reset to 0 on the first Gmail success" invariant is enforced by
+// markGmailHealthy (packages/services/gmail/quota-cooldown.ts), which is
+// DB-backed — this suite is pure-functions-only (see file docblock), so that
+// half of the invariant is not exercised here. What IS verified below is the
+// half escalatedCooldownUntil is actually responsible for: that it never
+// carries any state of its own — passing failures=0 always reproduces
+// Google's raw window, regardless of how many failures preceded it. Correct
+// behavior of the whole invariant depends on the DB layer actually passing 0
+// after a reset, which this function has no way to get wrong.
+
+const GOOGLE_15_MIN = new Date(NOW.getTime() + 15 * 60_000);
+
+test("zero consecutive failures returns Google's instant verbatim", () => {
+  assert.equal(escalatedCooldownUntil(GOOGLE_15_MIN, 0, NOW).toISOString(), GOOGLE_15_MIN.toISOString());
+});
+
+test("the escalation ladder doubles per consecutive failure: 15 -> 30 -> 60", () => {
+  assert.equal(
+    escalatedCooldownUntil(GOOGLE_15_MIN, 1, NOW).toISOString(),
+    "2026-08-04T04:28:00.000Z", // 30 min out
+  );
+  assert.equal(
+    escalatedCooldownUntil(GOOGLE_15_MIN, 2, NOW).toISOString(),
+    "2026-08-04T04:58:00.000Z", // 60 min out — clamp already binding here (15*4=60)
+  );
+});
+
+test("the ladder holds at the 60 minute ceiling for any higher failure count", () => {
+  const at3 = escalatedCooldownUntil(GOOGLE_15_MIN, 3, NOW);
+  const at10 = escalatedCooldownUntil(GOOGLE_15_MIN, 10, NOW);
+  assert.equal(at3.toISOString(), "2026-08-04T04:58:00.000Z");
+  assert.equal(at10.toISOString(), "2026-08-04T04:58:00.000Z", "must never exceed MAX_COOLDOWN_MS regardless of failure count");
+});
+
+test("a Google instant longer than the escalated floor still wins — never accidentally shortened", () => {
+  // failures=0 means the escalated floor equals Google's own window exactly,
+  // so this also guards against a future refactor collapsing the max() into
+  // something that could shrink a legitimate, conservative Google answer.
+  const google50min = new Date(NOW.getTime() + 50 * 60_000);
+  assert.equal(escalatedCooldownUntil(google50min, 0, NOW).toISOString(), google50min.toISOString());
+});
+
+test("a Google instant in the past yields a zero-length base window rather than throwing", () => {
+  const pastInstant = new Date(NOW.getTime() - 60_000);
+  assert.equal(escalatedCooldownUntil(pastInstant, 0, NOW).toISOString(), NOW.toISOString());
 });

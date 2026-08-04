@@ -321,6 +321,7 @@ export async function syncCategoryPage(
           : { labelIds: ["INBOX"] }),
       pageToken,
     }),
+    { tenantId: userId, trigger: "sync" },
   );
 
   const detailed = await mapWithConcurrency(
@@ -332,6 +333,7 @@ export async function syncCategoryPage(
           id: t.id,
           format: "metadata",
         }),
+        { tenantId: userId, trigger: "sync" },
       ),
   );
 

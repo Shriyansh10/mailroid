@@ -1,13 +1,9 @@
 import { inngest } from "@repo/inngest";
-import { corsair } from "@repo/corsair";
 import { db, eq, and, lt, sql } from "@repo/database";
 import { gmailSyncStatus } from "@repo/database/models/gmail-sync-status";
-import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
-
-import { clearCooldown, recordQuotaError } from "./quota-cooldown.ts";
 
 const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
 
@@ -16,10 +12,22 @@ const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
  * (classification-batch.ts) self-chain via a single continuation event. If
  * that event is ever lost — an Inngest outage, a bug, a dropped delivery —
  * the job sits at 'running' forever: a frozen progress bar with nothing left
- * to restart it. This runs every 15 minutes and re-kicks anything that's
+ * to restart it. This runs once a day and re-kicks anything that's
  * been 'running' without a progress update for longer than
  * STALE_THRESHOLD_MS, resuming from the exact DB checkpoint (sync's stored
  * cursor / classification's PENDING rows) rather than from scratch.
+ *
+ * Was every 15 minutes; dropped to daily because the cooldown-resume probe
+ * that used to live in this same function (a live Gmail call) was itself
+ * re-triggering 429s on a mailbox whose underlying Google-side block
+ * outlasted a single Retry-After window — each 15-minute probe renewed the
+ * block by another 15 minutes, the same feedback loop this mechanism exists
+ * to avoid, just on a slower cadence. That probe now lives in its own hourly
+ * function (cooldown-resume-cron.ts), matching the 60-minute escalation cap
+ * in quota-cooldown.ts, so a quiet recovering mailbox isn't gated on this
+ * daily sweep. A stuck sync/job is rare enough that a daily sweep is still a
+ * same-day fix; a real webhook still resumes a mailbox immediately once
+ * Gmail actually clears it, independent of either cron.
  *
  * Deliberately does NOT touch rows already 'failed' — those are terminal
  * (Inngest's own retries were exhausted and onFailure already ran). Only a
@@ -31,7 +39,7 @@ const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
  */
 export const reconciliationCron = inngest.createFunction(
   { id: "reconciliation-cron" },
-  [{ cron: "*/15 * * * *" }, { event: "reconciliation/run" }],
+  [{ cron: "0 0 * * *" }, { event: "reconciliation/run" }],
   async ({ step }) => {
     const staleBefore = new Date(Date.now() - STALE_THRESHOLD_MS);
 
@@ -121,89 +129,10 @@ export const reconciliationCron = inngest.createFunction(
       logger.warn("[RECONCILE] re-kicked stalled hydration", { userId: row.userId });
     }
 
-    // A webhook that arrived during a Gmail quota cooldown was acked with 200
-    // and never processed (see webhook-handler.ts). The cursor didn't move, so
-    // nothing is lost — but nothing re-reads it either. Waiting for the next
-    // inbound email would leave recovery hostage to whether someone happens to
-    // write to that mailbox, which for a quiet mailbox could be days.
-    //
-    // So once the window passes, we re-trigger the diff ourselves: ask Gmail
-    // for the mailbox's current historyId (users.getProfile, 1 quota unit) and
-    // emit the same notification the webhook would have.
-    const expiredCooldowns = await step.run("find-expired-cooldowns", () =>
-      db
-        .select({
-          tenantId: gmailTenantMappings.tenantId,
-          emailAddress: gmailTenantMappings.emailAddress,
-          until: gmailTenantMappings.quotaCooldownUntil,
-        })
-        .from(gmailTenantMappings)
-        .where(lt(gmailTenantMappings.quotaCooldownUntil, new Date())),
-    );
-
-    for (const row of expiredCooldowns) {
-      await step.run(`resume-after-cooldown-${row.tenantId}`, async () => {
-        // Mailboxes throttled by one underlying event get handed similar
-        // Retry-After values, so their windows expire together — and this cron
-        // would then fire every resume in a single burst, which is a smaller
-        // version of the traffic spike that caused the outage. Spread them.
-        await new Promise((r) => setTimeout(r, Math.random() * 60_000));
-
-        const tenant = corsair.withTenant(row.tenantId);
-        const accessToken = await tenant.gmail.keys.get_access_token();
-        const response = await fetch(
-          "https://gmail.googleapis.com/gmail/v1/users/me/profile",
-          { headers: { Authorization: `Bearer ${accessToken}` } },
-        );
-
-        if (!response.ok) {
-          // Most likely still throttled and Google extended the window. Leave
-          // the row alone; the next tick tries again.
-          const text = await response.text();
-          logger.warn("[RECONCILE] cooldown resume probe failed", {
-            tenantId: row.tenantId, status: response.status, body: text.slice(0, 200),
-          });
-          if (response.status === 429) {
-            await recordQuotaError(row.tenantId, { status: 429, body: safeJson(text) });
-          }
-          return { resumed: false };
-        }
-
-        const profile = (await response.json()) as { historyId?: string };
-
-        // Clear before emitting: the notification path checks the cooldown and
-        // would otherwise ack-and-drop the very diff we're trying to resume.
-        await clearCooldown(row.tenantId);
-
-        if (profile.historyId) {
-          await inngest.send({
-            name: "gmail/webhook.notification",
-            data: { tenantId: row.tenantId, incomingHistoryId: profile.historyId },
-          });
-        }
-
-        logger.info("[RECONCILE] resumed mailbox after quota cooldown", {
-          tenantId: row.tenantId,
-          emailAddress: row.emailAddress,
-          historyId: profile.historyId,
-        });
-        return { resumed: true };
-      });
-    }
-
     return {
       stalledSyncs: stalledSyncs.length,
       stalledJobs: stalledJobs.length,
       stalledHydrations: stalledHydrations.length,
-      cooldownsResumed: expiredCooldowns.length,
     };
   },
 );
-
-function safeJson(text: string): unknown {
-  try {
-    return JSON.parse(text);
-  } catch {
-    return undefined;
-  }
-}

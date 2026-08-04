@@ -1,0 +1,2 @@
+ALTER TABLE "gmail_tenant_mappings" ADD COLUMN "quota_resume_failures" integer DEFAULT 0 NOT NULL;--> statement-breakpoint
+ALTER TABLE "gmail_tenant_mappings" ADD COLUMN "quota_cooldown_started_at" timestamp with time zone;

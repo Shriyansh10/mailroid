@@ -6,7 +6,7 @@ import { logger } from "@repo/logger";
 
 import { generateMissingEmbeddings, ingestMessage } from "./index.ts";
 import { triggerGmailSync } from "./sync-metadata.ts";
-import { assertNotCoolingDown, isQuotaError, recordQuotaError } from "./quota-cooldown.ts";
+import { assertNotCoolingDown, isQuotaError, markGmailHealthy, recordQuotaError } from "./quota-cooldown.ts";
 
 /**
  * Gmail historyIds are monotonically increasing uint64 values delivered as
@@ -184,7 +184,11 @@ export async function syncHistoryForTenant(
   // history fetch re-arming the window. Nothing is lost by stopping here: the
   // cursor has not advanced, so the same diff is re-fetched once the window
   // passes (either on the next notification or via the reconciliation sweep).
-  await assertNotCoolingDown(tenantId, "syncHistoryForTenant");
+  await assertNotCoolingDown(tenantId, {
+    trigger: "webhook",
+    operation: "syncHistoryForTenant",
+    targetId: incomingHistoryId,
+  });
 
   const lastHistoryId = mapping.lastHistoryId;
 
@@ -282,7 +286,13 @@ export async function syncHistoryForTenant(
       // Record before throwing: the throw unwinds into a fire-and-forget
       // .catch() on the legacy path, so this is the last place that knows both
       // the tenant and the window.
-      if (isQuotaError(err)) await recordQuotaError(tenantId, err);
+      if (isQuotaError(err)) {
+        await recordQuotaError(tenantId, err, {
+          trigger: "webhook",
+          operation: "syncHistoryForTenant",
+          targetId: incomingHistoryId,
+        });
+      }
       throw err;
     }
 
@@ -372,6 +382,17 @@ export async function syncHistoryForTenant(
     .update(gmailTenantMappings)
     .set({ lastHistoryId: incomingHistoryId })
     .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
+
+  // A fully ingested diff is the strongest proof of health there is — reset
+  // any escalated backoff now rather than waiting for the next resume probe.
+  // Memo-gated inside markGmailHealthy, so this is a no-op write for the
+  // overwhelming common case of a mailbox that was never in trouble.
+  await markGmailHealthy(tenantId, {
+    trigger: "webhook",
+    operation: "syncHistoryForTenant",
+    targetId: incomingHistoryId,
+    recoveredBy: "cursor-advanced",
+  });
 
   // Embeddings for the whole diff at once, after the cursor advance. Deliberately
   // NOT awaited: embeddings are best-effort enrichment, and this runs inside an

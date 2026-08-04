@@ -3,6 +3,7 @@ import { logger } from "@repo/logger";
 import {
   assertNotCoolingDown,
   isQuotaError,
+  markGmailHealthy,
   recordQuotaError,
 } from "./quota-cooldown.ts";
 
@@ -22,12 +23,27 @@ import {
  *
  * So a 429 records a cooldown (quota-cooldown.ts) and throws immediately. The
  * retry happens later, once the window has actually passed, driven by the next
- * webhook or the reconciliation sweep. 5xx and transport errors are genuinely
+ * webhook or the cooldown-resume cron. 5xx and transport errors are genuinely
  * transient and keep the exponential backoff.
  *
  * Pass `tenantId` wherever it's known: it enables the pre-flight check that
- * skips the call entirely while a mailbox is cooling down.
+ * skips the call entirely while a mailbox is cooling down, and the success
+ * path that resets the escalation counter (markGmailHealthy) once Gmail
+ * actually answers again.
  */
+
+/**
+ * `label` is `"<operation> <targetId>"` by convention (e.g.
+ * `"threads.get 19fc9552b8292ff4"`), or just `"<operation>"` when there's no
+ * single target (e.g. `"syncHistoryForTenant"`). Split once so cooldown logs
+ * carry structured `operation`/`targetId` fields instead of one opaque string.
+ */
+function parseLabel(label: string): { operation: string; targetId?: string } {
+  const spaceIdx = label.indexOf(" ");
+  if (spaceIdx === -1) return { operation: label };
+  return { operation: label.slice(0, spaceIdx), targetId: label.slice(spaceIdx + 1) };
+}
+
 export async function withGmailRetry<T>(
   label: string,
   fn: () => Promise<T>,
@@ -35,34 +51,56 @@ export async function withGmailRetry<T>(
     retries = 4,
     baseDelayMs = 500,
     tenantId,
+    trigger = "unknown",
     hooks,
   }: {
     retries?: number;
     baseDelayMs?: number;
     tenantId?: string;
-    /** Test seam: lets retry.test.ts run without a database. */
+    /** What caused this call: "ui" | "sync" | "webhook" | "resume-cron" | ... */
+    trigger?: string;
+    /** Test seam: lets a future retry.test.ts run without a database. */
     hooks?: {
-      assertNotCoolingDown?: (tenantId: string, label?: string) => Promise<void>;
-      recordQuotaError?: (tenantId: string, err: unknown) => Promise<unknown>;
+      assertNotCoolingDown?: typeof assertNotCoolingDown;
+      recordQuotaError?: typeof recordQuotaError;
+      markGmailHealthy?: typeof markGmailHealthy;
     };
   } = {},
 ): Promise<T> {
   const assertFn = hooks?.assertNotCoolingDown ?? assertNotCoolingDown;
   const recordFn = hooks?.recordQuotaError ?? recordQuotaError;
+  const healthyFn = hooks?.markGmailHealthy ?? markGmailHealthy;
+  const { operation, targetId } = parseLabel(label);
+  const ctx = { trigger, operation, targetId };
 
   // Cheapest possible win: don't spend a call we already know will be refused
   // and would extend the penalty window.
-  if (tenantId) await assertFn(tenantId, label);
+  if (tenantId) await assertFn(tenantId, ctx);
 
   let lastErr: unknown;
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
-      return await fn();
+      const result = await fn();
+
+      // Awaited, not fire-and-forget — the write is rare (memo-gated inside
+      // markGmailHealthy) so the latency lands only on an actual recovery,
+      // and a failure here must never fail a Gmail call that just succeeded.
+      if (tenantId) {
+        await healthyFn(tenantId, { ...ctx, recoveredBy: "live-call-succeeded" }).catch(
+          (err) => {
+            logger.error("[GMAIL] markGmailHealthy failed after successful call", {
+              tenantId, label, error: String(err),
+            });
+          },
+        );
+      }
+
+      return result;
     } catch (err) {
       lastErr = err;
 
       if (isQuotaError(err)) {
-        if (tenantId) await recordFn(tenantId, err).catch(() => {});
+        if (tenantId) await recordFn(tenantId, err, ctx).catch(() => {});
         logger.warn("[GMAIL] rate limited — not retrying, cooling down instead", {
           label,
           tenantId,

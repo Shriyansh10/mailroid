@@ -26,6 +26,7 @@ import { classificationBatch } from "@repo/services/gmail/classification-batch.j
 import { hydrateBatch } from "@repo/services/gmail/hydration-batch.js";
 import { indexBatch } from "@repo/services/gmail/index-batch.js";
 import { reconciliationCron } from "@repo/services/gmail/reconciliation-cron.js";
+import { gmailCooldownResumeCron } from "@repo/services/gmail/cooldown-resume-cron.js";
 import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
@@ -170,6 +171,7 @@ app.use(
       hydrateBatch,
       indexBatch,
       reconciliationCron,
+      gmailCooldownResumeCron,
       gmailWebhookSync,
     ],
   })

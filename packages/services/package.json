@@ -36,6 +36,8 @@
     "./gmail/ai-readiness.js": "./gmail/ai-readiness.ts",
     "./gmail/reconciliation-cron": "./gmail/reconciliation-cron.ts",
     "./gmail/reconciliation-cron.js": "./gmail/reconciliation-cron.ts",
+    "./gmail/cooldown-resume-cron": "./gmail/cooldown-resume-cron.ts",
+    "./gmail/cooldown-resume-cron.js": "./gmail/cooldown-resume-cron.ts",
     "./gmail/webhook-sync": "./gmail/webhook-sync.ts",
     "./gmail/webhook-sync.js": "./gmail/webhook-sync.ts",
     "./gmail/webhook-inngest": "./gmail/webhook-inngest.ts",

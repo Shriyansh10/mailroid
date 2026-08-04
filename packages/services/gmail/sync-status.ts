@@ -161,6 +161,7 @@ export async function estimateMailboxTotal(userId: string): Promise<number | nul
     try {
       const label = await withGmailRetry(`labels.get ${labelId}`, () =>
         tenant.gmail.api.labels.get({ id: labelId }),
+        { tenantId: userId, trigger: "sync" },
       );
       total += (label as { messagesTotal?: number })?.messagesTotal ?? 0;
       anySucceeded = true;

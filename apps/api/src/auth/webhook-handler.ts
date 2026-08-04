@@ -266,7 +266,13 @@ export async function handleCorsairWebhook(req: {
     // tenant only. A calendar-only push has no row there and would silently
     // update nothing.
     if (tenantId) {
-      if (quota) retryAfter = await recordQuotaError(tenantId, err).catch(() => undefined);
+      if (quota) {
+        retryAfter = await recordQuotaError(tenantId, err, {
+          trigger: "webhook",
+          operation: "processWebhook",
+          targetId: incomingHistoryId,
+        }).catch(() => undefined);
+      }
       // Durable health, because acking removed the 500 that used to announce a
       // broken mailbox and an error log is the only other trace — and logs
       // rotate. This is what /api/_debug/watch-health reads.

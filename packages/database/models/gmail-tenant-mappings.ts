@@ -1,4 +1,4 @@
-import { index, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export const gmailTenantMappings = pgTable(
   "gmail_tenant_mappings",
@@ -15,7 +15,21 @@ export const gmailTenantMappings = pgTable(
     // throttled mailbox recover. Same "skip until time X" shape as
     // watchExpiration above.
     quotaCooldownUntil: timestamp("quota_cooldown_until", { withTimezone: true }),
-    quotaCooldownReason: text("quota_cooldown_reason"), // GMAIL_429 | MANUAL
+    quotaCooldownReason: text("quota_cooldown_reason"), // GMAIL_429 | GMAIL_ERROR | MANUAL
+
+    // How many consecutive resume attempts have failed since the cooldown
+    // began. Google hands back a fresh independent window on every 429, so
+    // trusting each one blindly means landing on the same boundary forever —
+    // this is what lets the window escalate (15 -> 30 -> 60min) instead.
+    // Reset to 0 the moment ANY Gmail call succeeds (see markGmailHealthy in
+    // quota-cooldown.ts) so a resolved incident never taints an unrelated
+    // future one.
+    quotaResumeFailures: integer("quota_resume_failures").notNull().default(0),
+    // Set once when a mailbox transitions from healthy into cooldown, left
+    // untouched by later extensions, cleared on recovery. Exists purely to
+    // make "how long was this mailbox actually down" computable, and doubles
+    // as the seed for the derived per-episode incidentId in log lines.
+    quotaCooldownStartedAt: timestamp("quota_cooldown_started_at", { withTimezone: true }),
 
     // Durable webhook health. The /api/webhook route acks 200 even when
     // processing failed (a non-2xx makes Pub/Sub redeliver every ~15s for
