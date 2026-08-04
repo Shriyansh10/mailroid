@@ -5,6 +5,7 @@ import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings
 import { logger } from "@repo/logger";
 
 import { markGmailHealthy, recordQuotaError } from "./quota-cooldown.ts";
+import { getPausedTenantIds, isTenantPaused } from "./pause.ts";
 
 /**
  * A webhook that arrived during a Gmail quota cooldown was acked with 200 and
@@ -39,7 +40,26 @@ export const gmailCooldownResumeCron = inngest.createFunction(
         .where(lt(gmailTenantMappings.quotaCooldownUntil, new Date())),
     );
 
-    for (const row of expiredCooldowns) {
+    // This cron exists to CALL Gmail, so it is the one that most obviously must
+    // respect a pause — probing a mailbox someone deliberately silenced defeats
+    // the entire purpose of the switch (and, for a quota penalty, is exactly the
+    // call that re-arms the window we are waiting out).
+    const paused = await step.run("find-paused-tenants", async () => [
+      ...(await getPausedTenantIds()),
+    ]);
+    const pausedSet = new Set(paused);
+
+    const resumable = expiredCooldowns.filter(
+      (row) => !isTenantPaused(pausedSet, row.tenantId),
+    );
+
+    if (resumable.length < expiredCooldowns.length) {
+      logger.info("[RESUME] skipping paused mailboxes", {
+        skipped: expiredCooldowns.length - resumable.length,
+      });
+    }
+
+    for (const row of resumable) {
       await step.run(`resume-after-cooldown-${row.tenantId}`, async () => {
         // Mailboxes throttled by one underlying event get handed similar
         // Retry-After values, so their windows expire together — and this cron
@@ -112,6 +132,9 @@ export const gmailCooldownResumeCron = inngest.createFunction(
       });
     }
 
-    return { cooldownsResumed: expiredCooldowns.length };
+    return {
+      cooldownsResumed: resumable.length,
+      skippedPaused: expiredCooldowns.length - resumable.length,
+    };
   },
 );

@@ -1,6 +1,7 @@
 import { db } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
+import { syncPauses } from "@repo/database/models/sync-pauses";
 
 const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h — matches the watch crons
 
@@ -25,6 +26,24 @@ export interface GmailCooldownStatus {
   lastWebhookFailureReason: string | null;
 }
 
+export interface ActivePauseStatus {
+  scope: string;
+  tenantId: string | null;
+  mode: string;
+  reason: string | null;
+  createdBy: string | null;
+  blockWatchRenewal: boolean;
+  createdAt: string;
+  expiresAt: string | null;
+  /**
+   * True when this pause blocks watch renewal AND that mailbox's watch is
+   * inside the 48h renewal window. That combination is the one way a pause
+   * turns into an unrecoverable-without-re-registration problem, so it is
+   * called out rather than left to be inferred from two other fields.
+   */
+  watchAtRisk: boolean;
+}
+
 export interface WatchHealthReport {
   checkedAt: string;
   gmail: WatchHealthBucket;
@@ -33,6 +52,9 @@ export interface WatchHealthReport {
   // session — the columns quota-cooldown.ts writes but nothing surfaced
   // before this. Only mailboxes with something to report are included.
   gmailCooldowns: GmailCooldownStatus[];
+  // Active operator pauses. A mailbox that is "not syncing" is far more often
+  // paused on purpose than broken, and without this the two look identical.
+  activePauses: ActivePauseStatus[];
 }
 
 function bucket(expirations: Array<Date | null>): WatchHealthBucket {
@@ -72,13 +94,14 @@ function bucket(expirations: Array<Date | null>): WatchHealthBucket {
  * dark. Reads only expiration columns — no credentials touched.
  */
 export async function getWatchHealth(): Promise<WatchHealthReport> {
-  const [gmailRows, calendarRows, cooldownRows] = await Promise.all([
+  const [gmailRows, calendarRows, cooldownRows, pauseRows] = await Promise.all([
     db.select({ watchExpiration: gmailTenantMappings.watchExpiration }).from(gmailTenantMappings),
     db.select({ watchExpiration: calendarTenantMappings.watchExpiration }).from(calendarTenantMappings),
     db
       .select({
         emailAddress: gmailTenantMappings.emailAddress,
         tenantId: gmailTenantMappings.tenantId,
+        watchExpiration: gmailTenantMappings.watchExpiration,
         quotaCooldownUntil: gmailTenantMappings.quotaCooldownUntil,
         quotaCooldownReason: gmailTenantMappings.quotaCooldownReason,
         quotaResumeFailures: gmailTenantMappings.quotaResumeFailures,
@@ -87,6 +110,7 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
         lastWebhookFailureReason: gmailTenantMappings.lastWebhookFailureReason,
       })
       .from(gmailTenantMappings),
+    db.select().from(syncPauses),
   ]);
 
   const now = Date.now();
@@ -109,10 +133,37 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
       lastWebhookFailureReason: r.lastWebhookFailureReason,
     }));
 
+  const watchExpiryByTenant = new Map(
+    cooldownRows.map((r) => [r.tenantId, r.watchExpiration]),
+  );
+
+  const activePauses: ActivePauseStatus[] = pauseRows
+    .filter((p) => p.expiresAt === null || p.expiresAt.getTime() > now)
+    .map((p) => {
+      const watchExpiration = p.tenantId
+        ? (watchExpiryByTenant.get(p.tenantId) ?? null)
+        : null;
+      return {
+        scope: p.scope,
+        tenantId: p.tenantId,
+        mode: p.mode,
+        reason: p.reason,
+        createdBy: p.createdBy,
+        blockWatchRenewal: p.blockWatchRenewal,
+        createdAt: p.createdAt.toISOString(),
+        expiresAt: p.expiresAt?.toISOString() ?? null,
+        watchAtRisk:
+          p.blockWatchRenewal &&
+          watchExpiration !== null &&
+          watchExpiration.getTime() <= now + RENEW_THRESHOLD_MS,
+      };
+    });
+
   return {
     checkedAt: new Date().toISOString(),
     gmail: bucket(gmailRows.map((r) => r.watchExpiration)),
     calendar: bucket(calendarRows.map((r) => r.watchExpiration)),
     gmailCooldowns,
+    activePauses,
   };
 }

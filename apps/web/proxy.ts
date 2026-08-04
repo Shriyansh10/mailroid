@@ -5,6 +5,7 @@ import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
 import { getAccountsExist } from "@repo/services/tenant/index";
 import { getSyncStatus } from "@repo/services/gmail/sync-status";
 import { getPriorityProfile } from "@repo/services/profile/index";
+import { getGlobalMaintenance } from "@repo/services/gmail/pause";
 import { logger } from "@repo/logger";
 
 /**
@@ -50,6 +51,29 @@ async function isFullyOnboarded(userId: string): Promise<boolean> {
 
 export async function proxy(request: NextRequest) {
   const { pathname } = request.nextUrl;
+
+  // ── Whole-app maintenance ────────────────────────────────────────────
+  // Checked before anything else, including auth: during maintenance there is
+  // nothing behind the gate worth authenticating for.
+  //
+  // Fails OPEN, matching the two guards below. Locking every user out of a
+  // working app because one DB read failed would make this switch strictly
+  // more dangerous than the outages it exists to manage.
+  if (pathname !== "/maintenance") {
+    try {
+      const maintenance = await getGlobalMaintenance();
+      if (maintenance) {
+        const url = request.nextUrl.clone();
+        url.pathname = "/maintenance";
+        url.search = "";
+        return NextResponse.rewrite(url);
+      }
+    } catch (err) {
+      logger.error("[PROXY] maintenance check failed, allowing navigation", {
+        pathname, error: String(err),
+      });
+    }
+  }
 
   const wantsAssistant = pathname === "/assistant";
   const wantsAiSearch = pathname === "/inbox" && request.nextUrl.searchParams.get("mode") === "ai";
@@ -137,6 +161,16 @@ export async function proxy(request: NextRequest) {
   return NextResponse.next();
 }
 
+/**
+ * Widened from the original five exact routes so the maintenance gate can cover
+ * the whole app. Everything else in `proxy()` still early-returns
+ * NextResponse.next() for paths it doesn't recognise, so the extra matches cost
+ * one cheap comparison and nothing else.
+ *
+ * Excluded: Next's own static/image pipelines and the favicon (never worth a DB
+ * read), and /maintenance itself — matching it would rewrite the maintenance
+ * page to itself forever.
+ */
 export const config = {
-  matcher: ["/assistant", "/inbox", "/sign-in", "/onboarding", "/onboarding/personalize"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|maintenance).*)"],
 };

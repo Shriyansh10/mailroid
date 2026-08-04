@@ -5,6 +5,8 @@ import { classificationJobs } from "@repo/database/models/classification-jobs";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
+import { deleteExpiredPauses, getPausedTenantIds, isTenantPaused } from "./pause.ts";
+
 const STALE_THRESHOLD_MS = 10 * 60 * 1000; // 10 minutes
 
 /**
@@ -43,6 +45,29 @@ export const reconciliationCron = inngest.createFunction(
   async ({ step }) => {
     const staleBefore = new Date(Date.now() - STALE_THRESHOLD_MS);
 
+    // Janitorial: expired pause rows are already inert (an expired row reads
+    // exactly like an absent one — see pause.ts), so this is cosmetic and a
+    // missed run costs nothing. It lives here rather than on the read path
+    // because a read that can write turns every Gmail call into a DB writer.
+    const expiredPauses = await step.run("cleanup-expired-pauses", () =>
+      deleteExpiredPauses(),
+    );
+
+    // Re-kicking sync/hydration for a paused mailbox would restart exactly the
+    // Google traffic the pause exists to stop.
+    const paused = await step.run("find-paused-tenants", async () => [
+      ...(await getPausedTenantIds()),
+    ]);
+    const pausedSet = new Set(paused);
+
+    // Classification is LLM-bound, not Gmail-bound, so a `sync` pause has no
+    // reason to stop it — that pause is about not talking to Google. Only a
+    // deactivated account or whole-app maintenance should stop spending tokens.
+    const localWorkPaused = await step.run("find-local-work-paused-tenants", async () => [
+      ...(await getPausedTenantIds({ blockingLocalWork: true })),
+    ]);
+    const localWorkPausedSet = new Set(localWorkPaused);
+
     const stalledSyncs = await step.run("find-stalled-syncs", () =>
       db
         .select()
@@ -51,6 +76,7 @@ export const reconciliationCron = inngest.createFunction(
     );
 
     for (const row of stalledSyncs) {
+      if (isTenantPaused(pausedSet, row.userId)) continue;
       await step.sendEvent(`rekick-sync-${row.userId}`, {
         name: "gmail/sync.requested",
         data: {
@@ -78,6 +104,7 @@ export const reconciliationCron = inngest.createFunction(
     );
 
     for (const row of stalledJobs) {
+      if (isTenantPaused(localWorkPausedSet, row.userId)) continue;
       await step.sendEvent(`rekick-classification-${row.id}`, {
         name: "classification/batch.requested",
         data: { jobId: row.id, userId: row.userId, since: new Date(row.since).toISOString() },
@@ -109,6 +136,7 @@ export const reconciliationCron = inngest.createFunction(
     );
 
     for (const row of stalledHydrations) {
+      if (isTenantPaused(pausedSet, row.userId)) continue;
       await step.run(`reset-hydrating-${row.userId}`, () =>
         db
           .update(messageMetadata)
@@ -133,6 +161,7 @@ export const reconciliationCron = inngest.createFunction(
       stalledSyncs: stalledSyncs.length,
       stalledJobs: stalledJobs.length,
       stalledHydrations: stalledHydrations.length,
+      expiredPausesDeleted: expiredPauses,
     };
   },
 );

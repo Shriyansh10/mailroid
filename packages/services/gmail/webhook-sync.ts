@@ -6,7 +6,7 @@ import { logger } from "@repo/logger";
 
 import { generateMissingEmbeddings, ingestMessage } from "./index.ts";
 import { triggerGmailSync } from "./sync-metadata.ts";
-import { assertNotCoolingDown, isQuotaError, markGmailHealthy, recordQuotaError } from "./quota-cooldown.ts";
+import { assertSyncAllowed, isQuotaError, markGmailHealthy, recordQuotaError } from "./quota-cooldown.ts";
 
 /**
  * Gmail historyIds are monotonically increasing uint64 values delivered as
@@ -179,12 +179,13 @@ export async function syncHistoryForTenant(
     return { outcome: "no-mapping" };
   }
 
-  // Fail fast on a mailbox Google has told us to leave alone. A diff that was
-  // already queued when the cooldown began would otherwise spend its whole
-  // history fetch re-arming the window. Nothing is lost by stopping here: the
-  // cursor has not advanced, so the same diff is re-fetched once the window
-  // passes (either on the next notification or via the reconciliation sweep).
-  await assertNotCoolingDown(tenantId, {
+  // Fail fast on a mailbox an operator has paused, or one Google has told us to
+  // leave alone. A diff that was already queued when the pause/cooldown began
+  // would otherwise spend its whole history fetch re-arming the window. Nothing
+  // is lost by stopping here: the cursor has not advanced, so the same diff is
+  // re-fetched once the pause is lifted or the window passes (either on the next
+  // notification or via the cooldown-resume sweep).
+  await assertSyncAllowed(tenantId, {
     trigger: "webhook",
     operation: "syncHistoryForTenant",
     targetId: incomingHistoryId,

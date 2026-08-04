@@ -1,6 +1,9 @@
 import { corsair } from "@repo/corsair";
-import { db, eq } from "@repo/database";
+import { db, eq, isNull, lt, or } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
+import { logger } from "@repo/logger";
+
+import { getPause, getPausedTenantIds, isTenantPaused } from "./pause.ts";
 
 const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC;
 if (!TOPIC_NAME) {
@@ -11,6 +14,19 @@ if (!TOPIC_NAME) {
 export async function startGmailWatch(
   tenantId: string,
 ): Promise<void> {
+  // Gated on blockWatchRenewal, not on any pause: users.watch keeps the Pub/Sub
+  // SUBSCRIPTION alive and reads no mailbox content, so an ordinary pause lets
+  // renewal proceed — blocking it would let the subscription lapse for no
+  // benefit. Only a pause that explicitly wants zero Google traffic (proving a
+  // quota penalty) or a deactivated account stops this.
+  const pause = await getPause(tenantId).catch(() => null);
+  if (pause?.blockWatchRenewal) {
+    console.log(
+      `[gmail-watch] Skipping watch for tenant ${tenantId}: sync paused (${pause.mode}) with blockWatchRenewal`,
+    );
+    return;
+  }
+
   const tenant = corsair.withTenant(tenantId);
 
   // Trigger a lightweight API call to force Corsair to refresh the OAuth token if expired
@@ -55,8 +71,36 @@ export async function startGmailWatch(
     if (data.expiration) {
       updateFields.watchExpiration = new Date(parseInt(data.expiration));
     }
+
+    // A RENEWAL MUST NEVER MOVE THE CURSOR. users.watch answers with the
+    // mailbox's CURRENT historyId, so writing it unconditionally silently skips
+    // every message between the stored cursor and now — the diff for that gap is
+    // never fetched and the mail is lost with no error anywhere.
+    //
+    // That is not hypothetical: a mailbox stuck behind a quota cooldown sits on
+    // a frozen cursor with real mail queued behind it, and this cron renews any
+    // watch inside 48h of expiry. The old code would have thrown that queue away
+    // on the next nightly run.
+    //
+    // Only a verified ingest may advance lastHistoryId (webhook-sync.ts, after
+    // ingestAllOrThrow). Here it is a bootstrap value and nothing more: written
+    // when the mapping has no cursor at all, otherwise left strictly alone.
     if (data.historyId) {
-      updateFields.lastHistoryId = data.historyId;
+      const [existing] = await db
+        .select({ lastHistoryId: gmailTenantMappings.lastHistoryId })
+        .from(gmailTenantMappings)
+        .where(eq(gmailTenantMappings.tenantId, tenantId))
+        .limit(1);
+
+      if (!existing?.lastHistoryId) {
+        updateFields.lastHistoryId = data.historyId;
+      } else if (existing.lastHistoryId !== data.historyId) {
+        console.log(
+          `[gmail-watch] preserving existing cursor for tenant ${tenantId}: ` +
+            `stored=${existing.lastHistoryId} watchReported=${data.historyId} ` +
+            `(the gap between them is unread mail, not drift)`,
+        );
+      }
     }
 
     if (Object.keys(updateFields).length > 0) {
@@ -68,5 +112,75 @@ export async function startGmailWatch(
     }
   } catch (err) {
     console.error("[gmail-watch] Failed to parse response or save to database:", err);
+  }
+}
+
+// Same threshold gmailWatchCron uses. Keeping the two identical is the point —
+// see the invariant on bootstrapGmailWatches below.
+const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h
+
+/**
+ * Catch-up watch registration, run once on server start.
+ *
+ * gmailWatchCron fires at 00:00 UTC. If the VPS is down for days and boots at
+ * 14:00, nothing renews until the following midnight — and a Gmail watch that
+ * lapsed while the box was off means that mailbox is silently receiving no push
+ * notifications at all in the meantime. This closes that gap.
+ *
+ * INVARIANT: this renews EXACTLY what gmailWatchCron would — expiration missing,
+ * or inside the 48h threshold — minus tenants whose pause blocks renewal. It is
+ * deliberately NOT a re-register-everything sweep. At four mailboxes the
+ * difference is invisible; at five thousand it is the difference between a no-op
+ * and five thousand users.watch calls on every single deploy.
+ *
+ * Never throws: called fire-and-forget from the server's listen callback, where
+ * a rejection would be an unhandled promise and a failed watch renewal must
+ * never stop the API from serving.
+ */
+export async function bootstrapGmailWatches(): Promise<void> {
+  try {
+    const targetTime = new Date(Date.now() + RENEW_THRESHOLD_MS);
+    const due = await db
+      .select({
+        tenantId: gmailTenantMappings.tenantId,
+        emailAddress: gmailTenantMappings.emailAddress,
+        watchExpiration: gmailTenantMappings.watchExpiration,
+      })
+      .from(gmailTenantMappings)
+      .where(
+        or(
+          isNull(gmailTenantMappings.watchExpiration),
+          lt(gmailTenantMappings.watchExpiration, targetTime),
+        ),
+      );
+
+    if (due.length === 0) {
+      logger.info("[gmail-watch-bootstrap] no watches due for renewal at startup");
+      return;
+    }
+
+    const pausedForWatch = await getPausedTenantIds({ forWatchRenewal: true });
+    const targets = due.filter((row) => !isTenantPaused(pausedForWatch, row.tenantId));
+
+    logger.info("[gmail-watch-bootstrap] renewing watches at startup", {
+      due: due.length,
+      skippedPaused: due.length - targets.length,
+    });
+
+    for (const row of targets) {
+      try {
+        await startGmailWatch(row.tenantId);
+      } catch (err) {
+        // One mailbox failing must not stop the rest — a revoked token on one
+        // account would otherwise leave every other mailbox unregistered.
+        logger.error("[gmail-watch-bootstrap] renewal failed", {
+          tenantId: row.tenantId,
+          emailAddress: row.emailAddress,
+          error: String(err),
+        });
+      }
+    }
+  } catch (err) {
+    logger.error("[gmail-watch-bootstrap] bootstrap aborted", { error: String(err) });
   }
 }

@@ -3,6 +3,7 @@ import { corsair } from "@repo/corsair";
 import { db, eq, desc } from "@repo/database";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
+import { getPause } from "../gmail/pause.ts";
 
 // Re-register a calendar watch only once it's within this window of expiring.
 // A healthy watch further out than this is left alone (idempotent renewals) so
@@ -54,6 +55,19 @@ export async function startCalendarWatch(
   opts?: { force?: boolean },
 ): Promise<void> {
   console.log('[calendar-watch] Starting watch setup for tenant:', tenantId);
+
+  // Registering a watch is a Google call, so a paused account must not do it.
+  // Gated on blockWatchRenewal rather than on any pause: a watch keeps the
+  // SUBSCRIPTION alive and is not a data read, so an ordinary pause deliberately
+  // lets renewal proceed — losing the channel costs a re-registration for no
+  // benefit. See block_watch_renewal on models/sync-pauses.ts.
+  const pause = await getPause(tenantId).catch(() => null);
+  if (pause?.blockWatchRenewal) {
+    console.log(
+      `[calendar-watch] Skipping watch for tenant ${tenantId}: sync paused (${pause.mode}) with blockWatchRenewal`,
+    );
+    return;
+  }
 
   // 0. Idempotency: if a healthy watch already exists (channel present and not
   //    close to expiring), leave it alone. Re-registering would mint a new

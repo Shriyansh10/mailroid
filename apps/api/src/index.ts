@@ -2,6 +2,7 @@ import http from "node:http";
 import { logger } from "@repo/logger";
 import { app as expressApplication } from "./server.js";
 import { validateEmbeddingsApi } from "@repo/services/gmail/index.js";
+import { bootstrapGmailWatches } from "@repo/services/gmail/watch.js";
 import { logEgressProbe } from "./diagnostics/egress-probe.js";
 
 import { env } from "./env.js";
@@ -21,6 +22,12 @@ async function init() {
       // API itself). Logs the real errno; never throws. Re-runnable on demand
       // via GET /api/_debug/egress.
       void logEgressProbe();
+
+      // Catch-up watch registration. gmailWatchCron only fires at 00:00 UTC, so
+      // a box that was down for days and boots at 14:00 would otherwise receive
+      // no Gmail pushes at all until the next midnight. Renews exactly what the
+      // cron would; never throws.
+      void bootstrapGmailWatches();
     });
   } catch (err) {
     logger.error(`Error creating http server`, { err });

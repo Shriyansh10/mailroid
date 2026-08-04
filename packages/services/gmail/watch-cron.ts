@@ -2,6 +2,7 @@ import { inngest } from "@repo/inngest";
 import { db, eq, or, isNull, lt } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { startGmailWatch } from "./watch.ts";
+import { getPausedTenantIds, isTenantPaused } from "./pause.ts";
 
 export const gmailWatchCron = inngest.createFunction(
   { id: "gmail-watch-cron" },
@@ -32,8 +33,23 @@ export const gmailWatchCron = inngest.createFunction(
       return { message: "No watches require renewal at this time." };
     }
 
+    // Only pauses that explicitly block renewal are honoured here. users.watch
+    // keeps the SUBSCRIPTION alive and reads no mailbox content, so an ordinary
+    // pause deliberately lets it through — dropping the channel would cost a
+    // re-registration for no benefit. startGmailWatch re-checks this itself;
+    // filtering here just avoids the wasted calls.
+    const pausedForWatch = await step.run("find-watch-paused-tenants", async () => [
+      ...(await getPausedTenantIds({ forWatchRenewal: true })),
+    ]);
+    const pausedSet = new Set(pausedForWatch);
+    const renewable = tenants.filter((t) => !isTenantPaused(pausedSet, t.tenantId));
+
+    if (renewable.length === 0) {
+      return { message: "All due watches belong to paused mailboxes.", skippedPaused: tenants.length };
+    }
+
     const results = [];
-    for (const tenant of tenants) {
+    for (const tenant of renewable) {
       try {
         await step.run(`renew-${tenant.tenantId}`, async () => {
           await startGmailWatch(tenant.tenantId);
@@ -48,13 +64,19 @@ export const gmailWatchCron = inngest.createFunction(
     const failed = results.filter((r) => !r.success);
     if (failed.length > 0) {
       console.error(
-        `[gmail-watch-cron] ⚠️ ${failed.length}/${tenants.length} Gmail watch renewals FAILED:`,
+        `[gmail-watch-cron] ⚠️ ${failed.length}/${renewable.length} Gmail watch renewals FAILED:`,
         JSON.stringify(failed),
       );
     } else {
-      console.log(`[gmail-watch-cron] Renewed ${results.length}/${tenants.length} Gmail watches successfully.`);
+      console.log(`[gmail-watch-cron] Renewed ${results.length}/${renewable.length} Gmail watches successfully.`);
     }
 
-    return { processed: tenants.length, succeeded: results.length - failed.length, failed: failed.length, results };
+    return {
+      processed: renewable.length,
+      skippedPaused: tenants.length - renewable.length,
+      succeeded: results.length - failed.length,
+      failed: failed.length,
+      results,
+    };
   }
 );

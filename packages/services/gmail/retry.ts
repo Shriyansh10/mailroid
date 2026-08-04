@@ -1,7 +1,7 @@
 import { logger } from "@repo/logger";
 
 import {
-  assertNotCoolingDown,
+  assertSyncAllowed,
   isQuotaError,
   markGmailHealthy,
   recordQuotaError,
@@ -61,20 +61,20 @@ export async function withGmailRetry<T>(
     trigger?: string;
     /** Test seam: lets a future retry.test.ts run without a database. */
     hooks?: {
-      assertNotCoolingDown?: typeof assertNotCoolingDown;
+      assertSyncAllowed?: typeof assertSyncAllowed;
       recordQuotaError?: typeof recordQuotaError;
       markGmailHealthy?: typeof markGmailHealthy;
     };
   } = {},
 ): Promise<T> {
-  const assertFn = hooks?.assertNotCoolingDown ?? assertNotCoolingDown;
+  const assertFn = hooks?.assertSyncAllowed ?? assertSyncAllowed;
   const recordFn = hooks?.recordQuotaError ?? recordQuotaError;
   const healthyFn = hooks?.markGmailHealthy ?? markGmailHealthy;
   const { operation, targetId } = parseLabel(label);
   const ctx = { trigger, operation, targetId };
 
   // Cheapest possible win: don't spend a call we already know will be refused
-  // and would extend the penalty window.
+  // (operator pause, or a quota window we would only push further out).
   if (tenantId) await assertFn(tenantId, ctx);
 
   let lastErr: unknown;

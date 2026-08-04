@@ -13,6 +13,7 @@ import {
   recordWebhookFailure,
   clearWebhookFailure,
 } from "@repo/services/gmail/quota-cooldown.js";
+import { getPause } from "@repo/services/gmail/pause.js";
 import { withTenantSingleFlight } from "@repo/services/gmail/tenant-lock.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 import { describeError } from "../diagnostics/describe-error.js";
@@ -223,6 +224,28 @@ export async function handleCorsairWebhook(req: {
   // through a different API with its own quota, and dropping them here would
   // trade one outage for a quieter one.
   if (tenantId) {
+    // An operator pause outranks everything: a paused mailbox makes zero Google
+    // calls, full stop. Acked 200 for the same reason as the cooldown branch
+    // below — a non-2xx is a NACK and Pub/Sub would redeliver every ~15s for 7
+    // days. The cursor has not moved, so the diff is re-fetched once resumed.
+    const pause = await getPause(tenantId).catch(() => null);
+    if (pause) {
+      console.warn(
+        `[webhook] Sync paused (${pause.mode}) for "${tenantId}"` +
+          (pause.expiresAt ? ` until ${pause.expiresAt.toISOString()}` : " until cleared") +
+          " — acking 200 without calling Gmail",
+      );
+      return {
+        plugin: "gmail",
+        action: "deferredPaused",
+        response: {
+          statusCode: 200,
+          responseHeaders: {},
+          data: { deferred: true, paused: true, mode: pause.mode },
+        },
+      };
+    }
+
     const cooldown = await getCooldown(tenantId).catch(() => null);
     if (cooldown) {
       console.warn(

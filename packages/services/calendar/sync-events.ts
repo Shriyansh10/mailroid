@@ -4,9 +4,17 @@ import { calendarEvents } from "@repo/database/models/calendar-events";
 import { touchCalendarVersion } from "./version.ts";
 import { clearThreadMeetingLookups } from "./guest-links.ts";
 import { THREAD_ROOT_MSG_ID_KEY } from "../gmail/thread-headers.ts";
+import { assertNotPaused } from "../gmail/pause.ts";
 
 export async function syncCalendarEvents(tenantId: string): Promise<void> {
   console.log(`[sync-calendar-events] Starting sync for tenant: ${tenantId}`);
+
+  // Calendar does NOT go through withGmailRetry, so it needs the pause gate
+  // explicitly — otherwise a "paused" account keeps hitting Google Calendar and
+  // the switch only half works. Throws, so the caller's existing error handling
+  // treats it like any other sync failure.
+  await assertNotPaused(tenantId, { trigger: "calendar", operation: "events.getMany" });
+
   const tenant = corsair.withTenant(tenantId);
 
   // Sync range: 7 days ago to 30 days in the future

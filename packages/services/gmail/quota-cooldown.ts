@@ -2,6 +2,8 @@ import { db, eq, sql } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { logger } from "@repo/logger";
 
+import { assertNotPaused } from "./pause.ts";
+
 /**
  * Per-mailbox Gmail quota cooldown.
  *
@@ -536,6 +538,27 @@ export async function assertNotCoolingDown(
   });
 
   throw new GmailQuotaCooldownError(tenantId, row.until, ctx.operation ?? ctx.trigger);
+}
+
+/**
+ * The single pre-flight gate for any Gmail call: operator pause first, then
+ * quota cooldown.
+ *
+ * Pause is checked FIRST and deliberately. A paused mailbox must make zero
+ * calls regardless of its quota state — that is the whole point of the switch,
+ * and the case it exists for (proving a Gmail penalty window by going silent)
+ * is one where the mailbox is also cooling down. Checking cooldown first would
+ * report the wrong reason for the skip.
+ *
+ * Both throw rather than returning a boolean, for the same reason: a caller
+ * that forgets to check a return value silently makes the call.
+ */
+export async function assertSyncAllowed(
+  tenantId: string,
+  ctx: GmailCallContext,
+): Promise<void> {
+  await assertNotPaused(tenantId, ctx);
+  await assertNotCoolingDown(tenantId, ctx);
 }
 
 /** Test seam only — the memo is process-global and would leak between cases. */

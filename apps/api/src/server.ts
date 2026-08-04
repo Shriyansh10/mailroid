@@ -27,6 +27,7 @@ import { hydrateBatch } from "@repo/services/gmail/hydration-batch.js";
 import { indexBatch } from "@repo/services/gmail/index-batch.js";
 import { reconciliationCron } from "@repo/services/gmail/reconciliation-cron.js";
 import { gmailCooldownResumeCron } from "@repo/services/gmail/cooldown-resume-cron.js";
+import { getGlobalMaintenance } from "@repo/services/gmail/pause.js";
 import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
@@ -62,7 +63,96 @@ app.use("/api/auth/gmail-callback", gmailOAuthRouter);
 app.use("/api/auth/calendar-callback", calendarOAuthRouter);
 app.use("/api/auth", authHandler);
 
+// Inngest, mounted here for EXACTLY the same reason as the auth routes above:
+// it verifies an HMAC over the RAW request bytes. Behind express.json() the
+// body is parsed to an object and has to be re-serialised, which does not
+// reproduce the original bytes, so every signature check fails with
+// "Signature validation failed / Invalid signature" even though the signing key
+// is correct.
+//
+// Symptom when this is wrong: Inngest Cloud reaches the server and is rejected
+// continuously, so NO cron or event function ever runs — watch renewal,
+// cooldown resume, classification, hydration and embeddings all stop silently
+// while ordinary mail delivery keeps working (the webhook path runs inline in
+// Express and never touches Inngest). Verified in production: 55 rejections in
+// the 3 hours after a deploy, with INNGEST_SIGNING_KEY byte-identical to the
+// dashboard's current key.
+//
+// DO NOT move this below express.json().
+app.use(
+  "/api/inngest",
+  serve({
+    client: inngest,
+    functions: [
+      gmailWatchCron,
+      calendarWatchCron,
+      emailPriority,
+      gmailInitialSync,
+      classificationBatch,
+      hydrateBatch,
+      indexBatch,
+      reconciliationCron,
+      gmailCooldownResumeCron,
+      gmailWebhookSync,
+    ],
+  })
+);
+
 app.use(express.json());
+
+// Paths that stay up during whole-app maintenance. Each one is here for a
+// specific reason, not for convenience — read before removing any of them.
+const MAINTENANCE_EXEMPT = [
+  // MUST stay reachable and MUST keep answering 200. A non-2xx is a NACK to
+  // Pub/Sub, which then redelivers every ~15s for 7 days — that amplification
+  // is what caused a 7-hour outage once already. The handler's own pause check
+  // short-circuits the work and acks; blocking the route here would not.
+  "/api/webhook",
+  // Belt and braces only — /api/inngest is now mounted ABOVE this middleware
+  // (it needs the raw body), so it never reaches here. Kept so the exemption
+  // survives if the mount order is ever revisited: Inngest Cloud introspects
+  // and PUTs to this endpoint, and blocking it risks the app being
+  // deregistered, which outlives the maintenance window.
+  "/api/inngest",
+  // Liveness, and the alarm for expired Google watches. Maintenance must not
+  // also blind the thing that tells you the system is broken.
+  "/health",
+  "/api/health",
+  "/api/_debug",
+];
+
+/**
+ * Whole-app maintenance gate.
+ *
+ * Mounted after express.json() and before every route that does real work.
+ * Auth/OAuth and Inngest are mounted earlier (they need raw bodies) and so sit
+ * outside this gate entirely — which is correct in both cases: cutting an
+ * in-flight Google OAuth callback mid-handshake leaves the user in a broken
+ * half-linked state that outlasts the maintenance window, and blocking Inngest
+ * risks deregistering the app.
+ *
+ * Fails OPEN. If the flag cannot be read, the app keeps serving — a database
+ * blip must not be able to take the whole product down on its own.
+ */
+app.use(async (req, res, next) => {
+  if (MAINTENANCE_EXEMPT.some((p) => req.path === p || req.path.startsWith(`${p}/`))) {
+    return next();
+  }
+
+  const maintenance = await getGlobalMaintenance().catch(() => null);
+  if (!maintenance) return next();
+
+  if (maintenance.expiresAt) {
+    const seconds = Math.max(1, Math.ceil((maintenance.expiresAt.getTime() - Date.now()) / 1000));
+    res.setHeader("Retry-After", String(seconds));
+  }
+  return res.status(503).json({
+    error: "under_maintenance",
+    reason: maintenance.reason,
+    since: maintenance.createdAt.toISOString(),
+    until: maintenance.expiresAt?.toISOString() ?? null,
+  });
+});
 
 // Corsair webhooks — single endpoint for all plugins
 app.post("/api/webhook", async (req, res) => {
@@ -156,26 +246,6 @@ app.get("/health", (req, res) => {
 });
 
 app.use("/api/calendar", calendarWatchRouter);
-
-// Inngest serve endpoint
-app.use(
-  "/api/inngest",
-  serve({
-    client: inngest,
-    functions: [
-      gmailWatchCron,
-      calendarWatchCron,
-      emailPriority,
-      gmailInitialSync,
-      classificationBatch,
-      hydrateBatch,
-      indexBatch,
-      reconciliationCron,
-      gmailCooldownResumeCron,
-      gmailWebhookSync,
-    ],
-  })
-);
 
 logger.debug(`openapi.json: ${env.BASE_URL}/openapi.json`);
 app.get("/openapi.json", (req, res) => {
