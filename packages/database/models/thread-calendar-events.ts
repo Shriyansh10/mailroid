@@ -8,7 +8,7 @@ import {
   pgEnum,
 } from "drizzle-orm/pg-core";
 
-import { user } from "./auth";
+import { user } from "./auth.ts";
 
 // ── Enums ─────────────────────────────────────────────────────────────
 
@@ -23,6 +23,25 @@ export const threadEventStatusEnum = pgEnum("thread_event_status", [
   "ACTIVE",
   "CANCELLED",
   "DELETED_EXTERNALLY",
+]);
+
+/**
+ * Whether this user *owns* the meeting or was merely invited to it.
+ *
+ * Load-bearing for writes, not display. Once a guest's thread resolves to a
+ * meeting they were invited to, they hold a link row like anyone else — and
+ * `userOwnsEvent` (which only asks "is this event in your calendar?") starts
+ * answering yes for them. Without this column, making the guest's card visible
+ * would also hand them the ability to move or cancel the organiser's meeting,
+ * which Google would either reject or, worse, partially apply.
+ *
+ * A persisted fact rather than one re-derived from `organizerEmail` at write
+ * time: the derivation needs a `calendar_events` row, and those are deleted
+ * when they fall outside the sync window.
+ */
+export const threadEventRoleEnum = pgEnum("thread_event_role", [
+  "ORGANIZER",
+  "GUEST",
 ]);
 
 // ── Thread → calendar event links ─────────────────────────────────────
@@ -59,6 +78,12 @@ export const threadCalendarEvents = pgTable(
     /** Message the invite was sent from, when known. Provenance only. */
     entityId: text("entity_id"),
     status: threadEventStatusEnum("status").notNull().default("ACTIVE"),
+    /**
+     * Defaults to ORGANIZER so every pre-existing row keeps its current
+     * (correct) behaviour: until guest resolution existed, the only way to get
+     * a link row was to have scheduled the meeting yourself.
+     */
+    role: threadEventRoleEnum("role").notNull().default("ORGANIZER"),
     /** When the row left ACTIVE. Null while active. */
     closedAt: timestamp("closed_at", { withTimezone: true }),
     /**

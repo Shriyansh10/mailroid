@@ -52,6 +52,25 @@ export const messageMetadata = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }),
     threadId: text("thread_id"),
 
+    // The RFC822 `Message-ID` header, normalised (angle brackets stripped).
+    //
+    // Unlike `entityId` and `threadId` — which Gmail assigns per mailbox, so
+    // the organiser and a guest hold *different* ids for the same
+    // conversation — this header travels with the message itself and is
+    // identical in every copy. It is therefore the only thing that can join
+    // one person's thread to another's, which is what makes a meeting
+    // scheduled from a thread visible to the guest who was invited.
+    //
+    // Three distinct states, and they must stay distinguishable:
+    //   NULL  — never looked. This is the backfill's cursor.
+    //   ''    — looked, and there is nothing to store (the message carries no
+    //           Message-ID, or Gmail no longer has it). Stops the backfill
+    //           re-fetching the same dead rows on every run.
+    //   value — the normalised header.
+    // Readers must treat '' exactly like NULL; only the backfill distinguishes
+    // them. Do not add a default: it would erase the cursor.
+    rfc822MessageId: text("rfc822_message_id"),
+
     isUnread: boolean("is_unread").notNull().default(true),
     isInInbox: boolean("is_in_inbox").notNull().default(false),
     isStarred: boolean("is_starred").notNull().default(false),
@@ -199,6 +218,9 @@ snippet: text("snippet"),
     // sometimes hands back a thread id where a message id was expected) and
     // searchEmails' thread->newest-message-id lookup.
     index("idx_mm_user_thread").on(table.userId, table.threadId),
+    // Serves both the guest-side thread→Message-ID lookup and the backfill's
+    // `WHERE user_id = ? AND rfc822_message_id IS NULL` cursor.
+    index("idx_mm_user_rfc822").on(table.userId, table.rfc822MessageId),
     // Supports the historical classification batch query: WHERE user_id = ?
     // AND classification_status = 'PENDING' ORDER BY received_at DESC.
     index("idx_mm_user_class_status_received").on(
