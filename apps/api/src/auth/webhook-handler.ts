@@ -282,7 +282,9 @@ export async function handleCorsairWebhook(req: {
                     updatedAtGoogle: event.updated ? new Date(event.updated) : null,
                   })
                   .onConflictDoUpdate({
-                    target: calendarEvents.eventId,
+                    // (userId, eventId) — see the note on the model. Keyed on
+                    // eventId alone this overwrote another attendee's row.
+                    target: [calendarEvents.userId, calendarEvents.eventId],
                     set: {
                       title: event.summary ?? "(No title)",
                       startTime: start ? new Date(start) : new Date(),
@@ -300,9 +302,17 @@ export async function handleCorsairWebhook(req: {
                 console.log(`[webhook] Synced calendar event "${event.id}" in DB for tenant "${activeTenantId}"`);
               }
             } else if (data.type === "eventDeleted" && data.eventId) {
+              // Scoped to this tenant: the same event id exists in every
+              // attendee's calendar, so an unscoped delete removed their rows
+              // too on a deletion that only concerned this user.
               await db
                 .delete(calendarEvents)
-                .where(eq(calendarEvents.eventId, data.eventId));
+                .where(
+                  and(
+                    eq(calendarEvents.userId, activeTenantId),
+                    eq(calendarEvents.eventId, data.eventId),
+                  ),
+                );
               console.log(`[webhook] Deleted calendar event "${data.eventId}" from DB for tenant "${activeTenantId}"`);
             }
 

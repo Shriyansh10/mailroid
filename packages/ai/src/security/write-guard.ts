@@ -353,9 +353,23 @@ export class WriteGuard {
 
   private checkCalendarSpam(args: Record<string, unknown>): CheckResult {
     const { maxAttendees } = LIMITS.createEvent;
-    const attendees = args.attendees as string[] | undefined;
-    if (attendees && attendees.length > maxAttendees) {
-      return { passed: false, reason: `Calendar spam blocked: ${attendees.length} attendees exceeds maximum of ${maxAttendees}`, eventType: AuditEventType.CALENDAR_SPAM_BLOCKED };
+
+    // Both fields count toward the cap. The model supplies `attendeeRefs`
+    // (opaque contact handles) rather than addresses, since it never sees a
+    // real address — counting only `attendees` would leave the spam ceiling
+    // trivially bypassable by sending handles instead.
+    const attendees = Array.isArray(args.attendees) ? (args.attendees as string[]) : [];
+    const attendeeRefs = Array.isArray(args.attendeeRefs)
+      ? (args.attendeeRefs as string[])
+      : [];
+    const total = attendees.length + attendeeRefs.length;
+
+    if (total > maxAttendees) {
+      return {
+        passed: false,
+        reason: `Calendar spam blocked: ${total} attendees exceeds maximum of ${maxAttendees}`,
+        eventType: AuditEventType.CALENDAR_SPAM_BLOCKED,
+      };
     }
     return { passed: true };
   }

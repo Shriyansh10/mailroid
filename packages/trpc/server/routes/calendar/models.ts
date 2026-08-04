@@ -45,10 +45,27 @@ export const threadMeetingOutputModel = z.object({
   end: z.string(),
   attendees: z.array(z.string()),
   htmlLink: z.string().optional(),
+  /**
+   * ORGANIZER: this user scheduled it and can move or cancel it.
+   * GUEST: they were invited, and the card is read-only for them.
+   */
+  role: z.enum(["ORGANIZER", "GUEST"]),
 });
 
 export const threadMeetingsOutputModel = z.object({
   meetings: z.array(threadMeetingOutputModel),
+  /**
+   * Why the list is what it is — because `meetings: []` cannot distinguish
+   * "there is no meeting" from "we couldn't tell", and rendering the second as
+   * the first is exactly the silent degradation CLAUDE.md forbids.
+   *
+   *  - `none`          checked, including against Google: there is none.
+   *  - `guest-linked`  found via the Message-ID join; user is an attendee.
+   *  - `unindexed`     thread has no captured Message-IDs (synced before the
+   *                    header was stored), so the join cannot be attempted.
+   *  - `lookup-failed` the remote check errored. We do not know.
+   */
+  resolution: z.enum(["none", "guest-linked", "unindexed", "lookup-failed"]),
   /**
    * A meeting that was scheduled from this thread and has since been deleted
    * in Google, which the user hasn't dismissed yet. Drives the warning banner.

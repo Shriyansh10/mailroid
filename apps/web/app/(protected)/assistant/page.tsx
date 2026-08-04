@@ -26,6 +26,25 @@ import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tool
 import { EmailReferenceCard, type EmailReference } from "@web/components/email-reference-card";
 import { cn } from "@web/lib/utils";
 
+/**
+ * The refinement directions offered on a pending draft. Mirrors
+ * REFINE_DIRECTIVES in packages/ai/src/prompts/refine-email.ts — declared
+ * here rather than imported so this client bundle never pulls in @repo/ai.
+ * The server validates the value against its own enum regardless, so a drift
+ * between the two lists fails closed with a 400 rather than sending anything.
+ */
+const REFINE_OPTIONS = [
+  { directive: "formal", label: "Formal" },
+  { directive: "casual", label: "Casual" },
+  { directive: "detailed", label: "More detailed" },
+  { directive: "personal", label: "More personal" },
+] as const;
+
+type RefineDirective = (typeof REFINE_OPTIONS)[number]["directive"];
+
+/** Mirrors MAX_REFINEMENTS in app/api/approvals/refine/route.ts. */
+const MAX_REFINEMENTS = 3;
+
 interface RenderableItem {
   type: "message" | "tool_call";
   id: string;
@@ -34,7 +53,7 @@ interface RenderableItem {
   msgRef?: ChatMessage;
   toolName?: string;
   toolArgs?: any;
-  status?: "running" | "success" | "error";
+  status?: "running" | "success" | "error" | "cancelled";
   resultSummary?: string;
   /** The email under discussion as of this reply — the newest emailRef-bearing tool result at or before this point in the conversation. Renders an EmailReferenceCard beneath assistant replies. */
   emailRef?: EmailReference;
@@ -46,8 +65,8 @@ interface ChatMessage {
   content: string;
   tool_calls?: any;
   tool_call_id?: string;
-  /** Set on a tool message when it named a specific email — see apps/web/lib/assistant/tool-memory.ts EmailRef. Drives the EmailReferenceCard under the assistant's reply. */
-  metadata?: { emailRef?: EmailReference } | null;
+  /** Set on a tool message when it named a specific email — see apps/web/lib/assistant/tool-memory.ts EmailRef. Drives the EmailReferenceCard under the assistant's reply. `status` is written by the cancel writers (api/approvals/cancel, api/chat's stale-approval sweep) and is how a rejected action is told apart from a completed one. */
+  metadata?: { emailRef?: EmailReference; status?: string } | null;
   /** Undefined for normal messages, set when AI needs approval */
   approvalRequired?: {
     approvalId: string;
@@ -203,6 +222,30 @@ function AssistantPageInner() {
     return { today, yesterday, older };
   }, [conversations]);
 
+  // Tool results reach the DB in three different encodings — the agent loop
+  // frames them as <tool_result>/<tool_error> (packages/ai/src/chat/agent.ts),
+  // while the approve and cancel routes write bare JSON. This unwraps all
+  // three so the card can be judged on what the tool actually said.
+  const readToolResult = (
+    content: string,
+  ): { failed: boolean; payload: any | null } => {
+    const raw = (content || "").trim();
+    if (raw.startsWith("<tool_error")) return { failed: true, payload: null };
+    const unframed = raw.startsWith("<tool_result")
+      ? raw.replace(/^<tool_result[^>]*>\s*/, "").replace(/\s*<\/tool_result>$/, "")
+      : raw;
+    try {
+      const payload = JSON.parse(unframed);
+      // A bare { error } object is how both the cancel routes and the approve
+      // route report a call that did not go through.
+      const failed =
+        payload && typeof payload === "object" && typeof payload.error === "string";
+      return { failed, payload };
+    } catch {
+      return { failed: false, payload: null };
+    }
+  };
+
   // Construct structured stream items including message blocks and tool status cards
   const renderableItems = useMemo(() => {
     const items: RenderableItem[] = [];
@@ -254,58 +297,62 @@ function AssistantPageInner() {
           msg.tool_calls.forEach((tc: any) => {
             const response = toolResponses.get(tc.id);
             
-            let status: "running" | "success" | "error" = "running";
+            let status: "running" | "success" | "error" | "cancelled" = "running";
             let resultSummary = "";
-            
+
             if (response) {
-              status = "success";
-              const responseText = response.content || "";
               const toolName = tc.function?.name || "";
-              
-              if (toolName === "searchEmails") {
-                try {
-                  const parsed = JSON.parse(responseText);
-                  const count = parsed.emails?.length ?? 0;
-                  resultSummary = `Found ${count} matching ${count === 1 ? "email" : "emails"}`;
-                } catch {
-                  resultSummary = "Searched Gmail";
-                }
+              const { failed, payload } = readToolResult(response.content || "");
+
+              // Judge the outcome BEFORE naming it. This used to read
+              // `status = "success"` the instant any response row existed, so
+              // a rejected replyToEmail still rendered "✓ Reply sent" directly
+              // under its own "Action Rejected" card.
+              if (response.metadata?.status === "cancelled") {
+                status = "cancelled";
+                resultSummary = "Action rejected — nothing was sent";
+              } else if (failed) {
+                status = "error";
+                resultSummary =
+                  (typeof payload?.error === "string" && payload.error) ||
+                  "The action could not be completed";
+              } else if (toolName === "searchEmails") {
+                status = "success";
+                const count = payload?.emails?.length ?? null;
+                resultSummary =
+                  count === null
+                    ? "Searched Gmail"
+                    : `Found ${count} matching ${count === 1 ? "email" : "emails"}`;
               } else if (toolName === "getEvents") {
-                try {
-                  const parsed = JSON.parse(responseText);
-                  const count = parsed.events?.length ?? 0;
-                  resultSummary = `Found ${count} matching calendar ${count === 1 ? "event" : "events"}`;
-                } catch {
-                  resultSummary = "Retrieved calendar events";
-                }
-              } else if (toolName === "sendEmail") {
-                resultSummary = "Email sent successfully";
-              } else if (toolName === "createEvent") {
-                resultSummary = "Event created successfully";
-              } else if (toolName === "generateExecutiveBrief") {
-                resultSummary = "Executive briefing generated";
+                status = "success";
+                const count = payload?.events?.length ?? null;
+                resultSummary =
+                  count === null
+                    ? "Retrieved calendar events"
+                    : `Found ${count} matching calendar ${count === 1 ? "event" : "events"}`;
               } else if (toolName === "summarizeEmail") {
-                try {
-                  const parsed = JSON.parse(responseText);
-                  resultSummary = parsed.found
-                    ? `Summarized "${parsed.subject ?? "email"}"`
+                status = "success";
+                resultSummary = !payload
+                  ? "Email summarized"
+                  : payload.found
+                    ? `Summarized "${payload.subject ?? "email"}"`
                     : "No matching email found";
-                } catch {
-                  resultSummary = "Email summarized";
-                }
-              } else if (toolName === "getEmailDetail") {
-                resultSummary = "Found the relevant passage";
-              } else if (toolName === "replyToEmail") {
-                resultSummary = "Reply sent";
-              } else if (toolName === "forwardEmail") {
-                resultSummary = "Email forwarded";
               } else {
-                resultSummary = "Completed successfully";
+                status = "success";
+                const byTool: Record<string, string> = {
+                  sendEmail: "Email sent successfully",
+                  createEvent: "Event created successfully",
+                  generateExecutiveBrief: "Executive briefing generated",
+                  getEmailDetail: "Found the relevant passage",
+                  replyToEmail: "Reply sent",
+                  forwardEmail: "Email forwarded",
+                };
+                resultSummary = byTool[toolName] ?? "Completed successfully";
               }
             } else {
               status = "running";
             }
-            
+
             items.push({
               type: "tool_call",
               id: tc.id || Math.random().toString(),
@@ -343,7 +390,10 @@ function AssistantPageInner() {
           content: msg.content || "",
           tool_calls: msg.toolCalls || undefined,
           tool_call_id: msg.toolCallId || undefined,
-          metadata: msg.metadata as { emailRef?: EmailReference } | null | undefined,
+          metadata: msg.metadata as
+            | { emailRef?: EmailReference; status?: string }
+            | null
+            | undefined,
           approvalRequired: msg.approvalRequired ? {
             approvalId: msg.approvalRequired.approvalId,
             toolName: msg.approvalRequired.toolName,
@@ -484,6 +534,73 @@ function AssistantPageInner() {
     }
   };
 
+  // Which approval is mid-refine, and in which direction — drives the
+  // per-button spinner so the user can see which one they pressed.
+  const [refining, setRefining] = useState<{ approvalId: string; directive: RefineDirective } | null>(null);
+  const [refineError, setRefineError] = useState<{ approvalId: string; message: string } | null>(null);
+  /** Rewrites already spent per approval, so the row can show what is left. */
+  const [refineCounts, setRefineCounts] = useState<Record<string, number>>({});
+
+  /**
+   * Rewrite a pending draft in place. The server is the only writer — it
+   * refuses anything no longer PENDING — so on success we just adopt the body
+   * it returns rather than optimistically editing and hoping it stuck.
+   */
+  const handleRefine = async (msg: ChatMessage, directive: RefineDirective) => {
+    const ar = msg.approvalRequired;
+    if (!ar || refining) return;
+
+    setRefining({ approvalId: ar.approvalId, directive });
+    setRefineError(null);
+
+    try {
+      const userTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+      const res = await fetch("/api/approvals/refine", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-user-timezone": userTimeZone,
+        },
+        body: JSON.stringify({ approvalId: ar.approvalId, directive }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        // A 429 still carries the count, so an exhausted budget updates the
+        // row rather than only surfacing as an error message.
+        if (typeof data.refineCount === "number") {
+          setRefineCounts((prev) => ({ ...prev, [ar.approvalId]: data.refineCount }));
+        }
+        throw new Error(data.error ?? `Server error (${res.status})`);
+      }
+
+      if (typeof data.refineCount === "number") {
+        setRefineCounts((prev) => ({ ...prev, [ar.approvalId]: data.refineCount }));
+      }
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id && m.approvalRequired
+            ? {
+                ...m,
+                approvalRequired: {
+                  ...m.approvalRequired,
+                  args: { ...m.approvalRequired.args, body: data.body },
+                },
+              }
+            : m,
+        ),
+      );
+    } catch (error) {
+      setRefineError({
+        approvalId: ar.approvalId,
+        message: error instanceof Error ? error.message : "Could not refine this draft.",
+      });
+    } finally {
+      setRefining(null);
+    }
+  };
+
   const handleApprove = async (msg: ChatMessage) => {
     const ar = msg.approvalRequired;
     if (!ar) return;
@@ -524,7 +641,14 @@ function AssistantPageInner() {
             ? {
                 ...m,
                 approvalRequired: m.approvalRequired
-                  ? { ...m.approvalRequired, status: "EXECUTED" }
+                  ? {
+                      ...m.approvalRequired,
+                      // The route's real outcome, not an assumption. A precheck
+                      // refusal or a failed write arrives here as FAILED, so the
+                      // card never flashes "Executed" for something that did not
+                      // happen and then quietly correct itself on refetch.
+                      status: data.approvalStatus ?? "EXECUTED",
+                    }
                   : undefined,
               }
             : m,
@@ -794,6 +918,23 @@ function AssistantPageInner() {
                               </div>
                             );
                           }
+                          // Approved by the user, but the tool did not go
+                          // through. Distinct from both Executed and Rejected:
+                          // they said yes, and it still didn't happen.
+                          if (status === "FAILED") {
+                            return (
+                              <div className="mt-3 border border-red-500/20 bg-red-500/5 rounded-xl p-4 max-w-md flex items-start gap-3">
+                                <div className="size-5 rounded-full bg-red-500/10 text-red-500 flex items-center justify-center shrink-0 mt-0.5 border border-red-500/20">
+                                  <XIcon className="size-3" />
+                                </div>
+                                <div>
+                                  <div className="font-serif font-bold text-xs text-red-700 dark:text-red-400">Approved, but not completed</div>
+                                  <p className="text-[9px] text-red-500 font-mono uppercase tracking-widest mt-0.5">{msg.approvalRequired.toolName}</p>
+                                  <p className="text-xs text-muted-foreground mt-2">{msg.approvalRequired.preview}</p>
+                                </div>
+                              </div>
+                            );
+                          }
                           if (status === "CANCELLED" || status === "REJECTED") {
                             return (
                               <div className="mt-3 border border-border bg-muted/30 rounded-xl p-4 max-w-md flex items-start gap-3 text-muted-foreground">
@@ -808,8 +949,28 @@ function AssistantPageInner() {
                               </div>
                             );
                           }
+                          const draftBody =
+                            typeof msg.approvalRequired.args?.body === "string"
+                              ? (msg.approvalRequired.args.body as string)
+                              : "";
+                          const isRefinable =
+                            draftBody.trim().length > 0 &&
+                            ["sendEmail", "replyToEmail", "forwardEmail"].includes(
+                              msg.approvalRequired.toolName,
+                            );
+                          const refiningThis =
+                            refining !== null && refining.approvalId === msg.approvalRequired.approvalId
+                              ? refining.directive
+                              : null;
+                          const refineErrorHere =
+                            refineError !== null && refineError.approvalId === msg.approvalRequired.approvalId
+                              ? refineError.message
+                              : null;
+                          const refinesUsed = refineCounts[msg.approvalRequired.approvalId] ?? 0;
+                          const refinesSpent = refinesUsed >= MAX_REFINEMENTS;
+
                           return (
-                            <div className="mt-4 border border-[#b08d57]/30 bg-[#b08d57]/5 rounded-xl p-5 max-w-md shadow-sm">
+                            <div className="mt-4 border border-[#b08d57]/30 bg-[#b08d57]/5 rounded-xl p-5 max-w-2xl shadow-sm">
                               <div className="flex items-center gap-2 text-[#b08d57] font-serif font-bold text-sm mb-3">
                                 <ShieldAlertIcon className="size-4 animate-pulse" />
                                 Approval Required
@@ -861,12 +1022,71 @@ function AssistantPageInner() {
                                 {!msg.approvalRequired.args?.subject && !msg.approvalRequired.args?.title && (
                                   <p className="text-sm text-foreground pt-1">{msg.approvalRequired.preview}</p>
                                 )}
+
+                                {/* The message itself. Until this was shown, approving
+                                    meant sending text the user had never read — the card
+                                    listed only To and Subject. Scrolls rather than
+                                    truncates: a body you can only half-see is no better
+                                    than one you cannot see when the point is consent. */}
+                                {draftBody && (
+                                  <div className="pt-2 border-t mt-1">
+                                    <div className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-1.5">
+                                      Message
+                                    </div>
+                                    <div className="max-h-72 overflow-y-auto whitespace-pre-wrap wrap-break-word text-sm text-foreground font-sans leading-relaxed pr-1">
+                                      {draftBody}
+                                    </div>
+                                  </div>
+                                )}
                               </div>
 
+                              {/* Refine row — adjusts the draft in place before consent.
+                                  Hidden entirely for actions with no body (createEvent),
+                                  rather than shown disabled: an control that can never
+                                  apply here is noise, not progressive disclosure. */}
+                              {isRefinable && (
+                                <div className="mb-4">
+                                  <div className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-2 flex items-center gap-2">
+                                    <span>Refine draft</span>
+                                    {refinesUsed > 0 && (
+                                      <span className="normal-case tracking-normal text-muted-foreground/70">
+                                        {refinesUsed} of {MAX_REFINEMENTS} used
+                                      </span>
+                                    )}
+                                  </div>
+                                  <div className="flex flex-wrap gap-1.5">
+                                    {REFINE_OPTIONS.map((opt) => (
+                                      <Button
+                                        key={opt.directive}
+                                        variant="outline"
+                                        onClick={() => handleRefine(msg, opt.directive)}
+                                        disabled={isLoading || refining !== null || refinesSpent}
+                                        className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground text-[11px] font-medium rounded-lg border hover:bg-accent disabled:opacity-50 transition-colors h-7 px-2.5"
+                                      >
+                                        {refiningThis === opt.directive ? (
+                                          <Loader2Icon className="size-3 animate-spin" />
+                                        ) : (
+                                          <SparklesIcon className="size-3" />
+                                        )}
+                                        {opt.label}
+                                      </Button>
+                                    ))}
+                                  </div>
+                                  {refineErrorHere && (
+                                    <p className="text-[11px] text-destructive mt-2">
+                                      {refineErrorHere} The draft above is unchanged.
+                                    </p>
+                                  )}
+                                </div>
+                              )}
+
                               <div className="flex gap-2">
+                                {/* Disabled mid-refine: the body on screen is about to be
+                                    replaced, and approving now would consent to text the
+                                    user is in the middle of changing. */}
                                 <Button
                                   onClick={() => handleApprove(msg)}
-                                  disabled={isLoading}
+                                  disabled={isLoading || refining !== null}
                                   className="flex items-center gap-1.5 bg-[#b08d57] text-white text-xs font-semibold rounded-lg hover:bg-[#8c6f37] disabled:opacity-50 transition-colors h-8 px-3.5 font-mono uppercase tracking-wider shadow-sm"
                                 >
                                   <CheckIcon className="size-3.5" />
@@ -875,7 +1095,7 @@ function AssistantPageInner() {
                                 <Button
                                   variant="outline"
                                   onClick={() => handleCancel(msg)}
-                                  disabled={isLoading}
+                                  disabled={isLoading || refining !== null}
                                   className="flex items-center gap-1.5 text-muted-foreground hover:text-foreground text-xs font-semibold rounded-lg border hover:bg-accent disabled:opacity-50 transition-colors h-8 px-3.5 font-mono uppercase tracking-wider"
                                 >
                                   <XIcon className="size-3.5" />
@@ -911,10 +1131,17 @@ function AssistantPageInner() {
                             <CheckIcon className="size-3.5 text-emerald-600" />
                             <span className="text-foreground">{item.resultSummary || getToolSuccessText(item.toolName || "")}</span>
                           </>
+                        ) : item.status === "cancelled" ? (
+                          // Deliberately not the red error styling: the user
+                          // chose this, so it reads as declined, not broken.
+                          <>
+                            <XIcon className="size-3.5 text-muted-foreground" />
+                            <span className="text-muted-foreground">{item.resultSummary || "Action rejected"}</span>
+                          </>
                         ) : (
                           <>
                             <XIcon className="size-3.5 text-red-600" />
-                            <span className="text-red-500">Failed to execute tool</span>
+                            <span className="text-red-500">{item.resultSummary || "Failed to execute tool"}</span>
                           </>
                         )}
                       </div>

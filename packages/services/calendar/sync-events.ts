@@ -2,6 +2,8 @@ import { corsair } from "@repo/corsair";
 import { db, sql, and, eq, gte, lte, inArray } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { touchCalendarVersion } from "./version.js";
+import { clearThreadMeetingLookups } from "./guest-links.ts";
+import { THREAD_ROOT_MSG_ID_KEY } from "../gmail/thread-headers.ts";
 
 export async function syncCalendarEvents(tenantId: string): Promise<void> {
   console.log(`[sync-calendar-events] Starting sync for tenant: ${tenantId}`);
@@ -79,6 +81,10 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
         attendees: event.attendees ?? null,
         status: event.status ?? null,
         htmlLink: event.htmlLink ?? null,
+        // Present on every attendee's copy, so a guest's own synced row carries
+        // the organiser's thread marker — the warm path for the guest card.
+        threadMessageId:
+          event.extendedProperties?.shared?.[THREAD_ROOT_MSG_ID_KEY] ?? null,
         updatedAtGoogle: event.updated ? new Date(event.updated) : null,
       };
     });
@@ -88,7 +94,9 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
       .insert(calendarEvents)
       .values(values)
       .onConflictDoUpdate({
-        target: calendarEvents.eventId,
+        // (userId, eventId), not eventId alone — the same Google event id lives
+        // in every attendee's calendar, and each user gets their own row.
+        target: [calendarEvents.userId, calendarEvents.eventId],
         set: {
           title: sql`EXCLUDED.title`,
           startTime: sql`EXCLUDED.start_time`,
@@ -99,12 +107,22 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
           attendees: sql`EXCLUDED.attendees`,
           status: sql`EXCLUDED.status`,
           htmlLink: sql`EXCLUDED.html_link`,
+          threadMessageId: sql`EXCLUDED.thread_message_id`,
           updatedAtGoogle: sql`EXCLUDED.updated_at_google`,
           updatedAt: new Date(),
         },
       });
 
     console.log(`[sync-calendar-events] Successfully reconciled ${items.length} events in DB for tenant ${tenantId}`);
+
+    // Google notifies ATTENDEES' calendars too, not just the organiser's, so
+    // being invited to a meeting fires this user's own watch and lands here
+    // with a thread marker attached. Clearing their negative-lookup cache is
+    // what makes the guest card appear within seconds of the invite instead of
+    // whenever the TTL happens to lapse.
+    if (values.some((v) => v.threadMessageId)) {
+      await clearThreadMeetingLookups(tenantId);
+    }
 
     // Bump the per-tenant change token so the client's next poll re-fetches
     // (see getCalendarVersion / useCalendarSync).

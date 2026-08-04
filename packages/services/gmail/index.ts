@@ -10,6 +10,8 @@ import { getProtectedConfig } from "../profile/index.ts";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { partitionSearchResults } from "./model.ts";
 import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
+import { normalizeMessageId } from "./message-id.ts";
+import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
 import type {
   ThreadSummary,
   ThreadListResult,
@@ -480,7 +482,20 @@ export async function resolveReplyTarget(
   const messageId = getHeader(headers, "Message-ID");
   const existingReferences = getHeader(headers, "References");
 
-  const recipient = extractAddress(replyTo);
+  // Fetched once and reused below for both the self-sent check and the Cc
+  // exclusion, rather than two separate lookups.
+  const selfEmail = (await getAccountEmail(tenantId)).toLowerCase();
+
+  // Replying to a message YOU sent is the one case Reply-To/From cannot
+  // answer correctly — both just name you. Previously this genuinely resolved
+  // the recipient as yourself (documented here as a known simplification);
+  // that's wrong the moment a caller has no editable UI to catch it in, which
+  // is exactly the assistant's replyToEmail tool. Gmail continues the
+  // conversation with whoever the message actually went to, so when the
+  // sender is this account, the reply targets the original message's To line
+  // instead of its From/Reply-To.
+  const isFromSelf = extractAddress(from).toLowerCase() === selfEmail;
+  const recipient = extractAddress(isFromSelf ? to.split(",")[0] ?? "" : replyTo);
   if (!recipient) {
     throw new Error("Could not determine a reply recipient from the original message");
   }
@@ -488,14 +503,12 @@ export async function resolveReplyTarget(
   // Reply All copies everyone the original reached EXCEPT two people: the
   // sender (who is already the To of this reply) and you (Gmail doesn't cc you
   // on your own reply, and seeing your own address appear in Cc reads as a
-  // bug). Deliberately no cleverness beyond that — replying to a message you
-  // sent yourself still resolves you as the recipient, and a mailing-list
-  // address is treated as just another address. Gmail is inconsistent about
-  // both, and every line is editable in the UI before sending, so the rule
-  // stays small enough to be obviously correct.
+  // bug). This now correctly handles a self-sent original too — `recipient`
+  // above already resolved to the right primary target either way, so
+  // excluding it (and yourself) from the message's own To/Cc lands on the
+  // right Cc set regardless of direction.
   let ccAddresses: string | undefined;
   if (replyAll) {
-    const selfEmail = (await getAccountEmail(tenantId)).toLowerCase();
     const excluded = new Set([recipient.toLowerCase(), selfEmail].filter(Boolean));
     const others = new Set<string>();
     for (const raw of `${to},${cc}`.split(",")) {
@@ -1011,6 +1024,10 @@ export async function ingestMessage(
   const subject = getHeader(headers, "Subject") || null;
   const from = getHeader(headers, "From") || null;
   const to = getHeader(headers, "To") || null;
+  // The one identifier that is identical in the organiser's and every guest's
+  // copy of this message — unlike messageId/threadId, which Gmail assigns per
+  // mailbox. See packages/services/gmail/message-id.ts.
+  const rfc822MessageId = normalizeMessageId(getHeader(headers, "Message-ID"));
   const snippet = (raw.snippet as string) ?? null;
   const bodyText = extractBody(payload) || null;
   const labels: string[] = (raw.labelIds as string[]) ?? [];
@@ -1028,6 +1045,7 @@ export async function ingestMessage(
     to,
     snippet,
     bodyText,
+    rfc822MessageId,
     receivedAt: isNaN(receivedAt.getTime()) ? new Date() : receivedAt,
     lastSyncedAt: new Date(),
   };
@@ -1045,6 +1063,10 @@ export async function ingestMessage(
         to: emailRow.to,
         snippet: emailRow.snippet,
         bodyText: emailRow.bodyText,
+        // COALESCE, not overwrite: a re-ingest that somehow lacks the header
+        // must not erase an id we already captured. Losing it silently
+        // un-links the guest's view of an existing meeting.
+        rfc822MessageId: sql`COALESCE(EXCLUDED.rfc822_message_id, ${emails.rfc822MessageId})`,
         receivedAt: emailRow.receivedAt,
         lastSyncedAt: emailRow.lastSyncedAt,
         updatedAt: new Date(),
@@ -1063,7 +1085,17 @@ export async function ingestMessage(
     ...flags,
     receivedAt: emailRow.receivedAt,
     threadId,
+    rfc822MessageId: rfc822MessageId || undefined,
   });
+
+  // New mail on this thread means its Message-ID set may have grown, so any
+  // cached "this thread has no meeting" answer is no longer trustworthy. A
+  // reply very often accompanies an invite, which makes this the second signal
+  // (alongside the calendar webhook) that keeps the guest card from waiting on
+  // a TTL. Best-effort: it must never fail an ingest.
+  if (threadId) {
+    void clearThreadMeetingLookups(tenantId, threadId);
+  }
 
   // A body was just fetched and stored above — this row is hydrated,
   // regardless of which caller (webhook, syncEmails, or the hydrate batch)

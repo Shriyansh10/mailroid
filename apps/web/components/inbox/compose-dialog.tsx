@@ -325,10 +325,18 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         // To + Cc only, deduped. Bcc is deliberately excluded: a calendar
         // invite shows its attendee list to everyone on it, which would undo
         // the one thing a blind copy is for.
+        //
+        // That inferred list is only trustworthy on CREATE. This dialog has no
+        // attendee editor, so on a MOVE it must not be sent: updateEvent treats
+        // a supplied attendees array as the whole guest list, and the compose
+        // form's current recipients are very often a different (and smaller)
+        // set than who was actually invited. `undefined` leaves the event's
+        // real attendees untouched.
+        const isMovingMeeting = meetingState.mode === "update" && !!meetingState.target;
         const action = buildEventInput(
           meetingState,
           values.subject.trim(),
-          visibleRecipients(values),
+          isMovingMeeting ? undefined : visibleRecipients(values),
         );
 
         form.reset(EMPTY);

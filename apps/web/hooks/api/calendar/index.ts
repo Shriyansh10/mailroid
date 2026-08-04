@@ -53,12 +53,29 @@ export const useThreadMeetings = (threadId?: string) => {
     { enabled: !!threadId, staleTime: 30_000 },
   );
 
+  const primaryMeeting = data?.meetings?.[0] ?? null;
+
   return {
     meetings: data?.meetings ?? [],
     // Newest-scheduled first (createdAt desc), which is what a banner should
     // describe. Deliberately not used to target a write — see resolveWriteTarget.
-    primaryMeeting: data?.meetings?.[0] ?? null,
+    primaryMeeting,
     deletedLink: data?.deletedLink ?? null,
+    /** Why the list is empty, when it is. See threadMeetingsOutputModel. */
+    resolution: data?.resolution ?? "none",
+    /**
+     * This user was invited rather than scheduling it, so the card is
+     * read-only — only the organiser can move or cancel.
+     */
+    isGuest: primaryMeeting?.role === "GUEST",
+    /**
+     * We genuinely don't know whether this thread has a meeting: it predates
+     * Message-ID capture, or the lookup failed. The UI must say so rather than
+     * render the same nothing it shows for "there is no meeting".
+     */
+    isUnknown:
+      !primaryMeeting &&
+      (data?.resolution === "unindexed" || data?.resolution === "lookup-failed"),
     isLoading,
     refetch,
   };

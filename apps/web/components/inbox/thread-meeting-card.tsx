@@ -1,9 +1,10 @@
 "use client";
 
+import Link from "next/link";
 import {
   AlertTriangleIcon,
+  ArrowUpRightIcon,
   CalendarClockIcon,
-  ExternalLinkIcon,
   UsersIcon,
 } from "lucide-react";
 
@@ -12,6 +13,7 @@ import { cn } from "@web/lib/utils";
 import {
   formatMeetingWindow,
   formatMeetingStart,
+  toLocalDateKey,
 } from "@web/components/calendar/event-form-utils";
 import type {
   ThreadMeeting,
@@ -39,6 +41,7 @@ export function ThreadMeetingCard({
   onAcknowledgeDeleted,
   busy,
   compact,
+  isGuest,
 }: {
   meeting?: ThreadMeeting | null;
   /**
@@ -53,6 +56,12 @@ export function ThreadMeetingCard({
   busy?: boolean;
   /** Denser layout for the inbox rail. Drops the actions. */
   compact?: boolean;
+  /**
+   * This user was invited to the meeting rather than scheduling it. The card
+   * still shows — being able to see it is the whole point — but the write
+   * actions are absent, because only the organiser can move or cancel.
+   */
+  isGuest?: boolean;
 }) {
   // A vanished meeting is never silently ignored: the user is told, because
   // the alternative is a thread that quietly forgets it ever had a meeting.
@@ -107,6 +116,13 @@ export function ThreadMeetingCard({
         <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground font-bold">
           Meeting on this thread
         </span>
+        {isGuest && (
+          // Said plainly, because the actions below are absent for a guest and
+          // an unexplained absence reads as a bug.
+          <span className="text-[10px] font-mono uppercase tracking-wider text-muted-foreground/70 border rounded px-1.5 py-0.5">
+            You're a guest
+          </span>
+        )}
       </div>
 
       <p
@@ -128,29 +144,41 @@ export function ThreadMeetingCard({
         </p>
       )}
 
+      {isGuest && !compact && (
+        <p className="text-xs text-muted-foreground mt-2">
+          Only the organiser can change this meeting. Reply on the thread to ask
+          them.
+        </p>
+      )}
+
       {!compact && (
         <div className="flex flex-wrap items-center gap-2 mt-3">
-          {onReschedule && (
+          {/* Hidden rather than disabled for a guest: a greyed-out Reschedule
+              suggests the permission might arrive, and it never will. */}
+          {onReschedule && !isGuest && (
             <Button type="button" size="sm" variant="outline" disabled={busy} onClick={onReschedule}>
               Reschedule
             </Button>
           )}
-          {onCancel && (
+          {onCancel && !isGuest && (
             <Button type="button" size="sm" variant="ghost" disabled={busy} onClick={onCancel}>
               Cancel meeting
             </Button>
           )}
-          {meeting.htmlLink && (
-            <a
-              href={meeting.htmlLink}
-              target="_blank"
-              rel="noreferrer"
-              className="ml-auto text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 underline underline-offset-2"
-            >
-              Open in Google Calendar
-              <ExternalLinkIcon className="size-3" />
-            </a>
-          )}
+          {/* Our calendar, not Google's. The meeting is Mailroid's to show —
+              sending the user to another tab to look at it is the product
+              handing off its own feature. The date rides along so the
+              calendar can land on the right week before the events for that
+              range have even loaded. */}
+          <Link
+            href={`/calendar?event=${encodeURIComponent(meeting.eventId)}&date=${toLocalDateKey(
+              new Date(meeting.start),
+            )}`}
+            className="ml-auto text-xs text-muted-foreground hover:text-foreground inline-flex items-center gap-1 underline underline-offset-2"
+          >
+            Open in Calendar
+            <ArrowUpRightIcon className="size-3" />
+          </Link>
         </div>
       )}
     </div>

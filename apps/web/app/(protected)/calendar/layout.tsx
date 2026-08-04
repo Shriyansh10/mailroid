@@ -1,13 +1,13 @@
 "use client";
 
-import React, { useState, useMemo, useCallback, useEffect } from "react";
+import React, { Suspense, useState, useMemo, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 import { 
   LogOutIcon, PencilIcon, CalendarDaysIcon, 
   BotIcon, SparklesIcon, InboxIcon, SendIcon,
-  KeyboardIcon, PaletteIcon
+  KeyboardIcon, PaletteIcon, CalendarClockIcon
 } from "lucide-react";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -171,6 +171,10 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
                 <SparklesIcon className="mr-2 h-4 w-4" />
                 <span>Personalization</span>
               </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/scheduling")}>
+                <CalendarClockIcon className="mr-2 h-4 w-4" />
+                <span>Scheduling</span>
+              </DropdownMenuItem>
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/appearance")}>
                 <PaletteIcon className="mr-2 h-4 w-4" />
                 <span>Appearance</span>
@@ -190,7 +194,11 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
 
         <ComposeDialog open={composeOpen} onOpenChange={setComposeOpen} />
 
-        <div className="flex-1 overflow-auto bg-background">{children}</div>
+        {/* The calendar page reads ?event= / ?date= via useSearchParams, which
+            the app router requires to sit under a Suspense boundary. */}
+        <div className="flex-1 overflow-auto bg-background">
+          <Suspense fallback={null}>{children}</Suspense>
+        </div>
       </div>
     </div>
   );

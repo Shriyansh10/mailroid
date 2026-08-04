@@ -134,6 +134,7 @@ export interface SendEmailInput {
 export interface SendEmailOutput {
   draft: boolean;
   id?: string;
+  threadId?: string;
 }
 
 /**
@@ -169,7 +170,10 @@ export class CorsairSendEmailExecutor
       });
 
       console.log("[executor:sendEmail] SUCCESS", { id: result.id, threadId: result.threadId });
-      return { draft: false, id: result.id };
+      // threadId travels with the result so a follow-up turn can act on the
+      // thread it just created (reply, attach an invite, link a meeting)
+      // without a second lookup — replyToEmail has always returned it.
+      return { draft: false, id: result.id, threadId: result.threadId };
     } catch (error) {
       console.error("[executor:sendEmail] ERROR", { error: String(error), userId: ctx.userId });
       throw new ToolExecutionError("sendEmail", error);

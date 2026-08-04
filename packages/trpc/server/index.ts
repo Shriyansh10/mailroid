@@ -8,6 +8,7 @@ import { calendarRouter } from "./routes/calendar/route.js";
 import { assistantRouter } from "./routes/assistant/route.js";
 import { profileRouter } from "./routes/profile/route.js";
 import { mailTemplatesRouter } from "./routes/mail-templates/route.js";
+import { schedulingRouter } from "./routes/scheduling/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
@@ -17,6 +18,7 @@ export const serverRouter = router({
   assistant: assistantRouter,
   profile: profileRouter,
   mailTemplates: mailTemplatesRouter,
+  scheduling: schedulingRouter,
 });
 
 export { createContext } from "./context.js";

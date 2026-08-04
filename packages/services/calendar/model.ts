@@ -37,6 +37,16 @@ export const createEventInputSchema = z.object({
   description: z.string().optional(),
   location: z.string().optional(),
   attendees: z.array(z.string()).optional(),
+  /**
+   * Written to `extendedProperties.shared`, which Google copies onto EVERY
+   * attendee's version of the event — unlike `.private`, which stays on the
+   * organiser's. That is what lets a guest identify a meeting scheduled from a
+   * thread whose Gmail id they do not share.
+   *
+   * Google's limits: key ≤ 44 chars, value ≤ 1024, and a filtered lookup
+   * requires an exact `key=value` match.
+   */
+  sharedProperties: z.record(z.string(), z.string()).optional(),
 });
 
 export type CreateEventInput = z.infer<typeof createEventInputSchema>;

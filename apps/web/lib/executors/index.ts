@@ -18,6 +18,7 @@ import {
   buildCreateEventPreview,
   buildRescheduleMeetingPreview,
   buildCancelMeetingPreview,
+  precheckScheduleThreadMeeting,
 } from "./calendar";
 import type {
   GetEventsInput,
@@ -33,6 +34,23 @@ import { CorsairSummarizeEmailExecutor } from "./summarize";
 import type { SummarizeEmailInput } from "./summarize";
 import { GetEmailDetailExecutor } from "./email-detail";
 import type { GetEmailDetailInput } from "./email-detail";
+import {
+  FindMeetingSlotsExecutor,
+  RefineMeetingSlotsExecutor,
+  ResolveRecipientExecutor,
+  ListSchedulingRulesExecutor,
+  UpsertSchedulingRuleExecutor,
+  DeleteSchedulingRuleExecutor,
+  buildDeleteRulePreview,
+} from "./scheduling";
+import type {
+  FindMeetingSlotsInput,
+  RefineMeetingSlotsInput,
+  ResolveRecipientInput,
+  ListSchedulingRulesInput,
+  UpsertSchedulingRuleInput,
+  DeleteSchedulingRuleInput,
+} from "./scheduling";
 
 /**
  * Register production (Corsair-backed) executors into the ToolRegistry.
@@ -142,6 +160,10 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       execute: (args, ctx) =>
         scheduleThreadExec.execute(args as ScheduleThreadMeetingInput, ctx as ToolExecutionContext),
       buildPreview: (args, ctx) => buildCreateEventPreview(args, ctx),
+      // Stops a second meeting being booked on a thread that already has one
+      // until the user has been asked. Runs before the approval card exists —
+      // see precheckScheduleThreadMeeting for why that placement matters.
+      precheck: (args, ctx) => precheckScheduleThreadMeeting(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ scheduleThreadMeeting wired");
   } else {
@@ -172,6 +194,62 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ cancelThreadMeeting wired");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ cancelThreadMeeting NOT found in registry");
+  }
+
+  // ── Scheduling engine ────────────────────────────────────────────
+  // Registered as stubs in registry.ts, so like the thread-meeting tools
+  // above they do NOT work at all until wired here. A warning below means
+  // the assistant silently cannot find times or resolve attendees.
+  const schedulingExecutors: {
+    name: string;
+    run: (args: any, ctx: ToolExecutionContext) => Promise<unknown>;
+    buildPreview?: (args: any, ctx: any) => Promise<string> | string;
+  }[] = [
+    {
+      name: "resolveRecipient",
+      run: (args, ctx) =>
+        new ResolveRecipientExecutor().execute(args as ResolveRecipientInput, ctx as any),
+    },
+    {
+      name: "findMeetingSlots",
+      run: (args, ctx) =>
+        new FindMeetingSlotsExecutor().execute(args as FindMeetingSlotsInput, ctx as any),
+    },
+    {
+      name: "refineMeetingSlots",
+      run: (args, ctx) =>
+        new RefineMeetingSlotsExecutor().execute(args as RefineMeetingSlotsInput, ctx as any),
+    },
+    {
+      name: "listSchedulingRules",
+      run: (args, ctx) =>
+        new ListSchedulingRulesExecutor().execute(args as ListSchedulingRulesInput, ctx as any),
+    },
+    {
+      name: "upsertSchedulingRule",
+      run: (args, ctx) =>
+        new UpsertSchedulingRuleExecutor().execute(args as UpsertSchedulingRuleInput, ctx as any),
+    },
+    {
+      name: "deleteSchedulingRule",
+      run: (args, ctx) =>
+        new DeleteSchedulingRuleExecutor().execute(args as DeleteSchedulingRuleInput, ctx as any),
+      buildPreview: (args, ctx) => buildDeleteRulePreview(args, ctx),
+    },
+  ];
+
+  for (const { name, run, buildPreview } of schedulingExecutors) {
+    const def = registry.get(name);
+    if (!def) {
+      console.warn(`[registerProductionExecutors] ⚠️ ${name} NOT found in registry`);
+      continue;
+    }
+    registry.register({
+      ...def,
+      execute: (args, ctx) => run(args, ctx as ToolExecutionContext),
+      ...(buildPreview ? { buildPreview } : {}),
+    });
+    console.log(`[registerProductionExecutors] ✅ ${name} wired`);
   }
 
   // Replace generateExecutiveBrief with Corsair-backed executor

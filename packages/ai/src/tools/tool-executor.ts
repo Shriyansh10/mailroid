@@ -76,6 +76,8 @@ export interface SendEmailInput {
 export interface SendEmailOutput {
   draft: boolean;
   id?: string;
+  /** Gmail thread the sent message landed in — present on real sends only. */
+  threadId?: string;
 }
 
 export class SendEmailExecutor

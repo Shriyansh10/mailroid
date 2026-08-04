@@ -135,7 +135,10 @@ export async function POST(request: Request) {
       return conv.id;
     });
 
-    return NextResponse.json({ conversationId });
+    // `cached` mirrors /api/summarize's own flag. A cache hit charges nothing
+    // (getOrCreateSummary only charges on the generate path), so the client
+    // needs this to know whether a daily action was actually consumed.
+    return NextResponse.json({ conversationId, cached: outcome.source === "cache" });
   } catch (error) {
     console.error("[api:chat:seed] error", error);
     return NextResponse.json({ error: "Failed to start a conversation about this email" }, { status: 500 });

@@ -13,6 +13,12 @@ import type { Command } from "./types.ts";
 import gmailStatus from "./commands/gmail-status.ts";
 import gmailResyncCategories from "./commands/gmail-resync-categories.ts";
 import gmailResync from "./commands/gmail-resync.ts";
+import gmailBackfillMessageIds from "./commands/gmail-backfill-message-ids.ts";
+import calendarProbeSharedProps from "./commands/calendar-probe-shared-props.ts";
+import calendarInspectEvent from "./commands/calendar-inspect-event.ts";
+import calendarListEvents from "./commands/calendar-list-events.ts";
+import calendarTestGuestLookup from "./commands/calendar-test-guest-lookup.ts";
+import calendarBackfillSharedProps from "./commands/calendar-backfill-shared-props.ts";
 import calendarStopChannels from "./commands/calendar-stop-channels.ts";
 import aiUsage from "./commands/ai-usage.ts";
 
@@ -23,5 +29,13 @@ export const commands: Command[] = [
   gmailStatus,
   gmailResyncCategories,
   gmailResync,
+  gmailBackfillMessageIds,
+  calendarProbeSharedProps,
+  calendarListEvents,
+  calendarTestGuestLookup,
+  calendarInspectEvent,
+  // Ordered after the Message-ID backfill it depends on: without stored ids
+  // there is nothing to stamp.
+  calendarBackfillSharedProps,
   calendarStopChannels,
 ];
