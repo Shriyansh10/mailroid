@@ -102,6 +102,19 @@ export const threadDetailSchema = z.object({
     })
     .nullable()
     .optional(),
+
+  // Provenance. When Gmail is unreachable (rate limit, 5xx, transport) the
+  // thread is served from the local copy instead of failing — but the caller
+  // and ultimately the user are told, never silently handed stale content.
+  //
+  // NOTE: threadDetailOutputModel in packages/trpc/server/routes/gmail/models.ts
+  // is a SEPARATE, duplicated definition, and tRPC's .output() strips keys it
+  // doesn't declare. These four fields must exist in both or staleness vanishes
+  // between the service and the browser with nothing raised anywhere.
+  source: z.enum(["live", "cache"]).optional(),
+  cachedAt: z.string().nullable().optional(),
+  staleReason: z.enum(["rate-limited", "unavailable"]).optional(),
+  retryAfter: z.string().nullable().optional(),
 });
 
 export type ThreadDetail = z.infer<typeof threadDetailSchema>;

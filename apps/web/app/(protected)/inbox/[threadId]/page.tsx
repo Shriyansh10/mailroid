@@ -36,6 +36,7 @@ import {
 import { cn } from "@web/lib/utils";
 import { EmailSummaryCard } from "@web/components/email-summary-card";
 import { ThreadMessageList } from "@web/components/thread-message-list";
+import { StaleThreadBanner } from "@web/components/inbox/stale-thread-banner";
 import { InlineReplyBox } from "@web/components/inbox/inline-reply-box";
 import type { InlineReplyMode } from "@web/components/inbox/inline-reply-box";
 import { useSession } from "@web/lib/auth-client";
@@ -70,7 +71,14 @@ type BoxState = { mode: InlineReplyMode; draftId?: string } | null;
 
 export default function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
-  const { data: thread, isLoading, isError, error, refetch: refetchThread } = useThread(threadId);
+  const {
+    data: thread,
+    isLoading,
+    isError,
+    error,
+    refetch: refetchThread,
+    isFetching: isFetchingThread,
+  } = useThread(threadId);
   const router = useRouter();
   const searchParams = useSearchParams();
   // Your own address, so Reply All doesn't seed a Cc that copies you.
@@ -730,6 +738,18 @@ export default function ThreadDetailPage() {
           initialFlags={thread.summaryFlags}
           initialData={thread.summaryData}
         />
+
+        {/* Served from the local copy because Gmail was unreachable — say so
+            rather than passing stale content off as live. */}
+        {thread.source === "cache" && (
+          <StaleThreadBanner
+            cachedAt={thread.cachedAt}
+            retryAfter={thread.retryAfter}
+            staleReason={thread.staleReason}
+            onRetry={() => void refetchThread()}
+            isRefetching={isFetchingThread}
+          />
+        )}
 
         {/* Email Messages Timeline */}
         <ThreadMessageList messages={thread.messages} selfEmail={myEmail} />

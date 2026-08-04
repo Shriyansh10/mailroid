@@ -1,7 +1,7 @@
 import { corsair } from "@repo/corsair";
 import { db, sql, and, eq, gte, lte, inArray } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
-import { touchCalendarVersion } from "./version.js";
+import { touchCalendarVersion } from "./version.ts";
 import { clearThreadMeetingLookups } from "./guest-links.ts";
 import { THREAD_ROOT_MSG_ID_KEY } from "../gmail/thread-headers.ts";
 

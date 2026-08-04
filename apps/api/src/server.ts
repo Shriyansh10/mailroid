@@ -82,6 +82,33 @@ app.post("/api/webhook", async (req, res) => {
       .json(result.response?.data ?? {});
   } catch (err) {
     console.error("[webhook] handler failed:", err);
+
+    // Structural backstop. A non-2xx to a Pub/Sub push is a NACK, and Google
+    // redelivers the same message every ~15s for the subscription's full
+    // 7-day retention. If the handler is failing because Gmail is rate-limited,
+    // each of those redeliveries makes another Gmail call and pushes the
+    // rate-limit window further out — the failure feeds itself and the mailbox
+    // never recovers. That is not hypothetical: it took one mailbox down for
+    // seven hours.
+    //
+    // So for Pub/Sub specifically we ack and own the retry ourselves. This is
+    // deliberately the LAST line of defence: handleCorsairWebhook already
+    // catches and acks its own failures, and this exists so that a path nobody
+    // anticipated still cannot start a redelivery loop. Every other caller
+    // keeps getting a 500 — they don't have Pub/Sub's retry semantics, and a
+    // 500 is the honest answer.
+    const isPubSubPush = Boolean(
+      (req.body as { message?: { messageId?: string } } | undefined)?.message?.messageId,
+    );
+    if (isPubSubPush) {
+      console.error(
+        "[webhook] UNHANDLED failure on a Pub/Sub push — acking 200 to prevent a " +
+          "redelivery storm. This is a bug: the handler should have caught this itself.",
+      );
+      res.status(200).json({ acked: true, deferred: true });
+      return;
+    }
+
     res.status(500).json({ error: "Webhook processing failed" });
   }
 });

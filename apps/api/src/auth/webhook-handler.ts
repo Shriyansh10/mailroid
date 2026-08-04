@@ -6,6 +6,14 @@ import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { syncHistoryForTenant } from "@repo/services/gmail/webhook-sync.js";
+import {
+  getCooldown,
+  isQuotaError,
+  recordQuotaError,
+  recordWebhookFailure,
+  clearWebhookFailure,
+} from "@repo/services/gmail/quota-cooldown.js";
+import { withTenantSingleFlight } from "@repo/services/gmail/tenant-lock.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 import { describeError } from "../diagnostics/describe-error.js";
 
@@ -197,17 +205,94 @@ export async function handleCorsairWebhook(req: {
     };
   }
 
-  const result = await processWebhook(
-    corsair,
-    Object.fromEntries(
-      Object.entries(req.headers).filter(
-        (entry): entry is [string, string] => typeof entry[1] === "string",
+  // Google has told us this mailbox is rate-limited until a specific instant,
+  // and every request made before then pushes that instant FURTHER OUT. Stop
+  // here rather than at the catch below: processWebhook is third-party and
+  // calls Gmail itself, so merely catching its throw would still spend one
+  // Gmail call per Pub/Sub redelivery — ~4/min for the 7-day retention — and
+  // hold the window open indefinitely. The mailbox recovers because of the
+  // calls we DON'T make.
+  //
+  // Ack 200 for the same reason as the two guards above: a non-2xx is a NACK
+  // and Pub/Sub redelivers. Nothing is lost — lastHistoryId has not advanced,
+  // so the diff is re-fetched once the window passes, either on the next
+  // notification or via the reconciliation sweep.
+  const activeTenant = tenantId ?? calendarTenantId;
+  // Scoped to `tenantId` (the Gmail mailbox), NOT activeTenant. The cooldown is
+  // a Gmail quota fact and must never suppress a Calendar push — those go
+  // through a different API with its own quota, and dropping them here would
+  // trade one outage for a quieter one.
+  if (tenantId) {
+    const cooldown = await getCooldown(tenantId).catch(() => null);
+    if (cooldown) {
+      console.warn(
+        `[webhook] Gmail quota cooldown active for "${tenantId}" until ` +
+          `${cooldown.until.toISOString()} — acking 200 without calling Gmail`,
+      );
+      return {
+        plugin: "gmail",
+        action: "deferredRateLimited",
+        response: {
+          statusCode: 200,
+          responseHeaders: {},
+          data: { deferred: true, retryAfter: cooldown.until.toISOString() },
+        },
+      };
+    }
+  }
+
+  let result: Awaited<ReturnType<typeof processWebhook>>;
+  try {
+    result = await processWebhook(
+      corsair,
+      Object.fromEntries(
+        Object.entries(req.headers).filter(
+          (entry): entry is [string, string] => typeof entry[1] === "string",
+        ),
       ),
-    ),
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    req.body as any,
-    { tenantId: tenantId ?? calendarTenantId },
-  );
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      req.body as any,
+      { tenantId: activeTenant },
+    );
+  } catch (err) {
+    // Ack 200 for EVERY failure here, not only quota ones. Pub/Sub redelivery
+    // cannot repair a fault in our handler — it just replays it every ~15s for
+    // 7 days, turning one bad request into a sustained load. Retrying is our
+    // job, on our schedule, not Google's.
+    const quota = isQuotaError(err);
+    let retryAfter: Date | undefined;
+
+    // Both writes target gmail_tenant_mappings, so they are keyed on the Gmail
+    // tenant only. A calendar-only push has no row there and would silently
+    // update nothing.
+    if (tenantId) {
+      if (quota) retryAfter = await recordQuotaError(tenantId, err).catch(() => undefined);
+      // Durable health, because acking removed the 500 that used to announce a
+      // broken mailbox and an error log is the only other trace — and logs
+      // rotate. This is what /api/_debug/watch-health reads.
+      await recordWebhookFailure(
+        tenantId,
+        quota ? "GMAIL_429" : String(describeError(err)).slice(0, 300),
+      ).catch(() => {});
+    }
+
+    console.error("[webhook] processWebhook failed (acking 200 to stop redelivery)", {
+      tenantId: activeTenant,
+      quota,
+      retryAfter: retryAfter?.toISOString(),
+      error: JSON.stringify(describeError(err)),
+    });
+
+    return {
+      plugin: "gmail",
+      action: quota ? "deferredRateLimited" : "deferredError",
+      response: {
+        statusCode: 200,
+        responseHeaders: {},
+        data: { deferred: true, retryAfter: retryAfter?.toISOString() },
+      },
+    };
+  }
   console.log(
     "[WEBHOOK FULL RESULT]",
     JSON.stringify(result, null, 2)
@@ -227,6 +312,12 @@ export async function handleCorsairWebhook(req: {
   ) {
     console.log(`[webhook] [INGEST BLOCK REACHED] tenantId: ${tenantId}, incomingHistoryId: ${incomingHistoryId}`);
 
+    // processWebhook got through, so whatever was wrong before is no longer
+    // wrong. Clearing here (rather than after ingest) keeps the flag meaning
+    // one precise thing — "the webhook itself failed" — instead of blurring
+    // into downstream ingest failures, which have their own retry paths.
+    void clearWebhookFailure(tenantId).catch(() => {});
+
     if (WEBHOOK_VIA_INNGEST) {
       // Durable: an Inngest event send is itself reliable, and the function
       // it triggers (gmailWebhookSync) retries on failure and serializes
@@ -240,7 +331,23 @@ export async function handleCorsairWebhook(req: {
       // WEBHOOK_VIA_INNGEST. Same fire-and-forget shape as before, but now
       // delegates to the shared syncHistoryForTenant so the ordering fix
       // (store before advancing the cursor) applies here too.
-      void syncHistoryForTenant(tenantId, incomingHistoryId).catch((err) => {
+      // Serialised per tenant. Without this, N overlapping deliveries for one
+      // mailbox each start their own diff, and ingestAllOrThrow's concurrency
+      // cap is per-delivery — so the real Gmail concurrency is N × 2, which is
+      // how a busy mailbox talks itself into a rate limit.
+      void withTenantSingleFlight(`gmail:${tenantId}`, async () => {
+        // Re-check AFTER acquiring: this delivery may have been queued before
+        // the predecessor hit a 429 and opened a cooldown. Acting on the stale
+        // pre-queue check would fire one more doomed call and push Google's
+        // window further out — the exact loop we're removing.
+        if (await getCooldown(tenantId)) {
+          console.warn(
+            `[webhook] cooldown opened while queued for "${tenantId}" — skipping sync`,
+          );
+          return;
+        }
+        return syncHistoryForTenant(tenantId, incomingHistoryId);
+      }).catch((err) => {
         console.error(
           `[webhook] syncHistoryForTenant failed for tenant "${tenantId}":`,
           JSON.stringify(describeError(err)),

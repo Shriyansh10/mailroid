@@ -1,5 +1,5 @@
 import { inngest } from "@repo/inngest";
-import { syncHistoryForTenant } from "./webhook-sync.js";
+import { syncHistoryForTenant } from "./webhook-sync.ts";
 
 /**
  * Durable replacement for the fire-and-forget Express webhook path (see

@@ -90,6 +90,16 @@ export const threadDetailOutputModel = z.object({
     })
     .nullable()
     .optional(),
+
+  // Provenance — MUST stay in sync with threadDetailSchema in
+  // packages/services/gmail/model.ts. This is a duplicated definition and
+  // .output() strips undeclared keys, so omitting these here would silently
+  // drop the staleness signal on the way to the browser: the UI would render
+  // a cached thread as if it were live, with no error anywhere to notice.
+  source: z.enum(["live", "cache"]).optional(),
+  cachedAt: z.string().nullable().optional(),
+  staleReason: z.enum(["rate-limited", "unavailable"]).optional(),
+  retryAfter: z.string().nullable().optional(),
 });
 
 // ── Send email output ────────────────────────────────────────────────

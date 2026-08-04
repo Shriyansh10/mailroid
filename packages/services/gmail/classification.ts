@@ -4,7 +4,7 @@ import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classificationJobs } from "@repo/database/models/classification-jobs";
 import { classifyEmailPriorityBatch, applyProfileOverrides, withAiUsage } from "@repo/ai";
 import type { PriorityBatchItem, PriorityBatchResult } from "@repo/ai";
-import { getClassificationContext } from "../profile/index.js";
+import { getClassificationContext } from "../profile/index.ts";
 import { checkDailyLimit, incrementDailyLimitBy, refundDailyLimit } from "../usage-limits.ts";
 import { logger } from "@repo/logger";
 

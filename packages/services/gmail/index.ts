@@ -12,6 +12,8 @@ import { partitionSearchResults } from "./model.ts";
 import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
 import { normalizeMessageId } from "./message-id.ts";
 import { withGmailRetry } from "./retry.ts";
+import { buildThreadFromDb } from "./thread-cache.ts";
+import { getCooldown, isGmailUnavailable, isQuotaError } from "./quota-cooldown.ts";
 import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
 import type {
   ThreadSummary,
@@ -286,12 +288,15 @@ export async function getThreads(
   const result = await withGmailRetry<{
     threads?: Array<{ id?: string }>;
     nextPageToken?: string | null;
-  }>(`threads.list ${tenantId}`, () =>
-    tenant.gmail.api.threads.list({
-      maxResults: opts?.maxResults ?? 20,
-      pageToken: opts?.pageToken,
-      labelIds: ["INBOX"],
-    })
+  }>(
+    `threads.list ${tenantId}`,
+    () =>
+      tenant.gmail.api.threads.list({
+        maxResults: opts?.maxResults ?? 20,
+        pageToken: opts?.pageToken,
+        labelIds: ["INBOX"],
+      }),
+    { tenantId },
   );
   logger.info("[GMAIL] threads.list (getThreads)", {
     tenantId, threadCount: (result.threads ?? []).length,
@@ -307,11 +312,14 @@ export async function getThreads(
   const threadGetStart = Date.now();
   const detailed = await Promise.all(
     threadStubs.map((t: { id?: string }) =>
-      withGmailRetry<Record<string, unknown>>(`threads.get ${t.id}`, () =>
-        tenant.gmail.api.threads.get({
-          id: t.id!,
-          format: "metadata",
-        })
+      withGmailRetry<Record<string, unknown>>(
+        `threads.get ${t.id}`,
+        () =>
+          tenant.gmail.api.threads.get({
+            id: t.id!,
+            format: "metadata",
+          }),
+        { tenantId },
       )
     )
   );
@@ -339,6 +347,15 @@ export async function getThreads(
 
 /**
  * Get a single thread with all messages (full format).
+ *
+ * Falls back to the locally stored copy when Gmail is unreachable, rather than
+ * failing the whole read. This was the last read path that *required* a live
+ * Gmail call, so a rate-limited mailbox rendered a blank thread while the mail
+ * sat in Postgres — the inbox list, drafts and summaries were all still fine.
+ *
+ * The fallback is always LABELLED (`source: "cache"`), never silent: the caller
+ * and the UI say so out loud. Serving stale content as if it were live is the
+ * failure mode this is meant to avoid, not a shortcut it's allowed to take.
  */
 export async function getThread(
   tenantId: string,
@@ -348,17 +365,47 @@ export async function getThread(
   const tenant = corsair.withTenant(tenantId);
 
   const gmailStart = Date.now();
-  const thread = await withGmailRetry(`threads.get ${threadId}`, () =>
-    tenant.gmail.api.threads.get({
-      id: threadId,
-      format: "full",
-    })
-  );
-  logger.info("[GMAIL] threads.get (getThread)", {
-    tenantId, threadId, durationMs: Date.now() - gmailStart,
-  });
+  let result: ThreadDetail;
 
-  const result = transformThreadDetail(thread as unknown as Record<string, unknown>);
+  try {
+    const thread = await withGmailRetry(
+      `threads.get ${threadId}`,
+      () =>
+        tenant.gmail.api.threads.get({
+          id: threadId,
+          format: "full",
+        }),
+      { tenantId },
+    );
+    logger.info("[GMAIL] threads.get (getThread)", {
+      tenantId, threadId, durationMs: Date.now() - gmailStart,
+    });
+    result = transformThreadDetail(thread as unknown as Record<string, unknown>);
+    result.source = "live";
+  } catch (err) {
+    // Only when Gmail is genuinely unreachable — quota, 5xx, transport. A 401,
+    // 403 or 404 is a real, actionable answer (revoked token, deleted thread),
+    // and quietly substituting a cached copy would hide exactly the drift the
+    // user needs to be told about.
+    if (!isGmailUnavailable(err)) throw err;
+
+    const cached = await buildThreadFromDb(tenantId, threadId);
+    // Nothing stored locally: rethrow. A fabricated empty thread claims "this
+    // conversation is gone", which is a different and worse lie than an error.
+    if (!cached) throw err;
+
+    const cooldown = await getCooldown(tenantId).catch(() => null);
+    result = cached;
+    result.staleReason = isQuotaError(err) ? "rate-limited" : "unavailable";
+    result.retryAfter = cooldown?.until.toISOString() ?? null;
+
+    logger.warn("[SERVICE] getThread falling back to cached copy", {
+      tenantId, threadId,
+      staleReason: result.staleReason,
+      cachedAt: result.cachedAt,
+      retryAfter: result.retryAfter,
+    });
+  }
 
   // Query metadata for priority status and reason
   const meta = await db
@@ -864,12 +911,15 @@ export async function searchEmails(
   const result = await withGmailRetry<{
     threads?: Array<{ id?: string }>;
     nextPageToken?: string | null;
-  }>(`threads.list search ${tenantId}`, () =>
-    tenant.gmail.api.threads.list({
-      q: searchQuery,
-      maxResults: opts?.maxResults ?? 20,
-      pageToken: opts?.pageToken,
-    })
+  }>(
+    `threads.list search ${tenantId}`,
+    () =>
+      tenant.gmail.api.threads.list({
+        q: searchQuery,
+        maxResults: opts?.maxResults ?? 20,
+        pageToken: opts?.pageToken,
+      }),
+    { tenantId },
   );
   logger.info("[GMAIL] threads.list (searchEmails)", {
     tenantId, query: searchQuery,
@@ -885,11 +935,14 @@ export async function searchEmails(
 
   const detailed = await Promise.all(
     threadStubs.map((t: { id?: string }) =>
-      withGmailRetry<Record<string, unknown>>(`threads.get ${t.id}`, () =>
-        tenant.gmail.api.threads.get({
-          id: t.id!,
-          format: "metadata",
-        })
+      withGmailRetry<Record<string, unknown>>(
+        `threads.get ${t.id}`,
+        () =>
+          tenant.gmail.api.threads.get({
+            id: t.id!,
+            format: "metadata",
+          }),
+        { tenantId },
       )
     )
   );
@@ -992,10 +1045,15 @@ export async function ingestMessage(
   // versus a TypeError on `raw.payload` below.
   let msg: unknown;
   try {
-    msg = await tenant.gmail.api.messages.get({
-      id: messageId,
-      format: "full",
-    });
+    // The hottest Gmail read in the product — every webhook diff and every
+    // hydration row lands here — and until recently the only major one with no
+    // retry or rate-limit awareness at all, so a 429 here was invisible to the
+    // cooldown that is supposed to stop the bleeding.
+    msg = await withGmailRetry<unknown>(
+      `messages.get ${messageId}`,
+      () => tenant.gmail.api.messages.get({ id: messageId, format: "full" }),
+      { tenantId },
+    );
   } catch (err) {
     if (isMessageGone(err)) {
       logger.info("[SERVICE] ingestMessage skipped: message no longer exists", {

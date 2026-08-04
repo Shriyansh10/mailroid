@@ -1,13 +1,13 @@
 import { inngest } from "@repo/inngest";
-import { syncCategoryPage } from "./sync-metadata.js";
-import { ALL_CATEGORIES } from "./metadata.js";
+import { syncCategoryPage } from "./sync-metadata.ts";
+import { ALL_CATEGORIES } from "./metadata.ts";
 import {
   markSyncRunning,
   updateSyncProgress,
   markSyncComplete,
   markSyncFailed,
   estimateMailboxTotal,
-} from "./sync-status.js";
+} from "./sync-status.ts";
 
 // Hand off to a fresh function run after this many pages so the memoized
 // step state of a single run stays bounded on very large mailboxes (25k+

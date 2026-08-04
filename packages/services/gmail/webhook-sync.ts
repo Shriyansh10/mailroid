@@ -4,8 +4,9 @@ import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
-import { generateMissingEmbeddings, ingestMessage } from "./index.js";
-import { triggerGmailSync } from "./sync-metadata.js";
+import { generateMissingEmbeddings, ingestMessage } from "./index.ts";
+import { triggerGmailSync } from "./sync-metadata.ts";
+import { assertNotCoolingDown, isQuotaError, recordQuotaError } from "./quota-cooldown.ts";
 
 /**
  * Gmail historyIds are monotonically increasing uint64 values delivered as
@@ -178,6 +179,13 @@ export async function syncHistoryForTenant(
     return { outcome: "no-mapping" };
   }
 
+  // Fail fast on a mailbox Google has told us to leave alone. A diff that was
+  // already queued when the cooldown began would otherwise spend its whole
+  // history fetch re-arming the window. Nothing is lost by stopping here: the
+  // cursor has not advanced, so the same diff is re-fetched once the window
+  // passes (either on the next notification or via the reconciliation sweep).
+  await assertNotCoolingDown(tenantId, "syncHistoryForTenant");
+
   const lastHistoryId = mapping.lastHistoryId;
 
   if (!lastHistoryId) {
@@ -255,7 +263,27 @@ export async function syncHistoryForTenant(
 
     if (!response.ok) {
       const errorText = await response.text();
-      throw new Error(`Gmail history fetch failed: ${response.status} - ${errorText}`);
+      // Attach the status STRUCTURALLY, not just interpolated into the message.
+      // isQuotaError classifies on `status`, and this raw fetch is the exact
+      // path the production deadlock ran through: flattening 429 into prose
+      // meant no cooldown was ever recorded here, so every Pub/Sub redelivery
+      // called Google again and pushed the retry window further out.
+      let body: unknown;
+      try {
+        body = JSON.parse(errorText);
+      } catch {
+        body = undefined;
+      }
+      const err = Object.assign(
+        new Error(`Gmail history fetch failed: ${response.status} - ${errorText}`),
+        { status: response.status, body },
+      );
+
+      // Record before throwing: the throw unwinds into a fire-and-forget
+      // .catch() on the legacy path, so this is the last place that knows both
+      // the tenant and the window.
+      if (isQuotaError(err)) await recordQuotaError(tenantId, err);
+      throw err;
     }
 
     const data = (await response.json()) as {
@@ -326,6 +354,19 @@ export async function syncHistoryForTenant(
   if (deletedMessageIds.size > 0) {
     await archiveDeletedMessages(tenantId, Array.from(deletedMessageIds));
   }
+
+  // LOAD-BEARING INVARIANT: lastHistoryId advances only after a fully
+  // successful ingest — every path above throws rather than falling through.
+  //
+  // /api/webhook now acks Pub/Sub with 200 even when processing failed (a
+  // non-2xx makes Pub/Sub redeliver every ~15s for 7 days, which amplifies a
+  // fault instead of repairing it — see apps/api/src/server.ts). Dropping a
+  // notification is only safe BECAUSE the cursor did not move here: the same
+  // diff is re-fetched on the next notification, and re-ingesting messages
+  // that already landed is harmless (see ingestAllOrThrow above).
+  //
+  // If you ever make this cursor advance on a partial or failed ingest, that
+  // ack silently becomes data loss.
 
   await db
     .update(gmailTenantMappings)

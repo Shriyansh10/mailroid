@@ -1,7 +1,7 @@
 import { inngest } from "@repo/inngest";
 import { db, eq, or, isNull, lt } from "@repo/database";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
-import { startCalendarWatch } from "./watch.js";
+import { startCalendarWatch } from "./watch.ts";
 
 export const calendarWatchCron = inngest.createFunction(
   { id: "calendar-watch-cron" },

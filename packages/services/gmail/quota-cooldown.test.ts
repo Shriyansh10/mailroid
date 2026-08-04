@@ -1,0 +1,147 @@
+/**
+ * Tests for Gmail quota-cooldown classification and retry-window parsing.
+ *
+ * These two functions decide whether a mailbox stops calling Google. Get
+ * `isQuotaError` wrong and no cooldown is recorded, so retries keep pushing
+ * Google's window forward and the mailbox never recovers — the exact
+ * seven-hour production outage this module was written for. Get
+ * `extractRetryAfter` wrong and the window is merely imprecise, which is why
+ * the fragile string handling lives there and nothing else depends on it.
+ *
+ * Pure functions only: no DB, no network.
+ *
+ * Run: pnpm --filter @repo/services test
+ */
+
+import test from "node:test";
+import assert from "node:assert/strict";
+
+import {
+  isQuotaError,
+  isGmailUnavailable,
+  extractRetryAfter,
+  defaultCooldownUntil,
+} from "./quota-cooldown.ts";
+
+/** The real corsair ApiError shape, copied from production logs. */
+function apiError(retryAfterIso?: string) {
+  return {
+    name: "ApiError",
+    message: "Too Many Requests",
+    status: 429,
+    statusText: "Too Many Requests",
+    body: {
+      error: {
+        code: 429,
+        message: retryAfterIso
+          ? `User-rate limit exceeded.  Retry after ${retryAfterIso}`
+          : "User-rate limit exceeded.",
+        status: "RESOURCE_EXHAUSTED",
+      },
+    },
+  };
+}
+
+// ---------------------------------------------------------------- detection
+
+test("structured 429 status is a quota error", () => {
+  assert.equal(isQuotaError(apiError()), true);
+});
+
+test("RESOURCE_EXHAUSTED body status is a quota error even without a numeric status", () => {
+  assert.equal(isQuotaError({ body: { error: { status: "RESOURCE_EXHAUSTED" } } }), true);
+});
+
+test("the plain-Error string form from the raw history fetch is still detected", () => {
+  // webhook-sync.ts historically flattened the status into prose. This is the
+  // exact path the production deadlock ran through — missing it means never
+  // cooling down.
+  const err = new Error('Gmail history fetch failed: 429 - {"error":{"code":429}}');
+  assert.equal(isQuotaError(err), true);
+});
+
+test("non-quota errors are not misclassified", () => {
+  assert.equal(isQuotaError({ status: 404, message: "Not Found" }), false);
+  assert.equal(isQuotaError({ status: 500, message: "Internal Error" }), false);
+  assert.equal(isQuotaError(new Error("socket hang up")), false);
+});
+
+test("unavailability covers quota, 5xx and transport but never auth or missing", () => {
+  assert.equal(isGmailUnavailable(apiError()), true);
+  assert.equal(isGmailUnavailable({ status: 503 }), true);
+  assert.equal(isGmailUnavailable(new Error("ECONNRESET")), true, "no status = never reached Google");
+
+  // A revoked token or deleted thread is real and actionable — serving a stale
+  // cached copy instead would hide precisely the drift the user must be told about.
+  assert.equal(isGmailUnavailable({ status: 401 }), false);
+  assert.equal(isGmailUnavailable({ status: 403 }), false);
+  assert.equal(isGmailUnavailable({ status: 404 }), false);
+});
+
+// ------------------------------------------------------------------ parsing
+
+const NOW = new Date("2026-08-04T03:58:00.000Z");
+
+test("a well-formed ISO instant is extracted and padded for clock skew", () => {
+  const got = extractRetryAfter(apiError("2026-08-04T03:58:23.313Z"), NOW);
+  assert.ok(got);
+  assert.equal(got.toISOString(), "2026-08-04T03:58:28.313Z"); // +5s pad
+});
+
+test("an instant already in the past is treated as unparseable", () => {
+  // Cooling down until a moment that has already passed is worse than useless:
+  // it reads as an active window while permitting the call immediately.
+  assert.equal(extractRetryAfter(apiError("2026-08-04T03:00:00.000Z"), NOW), null);
+});
+
+test("an absurd future instant is clamped to the 60 minute ceiling", () => {
+  const got = extractRetryAfter(apiError("3000-01-01T00:00:00.000Z"), NOW);
+  assert.ok(got);
+  assert.equal(got.toISOString(), "2026-08-04T04:58:00.000Z");
+});
+
+test("a 429 with no timestamp yields null so the caller applies its default", () => {
+  assert.equal(extractRetryAfter(apiError(), NOW), null);
+});
+
+test("an error with no body at all yields null rather than throwing", () => {
+  assert.equal(extractRetryAfter(new Error("boom"), NOW), null);
+  assert.equal(extractRetryAfter(null, NOW), null);
+  assert.equal(extractRetryAfter(undefined, NOW), null);
+});
+
+test("a numeric Retry-After header is honoured when no instant is present", () => {
+  const err = {
+    status: 429,
+    message: "Too Many Requests",
+    headers: { get: (n: string) => (n === "retry-after" ? "120" : null) },
+  };
+  const got = extractRetryAfter(err, NOW);
+  assert.ok(got);
+  assert.equal(got.toISOString(), "2026-08-04T04:00:05.000Z"); // +120s, +5s pad
+});
+
+test("reworded messages degrade to null, never to a wrong instant", () => {
+  // The wording is Google's, not a contract. If it changes we lose precision
+  // and fall back to the default window — detection and safety are unaffected.
+  const reworded = {
+    status: 429,
+    body: { error: { message: "Quota exceeded. Please try again later." } },
+  };
+  assert.equal(isQuotaError(reworded), true, "still detected");
+  assert.equal(extractRetryAfter(reworded, NOW), null, "only precision is lost");
+});
+
+test("an unusual wording around a valid instant is still parsed", () => {
+  const variant = {
+    status: 429,
+    body: { error: { message: "Please retry after 2026-08-04T04:10:00Z to continue" } },
+  };
+  const got = extractRetryAfter(variant, NOW);
+  assert.ok(got);
+  assert.equal(got.toISOString(), "2026-08-04T04:10:05.000Z");
+});
+
+test("the default window is five minutes out", () => {
+  assert.equal(defaultCooldownUntil(NOW).toISOString(), "2026-08-04T04:03:00.000Z");
+});

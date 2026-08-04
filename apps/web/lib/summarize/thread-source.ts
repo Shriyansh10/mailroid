@@ -244,6 +244,33 @@ export async function buildThreadSource(opts: {
       rawBody: m.body ?? "",
     }));
 
+    // getThread can now answer from the local cache when Gmail is unreachable,
+    // so "it returned" no longer means "this came from Gmail". Two things must
+    // not happen when it didn't:
+    //   1. backfillBodies would write these rows back over themselves — at best
+    //      a no-op, at worst it refreshes lastSyncedAt and makes stale content
+    //      look freshly synced.
+    //   2. Labelling the source "gmail" would launder cached text into an
+    //      authoritative-looking provenance for everything downstream.
+    // We got here because the DB copy was judged incomplete, so a cached answer
+    // is no better than what we already had — report it honestly as "db".
+    if (thread.source === "cache") {
+      console.warn("[thread-source] getThread served a cached copy; not backfilling", {
+        threadId,
+        staleReason: thread.staleReason,
+        cachedAt: thread.cachedAt,
+      });
+      return toSource(
+        raw.map((m) => ({
+          id: m.id,
+          from: m.from,
+          date: m.date,
+          body: cleanEmailBody(m.rawBody).text,
+        })),
+        "db",
+      );
+    }
+
     await backfillBodies(userId, threadId, raw);
 
     return toSource(

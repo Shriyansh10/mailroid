@@ -1,7 +1,7 @@
 import { inngest } from "@repo/inngest";
 import { db, eq, or, isNull, lt } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
-import { startGmailWatch } from "./watch.js";
+import { startGmailWatch } from "./watch.ts";
 
 export const gmailWatchCron = inngest.createFunction(
   { id: "gmail-watch-cron" },

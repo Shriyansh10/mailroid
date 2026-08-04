@@ -4,7 +4,7 @@ import {
   setJobProgress,
   markJobComplete,
   markJobFailed,
-} from "./classification.js";
+} from "./classification.ts";
 
 /**
  * Historical bulk classification ("Classify Last Week" / "Classify Last
