@@ -11,6 +11,7 @@ import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { partitionSearchResults } from "./model.ts";
 import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
 import { normalizeMessageId } from "./message-id.ts";
+import { withGmailRetry } from "./retry.ts";
 import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
 import type {
   ThreadSummary,
@@ -282,11 +283,16 @@ export async function getThreads(
 
   // Step 1: Get thread IDs
   const gmailStart = Date.now();
-  const result = await tenant.gmail.api.threads.list({
-    maxResults: opts?.maxResults ?? 20,
-    pageToken: opts?.pageToken,
-    labelIds: ["INBOX"],
-  });
+  const result = await withGmailRetry<{
+    threads?: Array<{ id?: string }>;
+    nextPageToken?: string | null;
+  }>(`threads.list ${tenantId}`, () =>
+    tenant.gmail.api.threads.list({
+      maxResults: opts?.maxResults ?? 20,
+      pageToken: opts?.pageToken,
+      labelIds: ["INBOX"],
+    })
+  );
   logger.info("[GMAIL] threads.list (getThreads)", {
     tenantId, threadCount: (result.threads ?? []).length,
     hasNextPage: !!result.nextPageToken, durationMs: Date.now() - gmailStart,
@@ -301,10 +307,12 @@ export async function getThreads(
   const threadGetStart = Date.now();
   const detailed = await Promise.all(
     threadStubs.map((t: { id?: string }) =>
-      tenant.gmail.api.threads.get({
-        id: t.id!,
-        format: "metadata",
-      })
+      withGmailRetry<Record<string, unknown>>(`threads.get ${t.id}`, () =>
+        tenant.gmail.api.threads.get({
+          id: t.id!,
+          format: "metadata",
+        })
+      )
     )
   );
   logger.info("[GMAIL] threads.get batch (getThreads)", {
@@ -340,10 +348,12 @@ export async function getThread(
   const tenant = corsair.withTenant(tenantId);
 
   const gmailStart = Date.now();
-  const thread = await tenant.gmail.api.threads.get({
-    id: threadId,
-    format: "full",
-  });
+  const thread = await withGmailRetry(`threads.get ${threadId}`, () =>
+    tenant.gmail.api.threads.get({
+      id: threadId,
+      format: "full",
+    })
+  );
   logger.info("[GMAIL] threads.get (getThread)", {
     tenantId, threadId, durationMs: Date.now() - gmailStart,
   });
@@ -851,11 +861,16 @@ export async function searchEmails(
   const searchQuery = `${query} -in:sent`;
 
   const gmailStart = Date.now();
-  const result = await tenant.gmail.api.threads.list({
-    q: searchQuery,
-    maxResults: opts?.maxResults ?? 20,
-    pageToken: opts?.pageToken,
-  });
+  const result = await withGmailRetry<{
+    threads?: Array<{ id?: string }>;
+    nextPageToken?: string | null;
+  }>(`threads.list search ${tenantId}`, () =>
+    tenant.gmail.api.threads.list({
+      q: searchQuery,
+      maxResults: opts?.maxResults ?? 20,
+      pageToken: opts?.pageToken,
+    })
+  );
   logger.info("[GMAIL] threads.list (searchEmails)", {
     tenantId, query: searchQuery,
     threadCount: (result.threads ?? []).length,
@@ -870,10 +885,12 @@ export async function searchEmails(
 
   const detailed = await Promise.all(
     threadStubs.map((t: { id?: string }) =>
-      tenant.gmail.api.threads.get({
-        id: t.id!,
-        format: "metadata",
-      })
+      withGmailRetry<Record<string, unknown>>(`threads.get ${t.id}`, () =>
+        tenant.gmail.api.threads.get({
+          id: t.id!,
+          format: "metadata",
+        })
+      )
     )
   );
   logger.info("[GMAIL] threads.get batch (searchEmails)", {
