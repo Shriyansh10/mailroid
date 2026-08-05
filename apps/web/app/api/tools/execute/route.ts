@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { auth } from "@web/lib/auth";
+import { requireAdminSession, HttpError } from "@web/lib/require-admin";
 import {
   ToolOrchestrator,
   ToolRegistry,
@@ -67,19 +67,8 @@ export async function POST(request: Request) {
       );
     }
 
-    // ── Resolve userId from Better Auth session cookie ─────────────
-    const session = await auth.api.getSession({ headers: request.headers });
-    if (!session?.user?.id) {
-      return NextResponse.json(
-        {
-          status: "permission_denied",
-          toolName: "unknown",
-          error: "Unauthorized",
-          requestId,
-        },
-        { status: 401 },
-      );
-    }
+    // ── Resolve userId from Better Auth session cookie (admin-only) ─
+    const session = await requireAdminSession(request);
     const userId = session.user.id;
     console.log("[api:tools:execute] authenticated userId:", userId);
 
@@ -93,6 +82,18 @@ export async function POST(request: Request) {
 
     return NextResponse.json(result, { status: statusCode });
   } catch (error) {
+    if (error instanceof HttpError) {
+      return NextResponse.json(
+        {
+          status: "permission_denied",
+          toolName: "unknown",
+          error: error.message,
+          requestId,
+        },
+        { status: error.status },
+      );
+    }
+
     return NextResponse.json(
       {
         status: ToolExecutionStatus.FAILED,

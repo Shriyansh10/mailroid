@@ -14,6 +14,7 @@ import gmailStatus from "./commands/gmail-status.ts";
 import gmailResyncCategories from "./commands/gmail-resync-categories.ts";
 import gmailResync from "./commands/gmail-resync.ts";
 import gmailBackfillMessageIds from "./commands/gmail-backfill-message-ids.ts";
+import gmailBackfillPriority from "./commands/gmail-backfill-priority.ts";
 import calendarProbeSharedProps from "./commands/calendar-probe-shared-props.ts";
 import calendarInspectEvent from "./commands/calendar-inspect-event.ts";
 import calendarListEvents from "./commands/calendar-list-events.ts";
@@ -30,6 +31,7 @@ export const commands: Command[] = [
   gmailResyncCategories,
   gmailResync,
   gmailBackfillMessageIds,
+  gmailBackfillPriority,
   calendarProbeSharedProps,
   calendarListEvents,
   calendarTestGuestLookup,

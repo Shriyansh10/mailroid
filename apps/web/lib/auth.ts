@@ -31,6 +31,19 @@ export const auth = betterAuth({
   secret: process.env.BETTER_AUTH_SECRET!,
   baseURL: process.env.BETTER_AUTH_URL!,
 
+  // Must mirror apps/api/src/auth/auth.ts's additionalFields exactly — both
+  // instances point at the same `user` table, and Better Auth only includes
+  // declared fields in the returned session/user object, not a raw SELECT *.
+  user: {
+    additionalFields: {
+      isAdmin: {
+        type: "boolean",
+        defaultValue: false,
+        input: false,
+      },
+    },
+  },
+
   socialProviders: {
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID!,
@@ -38,3 +51,5 @@ export const auth = betterAuth({
     },
   },
 });
+
+export type Session = typeof auth.$Infer.Session;

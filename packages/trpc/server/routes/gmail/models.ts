@@ -13,6 +13,11 @@ export const threadSummaryOutputModel = z.object({
   priority: z.string().optional(),
   priorityScore: z.number().nullable().optional(),
   priorityReason: z.string().nullable().optional(),
+  /** Up to 2 profile signals ({source, value}) the classifier says drove the priority verdict. */
+  matchedSignals: z
+    .array(z.object({ source: z.string(), value: z.string() }))
+    .nullable()
+    .optional(),
   isActionRequired: z.boolean().optional(),
   isReplyNeeded: z.boolean().optional(),
   isUnread: z.boolean().optional(),

@@ -12,7 +12,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader,
   DialogTitle, DialogTrigger,
 } from "@web/components/ui/dialog";
-import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon, CalendarClockIcon } from "lucide-react";
+import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon, CalendarClockIcon, TerminalIcon } from "lucide-react";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 
 import { Input } from "@web/components/ui/input";
@@ -432,6 +432,12 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 <LayoutTemplateIcon className="mr-2 h-4 w-4" />
                 <span>Email Templates</span>
               </DropdownMenuItem>
+              {session?.user?.isAdmin && (
+                <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/developer")}>
+                  <TerminalIcon className="mr-2 h-4 w-4" />
+                  <span>Developer</span>
+                </DropdownMenuItem>
+              )}
               <DropdownMenuSeparator />
               <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={handleLogout}>
                 <LogOutIcon className="mr-2 h-4 w-4" />

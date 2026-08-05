@@ -25,3 +25,13 @@ export const protectedProcedure = publicProcedure.use(async ({ ctx, next }) => {
     },
   });
 });
+
+export const adminProcedure = protectedProcedure.use(async ({ ctx, next }) => {
+  if (!ctx.user.isAdmin) {
+    throw new TRPCError({
+      code: "FORBIDDEN",
+    });
+  }
+
+  return next({ ctx });
+});

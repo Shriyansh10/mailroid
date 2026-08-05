@@ -46,6 +46,14 @@ import { cn } from "@web/lib/utils";
 import { trpc } from "@web/trpc/client";
 import { toast } from "sonner";
 import {
+  GOAL_LABELS,
+  TOPIC_LABELS,
+  SENDER_CATEGORY_LABELS,
+  SERVICE_LABELS,
+  PREFERENCE_LABELS,
+} from "@repo/shared";
+import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tooltip";
+import {
   AlertDialog,
   AlertDialogAction,
   AlertDialogCancel,
@@ -131,6 +139,33 @@ function formatThreadDate(dateString: string): string {
 }
 
 // ── Priority Wax Seals ───────────────────────────────────────────────
+
+/**
+ * Turns one matchedSignal into a short sentence fragment for the "why" tooltip
+ * — never the raw {source, value} pair. `keyword`/`muted_sender` have no label
+ * map (the model emits free text for `value`), and any label-map miss falls
+ * back to the raw value inside the same sentence shape, never to bare data.
+ */
+function formatMatchedSignal(signal: { source: string; value: string }): string {
+  switch (signal.source) {
+    case "goal":
+      return `Matches your ${GOAL_LABELS[signal.value] ?? signal.value} goal`;
+    case "topic":
+      return `Matches your interest in ${TOPIC_LABELS[signal.value] ?? signal.value}`;
+    case "sender_category":
+      return `From a ${SENDER_CATEGORY_LABELS[signal.value] ?? signal.value} sender`;
+    case "service":
+      return `Related to ${SERVICE_LABELS[signal.value] ?? signal.value}, a service you use`;
+    case "preference":
+      return `Matches your preference: ${PREFERENCE_LABELS[signal.value] ?? signal.value}`;
+    case "keyword":
+      return `Contains keywords related to ${signal.value}`;
+    case "muted_sender":
+      return "From a muted sender";
+    default:
+      return signal.value;
+  }
+}
 
 function PrioritySeal({ priority }: { priority?: string; score?: number | null }) {
   // No priority means genuinely unclassified — never default to MEDIUM.
@@ -1064,7 +1099,33 @@ function DossierLayout({
                         )}
                       </div>
 
-                      {thread.priority && <PrioritySeal priority={thread.priority} score={thread.priorityScore} />}
+                      {thread.priority && (
+                        thread.priorityReason || (thread.matchedSignals && thread.matchedSignals.length > 0) ? (
+                          <Tooltip>
+                            <TooltipTrigger asChild>
+                              <span onClick={(e) => e.stopPropagation()}>
+                                <PrioritySeal priority={thread.priority} score={thread.priorityScore} />
+                              </span>
+                            </TooltipTrigger>
+                            <TooltipContent side="top" className="max-w-64 text-left text-xs">
+                              {thread.priorityReason && (
+                                <p className="font-medium">{thread.priorityReason}</p>
+                              )}
+                              {thread.matchedSignals && thread.matchedSignals.length > 0 && (
+                                <ul className="mt-1 list-disc pl-3 space-y-0.5">
+                                  {thread.matchedSignals.map(
+                                    (signal: { source: string; value: string }, i: number) => (
+                                      <li key={i}>{formatMatchedSignal(signal)}</li>
+                                    ),
+                                  )}
+                                </ul>
+                              )}
+                            </TooltipContent>
+                          </Tooltip>
+                        ) : (
+                          <PrioritySeal priority={thread.priority} score={thread.priorityScore} />
+                        )
+                      )}
                       <span
                         className={cn(
                           "text-[11px] w-14 text-right tabular-nums",

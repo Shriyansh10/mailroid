@@ -1,3 +1,4 @@
+import crypto from "node:crypto";
 import express from "express";
 import { logger } from "@repo/logger";
 import cors from "cors";
@@ -12,6 +13,7 @@ import { env } from "./env.js";
 
 import { authHandler } from "./auth/handler.js";
 import { auth } from "./auth/index.js";
+import { requireAdminSession, HttpError } from "./auth/require-admin.js";
 import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 import { handleCorsairWebhook } from "./auth/webhook-handler.js";
@@ -32,6 +34,30 @@ import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
 
+
+// Shared-secret token Google's push (Gmail Pub/Sub, Calendar watch channels)
+// must present as ?token=... on /api/webhook. There is no signature Google
+// itself sends on these pushes — verifyWebhookSignature in @repo/corsair
+// checks a different, Corsair-relay-specific header that never applies to a
+// direct Google push — so this is the actual authentication for that route.
+// Same throw-at-import posture as GMAIL_PUBSUB_TOPIC in gmail/watch.ts: refuse
+// to boot rather than silently serve an unauthenticated webhook endpoint.
+const WEBHOOK_PUSH_TOKEN: string = (() => {
+  const value = process.env.WEBHOOK_PUSH_TOKEN;
+  if (!value) {
+    throw new Error(
+      "WEBHOOK_PUSH_TOKEN is not set — refusing to start with an unauthenticated /api/webhook",
+    );
+  }
+  return value;
+})();
+
+function webhookTokenMatches(provided: string): boolean {
+  const providedBuf = Buffer.from(provided);
+  const expectedBuf = Buffer.from(WEBHOOK_PUSH_TOKEN);
+  if (providedBuf.length !== expectedBuf.length) return false;
+  return crypto.timingSafeEqual(providedBuf, expectedBuf);
+}
 
 export const app = express();
 const openApiDocument = generateOpenApiDocument(serverRouter, {
@@ -119,11 +145,23 @@ app.use(async (req, res, next) => {
 
 // Corsair webhooks — single endpoint for all plugins
 app.post("/api/webhook", async (req, res) => {
+  const providedToken = typeof req.query.token === "string" ? req.query.token : "";
+  if (!webhookTokenMatches(providedToken)) {
+    console.error("[webhook] rejected: missing or invalid push token");
+    return res.status(403).json({ error: "Forbidden" });
+  }
+
   try {
+    // Strip the token before this URL exists downstream at all, so it can
+    // never reach a log line inside handleCorsairWebhook or Corsair's own
+    // processWebhook — today or after some future change there.
+    const sanitized = new URL(`${req.protocol}://${req.get("host")}${req.originalUrl}`);
+    sanitized.searchParams.delete("token");
+
     const result = await handleCorsairWebhook({
       headers: req.headers as Record<string, string | string[] | undefined>,
       body: req.body,
-      url: `${req.protocol}://${req.get("host")}${req.originalUrl}`,
+      url: sanitized.toString(),
     });
 
     if (result.plugin) {
@@ -172,6 +210,7 @@ app.post("/api/webhook", async (req, res) => {
 // or returned. Registered before the /api catch-all router below so it isn't
 // swallowed by it.
 app.get("/api/_debug/egress", async (req, res) => {
+  await requireAdminSession(req);
   try {
     const attempts = Math.min(Number(req.query.attempts ?? 5) || 5, 20);
     const report = await probeEgress(attempts);
@@ -186,7 +225,8 @@ app.get("/api/_debug/egress", async (req, res) => {
 // whole system depends on: an expired/missing watch means Google stops
 // delivering with no other signal. `expired > 0` (or a high `missing`) is the
 // alarm. Reads only expiration columns — no credentials touched.
-app.get("/api/_debug/watch-health", async (_req, res) => {
+app.get("/api/_debug/watch-health", async (req, res) => {
+  await requireAdminSession(req);
   try {
     const report = await getWatchHealth();
     const degraded =
@@ -261,5 +301,16 @@ app.use(
     createContext: createContext(auth),
   }),
 );
+
+// Shared error-handling middleware — must be registered last. Express ^5
+// forwards a rejected promise from any async route handler here automatically,
+// so requireAdminSession (and anything else that throws HttpError) needs no
+// per-route try/catch.
+app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
+  if (err instanceof HttpError) {
+    return res.status(err.status).json({ error: err.message });
+  }
+  return next(err);
+});
 
 export default app;

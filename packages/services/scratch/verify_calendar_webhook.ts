@@ -5,6 +5,10 @@ import { dailyBriefs } from "../../database/models/daily-briefs.ts";
 import { createEvent, updateEvent, deleteEvent } from "../calendar/index.ts";
 import { getOrGenerateBrief } from "../gmail/daily-briefing.ts";
 
+// /api/webhook now checks a shared-secret ?token=... query param (see
+// apps/api/src/server.ts) — without it every simulated push below 403s.
+const WEBHOOK_URL = `http://localhost:8000/api/webhook?token=${process.env.WEBHOOK_PUSH_TOKEN ?? ""}`;
+
 async function main() {
   console.log("🚀 Starting Google Calendar Webhook E2E Verification Script...");
 
@@ -75,7 +79,7 @@ async function main() {
   if (!dbEvent) {
     console.warn("⚠️ Webhook did not trigger auto-sync within 10s (ngrok may be slow/offline). Simulating webhook request...");
     try {
-      const response = await fetch("http://localhost:8000/api/webhook", {
+      const response = await fetch(WEBHOOK_URL, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -147,7 +151,7 @@ async function main() {
 
   if (!updatedDbEvent) {
     console.warn("⚠️ Update did not auto-sync. Re-simulating webhook...");
-    await fetch("http://localhost:8000/api/webhook", {
+    await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -205,7 +209,7 @@ async function main() {
 
   if (!deleted) {
     console.warn("⚠️ Deletion did not auto-sync. Re-simulating webhook...");
-    await fetch("http://localhost:8000/api/webhook", {
+    await fetch(WEBHOOK_URL, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",

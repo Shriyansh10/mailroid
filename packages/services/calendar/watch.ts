@@ -148,9 +148,22 @@ export async function startCalendarWatch(
   // 5. Generate unique channel ID
   const channelId = crypto.randomUUID();
   const baseUrl = process.env.BASE_URL ?? "http://localhost:8000";
-  const webhookUrl = `${baseUrl}/api/webhook`;
 
-  console.log(`[calendar-watch] Registering watch channel ${channelId} for ${email} pointing to ${webhookUrl}`);
+  // /api/webhook checks this token on every request (see apps/api/src/server.ts)
+  // — Google Calendar pushes carry no signature of their own, so this is the
+  // only thing authenticating a push as actually coming from this channel.
+  const pushToken = process.env.WEBHOOK_PUSH_TOKEN;
+  if (!pushToken) {
+    throw new Error(
+      "WEBHOOK_PUSH_TOKEN is not set — refusing to register a Calendar watch against an unauthenticated webhook URL",
+    );
+  }
+  const webhookUrl = new URL("/api/webhook", baseUrl);
+  webhookUrl.searchParams.set("token", pushToken);
+  const webhookUrlString = webhookUrl.toString();
+
+  // Deliberately does not log webhookUrlString — it carries the push token.
+  console.log(`[calendar-watch] Registering watch channel ${channelId} for ${email} pointing to ${baseUrl}/api/webhook`);
 
   // 6. POST to Google Calendar watch API
   const response = await fetch(
@@ -164,7 +177,7 @@ export async function startCalendarWatch(
       body: JSON.stringify({
         id: channelId,
         type: "web_hook",
-        address: webhookUrl,
+        address: webhookUrlString,
       }),
     }
   );
