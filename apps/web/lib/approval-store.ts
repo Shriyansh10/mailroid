@@ -146,13 +146,16 @@ export class DrizzleApprovalStore implements PendingApprovalStore {
     args: Record<string, unknown>,
     preview?: string,
     maxRefinements?: number,
+    countsAgainstBudget = true,
   ): Promise<PendingApproval | undefined> {
-    const setValues: Record<string, unknown> = {
-      args,
-      // Counted in the same statement that rewrites the args, so the count can
-      // never drift from the number of rewrites that actually happened.
-      refineCount: sql`${pendingApprovals.refineCount} + 1`,
-    };
+    const setValues: Record<string, unknown> = { args };
+    // Counted in the same statement that rewrites the args, so the count can
+    // never drift from the number of rewrites that actually happened. Skipped
+    // entirely for a manual hand-edit, which spends no model credits and
+    // must not consume the AI-refinement budget.
+    if (countsAgainstBudget) {
+      setValues.refineCount = sql`${pendingApprovals.refineCount} + 1`;
+    }
     if (preview !== undefined) setValues.preview = preview;
 
     const conditions = [

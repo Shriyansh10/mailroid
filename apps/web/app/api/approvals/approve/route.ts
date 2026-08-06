@@ -20,6 +20,8 @@ import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
 import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel, getLatestSlotProposal, getLatestMeetingSelection } from "@web/lib/assistant/history";
 import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import { SCHEDULING_TOOLS, recordProposalOutcome } from "@web/lib/assistant/scheduling-outcome";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
+import { getPriorityProfile } from "@repo/services/profile/index";
 import crypto from "node:crypto";
 
 export const runtime = "nodejs";
@@ -38,14 +40,14 @@ const orchestrator = new ToolOrchestrator(registry, permissions, audit, approval
  */
 export async function POST(request: Request) {
   try {
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
-
     // ── Auth ───────────────────────────────────────────────────────
     const session = await auth.api.getSession({ headers: request.headers });
     if (!session?.user?.id) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     const userId = session.user.id;
+
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // ── Check Daily Action Limit ───────────────────────────────────
     const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
@@ -161,10 +163,11 @@ export async function POST(request: Request) {
         // route used to accept a client-supplied `messages[0]` system prompt
         // verbatim, which a crafted request could use to replace the SENDER
         // IDENTITY rules outright. Never trust it from the client again.
-        const [dbMsgs, emailContext, userIntents] = await Promise.all([
+        const [dbMsgs, emailContext, userIntents, profile] = await Promise.all([
           loadConversationHistory(conversationId),
           getActiveEmailContext(conversationId, userId),
           knownIntents(userId),
+          getPriorityProfile(userId),
         ]);
 
         const systemPrompt = buildSystemPrompt({
@@ -172,6 +175,7 @@ export async function POST(request: Request) {
           userEmail: session.user.email,
           emailContext,
           knownIntents: userIntents,
+          hasSignature: Boolean(profile?.data.signature?.enabled && profile.data.signature.text.trim()),
         });
 
         const trimmedHistory = trimHistoryForModel(dbMsgs);

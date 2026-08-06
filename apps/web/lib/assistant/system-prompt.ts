@@ -30,8 +30,15 @@ export function buildSystemPrompt(opts: {
    * to GENERAL_MEETING rather than matching the wrong rule.
    */
   knownIntents?: string[];
+  /**
+   * Whether the user has a saved, enabled signature. Never the literal text —
+   * `enrichMailBodyArgs` appends it to the tool args before the approval row
+   * is created (apps/web/lib/executors/gmail.ts), so Dobbie only needs to
+   * know not to write its own.
+   */
+  hasSignature?: boolean;
 }): string {
-  const { userTimeZone, userEmail, emailContext } = opts;
+  const { userTimeZone, userEmail, emailContext, hasSignature } = opts;
   const knownIntents = opts.knownIntents ?? [];
 
   const lines = [
@@ -62,9 +69,19 @@ export function buildSystemPrompt(opts: {
     `User: "Fetch the last 5 emails from bob@example.com"`,
     `Assistant calls searchEmails with { sender: "bob@example.com" } — this is a normal mailbox search, not impersonation, so proceed without asking permission or refusing.`,
     ``,
+    ...(hasSignature
+      ? [
+          `SIGNATURE`,
+          `The user has a saved signature. When writing the body for sendEmail, replyToEmail, or forwardEmail, never write your own closing or sign-off — no "Best regards,", "Sincerely,", a name, or a bracket placeholder like "[Your Name]". The app appends the user's real signature automatically after your text. End the body with the substance of the message and stop there.`,
+          ``,
+        ]
+      : [
+          `Never emit bracket placeholders like "[Your Name]" or "[Company]" when writing an email body. Omit what you don't know.`,
+          ``,
+        ]),
     `CURRENT CONTEXT`,
     `User local timezone: ${userTimeZone}`,
-    `Current date (local timezone): ${new Date().toLocaleDateString("en-CA")}`,
+    `Current date (local timezone): ${new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone })}`,
     `Current date (UTC): ${new Date().toISOString().slice(0, 10)}`,
     `Current local time: ${new Date().toLocaleString("en-US", { timeZone: userTimeZone })}`,
     `Current timestamp (UTC): ${new Date().toISOString()}`,
@@ -75,6 +92,11 @@ export function buildSystemPrompt(opts: {
     `"Day after tomorrow" means exactly two calendar days after the current local date.`,
     `Always use the current year unless the user explicitly specifies another year.`,
     `When creating calendar events, output start/end times as ISO 8601 datetime strings without offset (e.g. YYYY-MM-DDTHH:MM:SS) representing the user's local time.`,
+    `A requested clock time that has already passed TODAY is not automatically "tomorrow" or automatically invalid — it depends on whether the user pinned the date:`,
+    `- If they gave no date at all ("schedule a meeting at 4pm", and it's already past 4pm) there is one sensible reading — the next occurrence of that time, i.e. tomorrow. Use it without asking; asking here is needless friction.`,
+    `- If they explicitly said "today" or gave today's date for a time that has already passed, do NOT silently move it to tomorrow — that changes what they asked for. Ask which day they meant instead.`,
+    `- createEvent/scheduleThreadMeeting/rescheduleThreadMeeting will refuse with an error if a proposed start time has already passed — treat that error as a sign to ask the user which date they meant, not as a bug to route around.`,
+    `Every event getEvents returns carries a "status" field: "past", "in-progress", or "upcoming" ("all-day" for all-day events, which have no meaningful past/upcoming distinction). Never present a "past" event as if it's still ahead — say plainly that it already happened. This does not mean hiding past events: if the user is asking retrospectively ("what did I have today", "did I meet with X"), include them. For a forward-looking ask ("what's my day look like", "prepare me for today"), lead with what's still ahead; if there's nothing left, say so plainly ("Nothing left today") rather than relisting the whole day as if it hadn't happened yet. When a day has both, structure the answer as Completed / Remaining rather than one flat chronological list.`,
     ``,
     `MEETINGS THAT COME FROM AN EMAIL`,
     `When a meeting arises from an email thread, use the thread-scoped tools and pass the threadId from the EMAIL CONTEXT block below:`,

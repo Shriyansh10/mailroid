@@ -3,6 +3,7 @@ import { auth } from "@web/lib/auth";
 import { db } from "@repo/database";
 import { conversations, assistantMessages } from "@repo/database/schema";
 import { getOrCreateSummary } from "@web/lib/summarize/get-or-create-summary";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -43,7 +44,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "entityId is required" }, { status: 400 });
     }
 
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // Re-derives the summary (or hits cache — true almost always, since the
     // inbox card already summarized this email before the button appears)

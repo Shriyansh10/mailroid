@@ -28,6 +28,8 @@ import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
 import { matchProtectedKeyword } from "@repo/shared";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
+import { getPriorityProfile } from "@repo/services/profile/index";
 
 export const runtime = "nodejs";
 
@@ -178,7 +180,7 @@ export async function POST(request: Request) {
       content: userMessageText,
     });
 
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // ── AI setup gate ────────────────────────────────────────────────
     // Belt-and-braces alongside the client-side disabled state: `ready` is a
@@ -252,10 +254,11 @@ export async function POST(request: Request) {
     }
 
     // ── Build the model's view of the conversation, server-side ────
-    const [history, emailContext, userIntents] = await Promise.all([
+    const [history, emailContext, userIntents, profile] = await Promise.all([
       loadConversationHistory(conversationId),
       getActiveEmailContext(conversationId, userId),
       knownIntents(userId),
+      getPriorityProfile(userId),
     ]);
 
     const systemPrompt = buildSystemPrompt({
@@ -263,6 +266,7 @@ export async function POST(request: Request) {
       userEmail: session.user.email,
       emailContext,
       knownIntents: userIntents,
+      hasSignature: Boolean(profile?.data.signature?.enabled && profile.data.signature.text.trim()),
     });
     const trimmedHistory = trimHistoryForModel(history);
 

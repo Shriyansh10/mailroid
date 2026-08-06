@@ -106,6 +106,24 @@ export interface ToolDefinition<
     ctx: { userId: string; userTimeZone?: string; userEmail?: string },
   ) => Promise<string> | string;
   /**
+   * Deterministic policy applied to a tool call's args BEFORE the approval
+   * row is created — runs once, in the orchestrator, ahead of `buildPreview`
+   * and `approvalStore.create`. This is the only correct place for
+   * "enrich what the model proposed" logic (e.g. appending the user's real
+   * email signature): the executor runs only AFTER the user approves, so
+   * anything added there would show an unsigned body on the approval card
+   * and send a signed one, breaking the approve-what-you-see guarantee the
+   * approval flow depends on. Never called again on the second, post-approval
+   * `executeTool` pass (`skipPermissionCheck: true`) — it reads back the
+   * already-enriched `args` stored on the approval row, so this must not be
+   * re-run there or an idempotency-sensitive enrichment (like signature
+   * append) would double up.
+   */
+  enrichArgs?: (
+    args: Record<string, unknown>,
+    ctx: { userId: string; userTimeZone?: string; userEmail?: string },
+  ) => Promise<Record<string, unknown>> | Record<string, unknown>;
+  /**
    * Gate that runs BEFORE an approval card is minted. Return a string to abort
    * the call with that text as the model-facing error — no card, no write.
    * Return null to let the call proceed.

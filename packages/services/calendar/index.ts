@@ -276,6 +276,28 @@ export function normalizeToUtcTimestamp(isoString: string, timeZone?: string): s
 }
 
 /**
+ * A safety net, not the primary UX: the system prompt should already have
+ * resolved an unpinned past time to its next occurrence, or asked the user
+ * when they explicitly pinned an already-past "today" — see the TIME RULES
+ * addition in apps/web/lib/assistant/system-prompt.ts. This only catches
+ * whatever still slips through; it must never be the first place a past
+ * time gets rejected, since a hard refusal on every unpinned "4pm" would be
+ * needless friction for the common case (there's really one sensible
+ * reading — tomorrow — and no ambiguity to ask about).
+ *
+ * Throws rather than returning a boolean so callers get a message they can
+ * hand straight to `ToolExecutionError` without composing their own.
+ */
+export function assertNotPast(startIso: string, timeZone?: string): void {
+  const instant = new Date(normalizeToUtcTimestamp(startIso, timeZone));
+  if (!Number.isNaN(instant.getTime()) && instant.getTime() < Date.now()) {
+    throw new Error(
+      `${startIso} (in ${timeZone ?? "UTC"}) has already passed. Ask the user which date they meant instead of guessing.`,
+    );
+  }
+}
+
+/**
  * Resolve the timezone to use for calendar events.
  * Priority: the caller's timezone -> the calendar's own setting -> UTC.
  *

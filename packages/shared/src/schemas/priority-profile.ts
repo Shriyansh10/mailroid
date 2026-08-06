@@ -145,6 +145,17 @@ export const priorityProfileModel = z.object({
     socialNotifications: z.boolean(),
     githubNotifications: z.boolean(),
   }),
+  // Appended verbatim after AI-generated mail (compose/reply/forward, and
+  // Dobbie's own chat-composed sends) — never model-generated. An object
+  // rather than a bare string so "disable temporarily" is just a flag flip,
+  // not another schema change. Optional so profiles saved before this field
+  // existed still parse.
+  signature: z
+    .object({
+      enabled: z.boolean(),
+      text: z.string().max(500),
+    })
+    .optional(),
 });
 
 export type PriorityProfile = z.infer<typeof priorityProfileModel>;
@@ -194,6 +205,7 @@ export const DEFAULT_PRIORITY_PROFILE: PriorityProfile = {
     socialNotifications: false,
     githubNotifications: true,
   },
+  signature: { enabled: false, text: "" },
 };
 
 // ── Sanitizers (normalization lives here, not in the schema) ──────────

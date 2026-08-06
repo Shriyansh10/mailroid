@@ -235,8 +235,6 @@ export default function ThreadDetailPage() {
     primaryMeeting,
     deletedLink,
     isGuest: isGuestOnMeeting,
-    isUnknown: meetingStateUnknown,
-    resolution: meetingResolution,
   } = useThreadMeetings(threadId);
   const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
@@ -631,20 +629,6 @@ export default function ThreadDetailPage() {
             onCancel={handleCancelMeeting}
             onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
           />
-        )}
-
-        {/* "We can't tell" is not the same as "there is none", and rendering
-            them identically is the silent degradation this codebase keeps
-            relearning. A thread imported before Message-ID capture, or one
-            whose lookup just failed, says so rather than implying the absence
-            of a meeting it never actually checked for. */}
-        {meetingStateUnknown && !deletedLink && (
-          <div className="rounded-xl border border-dashed bg-muted/20 p-3 text-xs text-muted-foreground">
-            We can't tell whether this thread has a meeting
-            {meetingResolution === "unindexed"
-              ? " — it was imported before meeting-linking existed."
-              : " right now."}
-          </div>
         )}
 
         {/* Directly under the card, so pressing Reschedule opens the form

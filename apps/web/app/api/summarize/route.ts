@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server";
 import { auth } from "@web/lib/auth";
 import { getOrCreateSummary } from "@web/lib/summarize/get-or-create-summary";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -35,7 +36,7 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "entityId is required" }, { status: 400 });
     }
 
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     const outcome = await getOrCreateSummary({
       userId,

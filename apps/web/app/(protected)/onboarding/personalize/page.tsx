@@ -11,12 +11,15 @@ import {
   useUpsertPriorityProfile,
 } from "@web/hooks/api/profile";
 import { ProfileWizard } from "@web/components/priority-profile/profile-wizard";
+import { TimezoneCard } from "@web/components/scheduling/timezone-card";
+import { useSchedulingSettings } from "@web/hooks/api/scheduling";
 import logoImg from "../../../../assets/Logo/mailroid-no-background.png";
 
 export default function PersonalizePage() {
   const router = useRouter();
   const { data: existing, isLoading } = usePriorityProfile();
   const { upsertProfileAsync, isPending } = useUpsertPriorityProfile();
+  const { data: schedulingSettings } = useSchedulingSettings();
   const [leaving, setLeaving] = useState(false);
 
   // Someone who already completed the form has no business back here —
@@ -74,11 +77,14 @@ export default function PersonalizePage() {
           </p>
         </div>
 
+        <TimezoneCard />
+
         <div className="rounded-2xl border bg-card/50 p-6 shadow-sm">
           <ProfileWizard
             onSave={handleSave}
             saving={isPending || leaving}
             showOnboardingNote
+            finishDisabled={!schedulingSettings?.timeZone}
           />
         </div>
       </div>

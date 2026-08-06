@@ -85,6 +85,12 @@ export interface PendingApprovalStore {
    * once that many rewrites have happened — enforced in the same statement,
    * so concurrent requests cannot both pass the check and exceed the cap.
    *
+   * `countsAgainstBudget` (default true) controls whether this call
+   * increments `refineCount` at all — a hand-typed edit spends no model
+   * credits and must not consume the AI-refinement budget, so the manual-
+   * edit route passes `false`. `maxRefinements` being omitted only skips the
+   * *cap check*, not the increment itself — the two are independent knobs.
+   *
    * Returns the updated row, or undefined if it was not eligible.
    */
   updateArgs(
@@ -93,6 +99,7 @@ export interface PendingApprovalStore {
     args: Record<string, unknown>,
     preview?: string,
     maxRefinements?: number,
+    countsAgainstBudget?: boolean,
   ): Promise<PendingApproval | undefined>;
 
   /**

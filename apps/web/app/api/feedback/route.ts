@@ -3,6 +3,7 @@ import { auth } from "@web/lib/auth";
 import { db, eq, and, sql } from "@repo/database";
 import { feedbacks, userUsage } from "@repo/database/schema";
 import { evaluateFeedback, withAiUsage } from "@repo/ai";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -58,9 +59,7 @@ export async function POST(request: Request) {
     const normalized = normalizeText(trimmedFeedback);
 
     // Resolve date and timezone
-    const userTimeZone = request.headers.get("x-user-timezone") || "UTC";
-    const tzRegex = /^[a-zA-Z0-9_\/+-]+$/;
-    const safeTimeZone = tzRegex.test(userTimeZone) ? userTimeZone : "UTC";
+    const safeTimeZone = (await resolveEffectiveTimeZone(userId, request)) ?? "UTC";
     const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: safeTimeZone });
 
     // Check unlock state database-wide to block multiple unlocks today

@@ -70,6 +70,7 @@ export function ProfileWizard({
   onSave,
   saving,
   showOnboardingNote,
+  finishDisabled,
 }: {
   initialValues?: PriorityProfile;
   onSave: (profile: PriorityProfile) => void | Promise<void>;
@@ -81,6 +82,13 @@ export function ProfileWizard({
    * twice in a row.
    */
   showOnboardingNote?: boolean;
+  /**
+   * Keeps "Save & finish" disabled regardless of form validity — used by
+   * onboarding to require a timezone (shown above the wizard, not gating it
+   * away) before the profile can be submitted. Never disables "Next" on
+   * earlier steps, only the final submit.
+   */
+  finishDisabled?: boolean;
 }) {
   const [step, setStep] = useState(0);
 
@@ -174,7 +182,11 @@ export function ProfileWizard({
           >
             Back
           </Button>
-          <Button type="button" onClick={handleNext} disabled={saving}>
+          <Button
+            type="button"
+            onClick={handleNext}
+            disabled={saving || (isLast && finishDisabled)}
+          >
             {saving ? "Saving…" : isLast ? "Save & finish" : "Next"}
           </Button>
         </div>

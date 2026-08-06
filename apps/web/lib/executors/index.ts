@@ -6,6 +6,7 @@ import {
   buildReplyPreview,
   ForwardEmailExecutor,
   buildForwardPreview,
+  enrichMailBodyArgs,
 } from "./gmail";
 import type { SearchEmailsInput, SendEmailInput, ReplyToEmailInput, ForwardEmailInput } from "./gmail";
 import {
@@ -98,6 +99,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       ...sendDef,
       execute: (args, ctx) =>
         sendExec.execute(args as SendEmailInput, ctx as ToolExecutionContext),
+      enrichArgs: (args, ctx) => enrichMailBodyArgs(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ sendEmail replaced with Corsair executor");
   } else {
@@ -299,6 +301,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       execute: (args, ctx) =>
         replyExec.execute(args as ReplyToEmailInput, ctx as ToolExecutionContext),
       buildPreview: (args, ctx) => buildReplyPreview(args, ctx),
+      enrichArgs: (args, ctx) => enrichMailBodyArgs(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ replyToEmail replaced with Corsair executor");
   } else {
@@ -313,6 +316,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       execute: (args, ctx) =>
         forwardExec.execute(args as ForwardEmailInput, ctx as ToolExecutionContext),
       buildPreview: (args, ctx) => buildForwardPreview(args, ctx),
+      enrichArgs: (args, ctx) => enrichMailBodyArgs(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ forwardEmail replaced with Corsair executor");
   } else {

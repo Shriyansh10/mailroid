@@ -14,6 +14,8 @@ import { Button } from "@web/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@web/components/ui/card";
 import { Badge } from "@web/components/ui/badge";
 import { authClient, useSession } from "@web/lib/auth-client";
+import { cn } from "@web/lib/utils";
+import { getEventStatus, type EventStatus } from "@repo/shared/time";
 import FullCalendar from "@fullcalendar/react";
 import dayGridPlugin from "@fullcalendar/daygrid";
 import timeGridPlugin from "@fullcalendar/timegrid";
@@ -88,6 +90,16 @@ function formatEventTime(event: EventTimes): string {
     return d.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" });
   };
   return `${formatTime(start)} - ${formatTime(end)}`;
+}
+
+/** A small live-pulse dot for the one event currently in progress. */
+function LiveDot() {
+  return (
+    <span className="relative flex size-1.5 shrink-0">
+      <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-75" />
+      <span className="relative inline-flex size-1.5 rounded-full bg-emerald-500" />
+    </span>
+  );
 }
 
 export default function CalendarPage() {
@@ -508,10 +520,26 @@ export default function CalendarPage() {
   }, [events]);
 
   const renderEventContent = useCallback((eventInfo: any) => {
+    const start = eventInfo.event.start as Date | null;
+    const end = eventInfo.event.end as Date | null;
+    const status: EventStatus | null = start
+      ? getEventStatus(
+          { start: start.toISOString(), end: end?.toISOString(), allDay: eventInfo.event.allDay },
+          new Date(),
+        )
+      : null;
+
     return (
-      <div className="bg-[#b08d57]/10 border-l-2 border-[#b08d57] text-[#b08d57] dark:bg-[#b08d57]/20 dark:text-[#D9D1C1] px-2 py-0.5 rounded text-[11px] font-medium w-full overflow-hidden truncate">
+      <div
+        className={cn(
+          "bg-[#b08d57]/10 border-l-2 border-[#b08d57] text-[#b08d57] dark:bg-[#b08d57]/20 dark:text-[#D9D1C1] px-2 py-0.5 rounded text-[11px] font-medium w-full overflow-hidden truncate flex items-center gap-1",
+          status === "past" && "opacity-50",
+          status === "in-progress" && "border-emerald-500",
+        )}
+      >
+        {status === "in-progress" && <LiveDot />}
         {eventInfo.timeText && <span className="font-mono font-bold mr-1.5 opacity-80">{eventInfo.timeText}</span>}
-        <span className="font-sans font-semibold">{eventInfo.event.title}</span>
+        <span className="font-sans font-semibold truncate">{eventInfo.event.title}</span>
       </div>
     );
   }, []);
@@ -586,18 +614,29 @@ export default function CalendarPage() {
                 <div className="text-xs text-muted-foreground italic pl-1">No meetings today.</div>
               ) : (
                 <div className="space-y-2">
-                  {groupedEvents.today.map((event) => (
-                    <Card 
-                      key={event.id} 
-                      className="p-3 border bg-card hover:bg-muted/30 hover:border-[#b08d57]/20 transition-all cursor-pointer"
-                      onClick={() => handleEventClick({ event: { id: event.id, title: event.title, startStr: event.start, endStr: event.end, allDay: event.allDay } } as any)}
-                    >
-                      <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
-                      <div className="text-[10px] text-muted-foreground font-mono mt-1">
-                        {formatEventTime(event)}
-                      </div>
-                    </Card>
-                  ))}
+                  {groupedEvents.today.map((event) => {
+                    const status = getEventStatus(event, new Date());
+                    return (
+                      <Card
+                        key={event.id}
+                        className={cn(
+                          "p-3 border bg-card hover:bg-muted/30 hover:border-[#b08d57]/20 transition-all cursor-pointer",
+                          status === "past" && "opacity-50",
+                          status === "in-progress" && "border-emerald-500/40",
+                        )}
+                        onClick={() => handleEventClick({ event: { id: event.id, title: event.title, startStr: event.start, endStr: event.end, allDay: event.allDay } } as any)}
+                      >
+                        <div className="flex items-center gap-1.5">
+                          {status === "in-progress" && <LiveDot />}
+                          <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
+                        </div>
+                        <div className="text-[10px] text-muted-foreground font-mono mt-1 flex items-center gap-1.5">
+                          <span>{formatEventTime(event)}</span>
+                          {status === "past" && <span className="text-muted-foreground/60">· Past</span>}
+                        </div>
+                      </Card>
+                    );
+                  })}
                 </div>
               )}
             </div>

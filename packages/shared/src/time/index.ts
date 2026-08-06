@@ -223,6 +223,37 @@ export function combineDateAndTime(date: Date, minutesOfDay: number): Date {
   );
 }
 
+// ── Event status ──────────────────────────────────────────────────────
+//
+// "Where does this event sit relative to now" — one shared answer for the
+// calendar page, the getEvents tool, and anywhere else that needs to stop
+// presenting a finished meeting as if it's still ahead. All-day events get
+// their own status rather than a time comparison: they have no meaningful
+// start/end instant to compare (see calendar/page.tsx's `todaySummary`,
+// which excludes them from its upcoming count for the same reason).
+
+export interface EventStatusInput {
+  start: string;
+  end?: string;
+  allDay?: boolean;
+}
+
+export type EventStatus = "past" | "in-progress" | "upcoming" | "all-day";
+
+export function getEventStatus(event: EventStatusInput, now: Date = new Date()): EventStatus {
+  if (event.allDay) return "all-day";
+
+  const start = new Date(event.start);
+  if (Number.isNaN(start.getTime())) return "upcoming"; // malformed — never claim "past" on bad data
+
+  if (now < start) return "upcoming";
+
+  const end = event.end ? new Date(event.end) : null;
+  if (end && !Number.isNaN(end.getTime()) && now >= end) return "past";
+
+  return "in-progress";
+}
+
 // ── Display formatting ───────────────────────────────────────────────
 //
 // Shared rather than per-component: the same meeting is rendered by the

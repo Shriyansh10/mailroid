@@ -5,7 +5,7 @@ import { useRouter } from "next/navigation";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { toast } from "sonner";
-import { ArrowLeftIcon, PencilIcon, SparklesIcon, ShieldIcon } from "lucide-react";
+import { ArrowLeftIcon, PencilIcon, SparklesIcon, ShieldIcon, PenLineIcon } from "lucide-react";
 import {
   priorityProfileModel,
   DEFAULT_PRIORITY_PROFILE,
@@ -37,6 +37,9 @@ import {
 } from "@web/components/ui/card";
 import { Badge } from "@web/components/ui/badge";
 import { Form } from "@web/components/ui/form";
+import { Textarea } from "@web/components/ui/textarea";
+import { Switch } from "@web/components/ui/switch";
+import { Label } from "@web/components/ui/label";
 import {
   StepAbout,
   StepGoalsFocus,
@@ -241,6 +244,74 @@ function ProtectedCard({
   );
 }
 
+// ── Signature card (always visible, edits inline) ─────────────────────
+
+const DEFAULT_SIGNATURE = { enabled: false, text: "" };
+
+function SignatureCard({
+  profile,
+  completedOnboarding,
+}: {
+  profile: PriorityProfile;
+  completedOnboarding: boolean;
+}) {
+  const { upsertProfileAsync, isPending } = useUpsertPriorityProfile();
+  const saved = profile.signature ?? DEFAULT_SIGNATURE;
+  const [enabled, setEnabled] = useState(saved.enabled);
+  const [text, setText] = useState(saved.text);
+
+  const dirty = enabled !== saved.enabled || text !== saved.text;
+
+  const handleSave = async () => {
+    try {
+      await upsertProfileAsync({
+        data: { ...profile, signature: { enabled, text } },
+        completedOnboarding,
+      });
+      toast.success("Signature saved");
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Failed to save");
+    }
+  };
+
+  return (
+    <Card>
+      <CardHeader>
+        <CardTitle className="flex items-center gap-2">
+          <PenLineIcon className="size-4" />
+          Signature
+        </CardTitle>
+        <CardDescription>
+          Appended after every AI-generated email — compose, reply, forward,
+          and anything Dobbie sends. The AI never writes its own closing or
+          sign-off; this is what goes there instead.
+        </CardDescription>
+      </CardHeader>
+      <CardContent className="flex flex-col gap-4">
+        <div className="flex items-center justify-between gap-4">
+          <Label htmlFor="signature-enabled" className="text-sm font-medium">
+            Use this signature
+          </Label>
+          <Switch id="signature-enabled" checked={enabled} onCheckedChange={setEnabled} />
+        </div>
+        <Textarea
+          value={text}
+          onChange={(e) => setText(e.target.value.slice(0, 500))}
+          placeholder={"Best,\nYour Name"}
+          rows={4}
+          maxLength={500}
+        />
+        <div className="flex items-center justify-between">
+          <p className="text-xs text-muted-foreground">{text.length}/500</p>
+          <Button onClick={handleSave} disabled={isPending || !dirty}>
+            {isPending ? "Saving…" : "Save"}
+          </Button>
+        </div>
+      </CardContent>
+    </Card>
+  );
+}
+
 // ── Editable one-page form (the wizard's steps, stacked) ──────────────
 
 const SECTIONS = [
@@ -390,6 +461,11 @@ export default function PersonalizationSettingsPage() {
         )}
 
         <ProtectedCard
+          profile={record?.data ?? DEFAULT_PRIORITY_PROFILE}
+          completedOnboarding={record?.completedOnboarding ?? false}
+        />
+
+        <SignatureCard
           profile={record?.data ?? DEFAULT_PRIORITY_PROFILE}
           completedOnboarding={record?.completedOnboarding ?? false}
         />

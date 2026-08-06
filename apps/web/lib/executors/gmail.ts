@@ -1,5 +1,5 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError } from "@repo/ai";
+import { ToolExecutionError, appendSignature } from "@repo/ai";
 import {
   searchLocalEmails,
   sendEmail as corsairSendEmail,
@@ -8,6 +8,7 @@ import {
   previewReply,
   previewForward,
 } from "@repo/services/gmail/index";
+import { getPriorityProfile } from "@repo/services/profile/index";
 import { db, eq } from "@repo/database";
 import { user } from "@repo/database/schema";
 
@@ -26,6 +27,28 @@ async function getAuthenticatedEmail(userId: string): Promise<string> {
     throw new Error(`User ${userId} not found`);
   }
   return dbUser.email;
+}
+
+/**
+ * `enrichArgs` for sendEmail/replyToEmail/forwardEmail (see
+ * packages/ai/src/tools/types.ts) — appends the user's saved signature to
+ * `args.body` BEFORE the approval row is created, so the approval-card
+ * preview, the Phase 4 edit textarea, and the mail that actually sends are
+ * always the same text. Must run exactly once, here, not in `execute()`:
+ * the executor only runs after the user approves, so appending there would
+ * show an unsigned body on the card and send a signed one.
+ */
+export async function enrichMailBodyArgs(
+  args: Record<string, unknown>,
+  ctx: { userId: string },
+): Promise<Record<string, unknown>> {
+  if (typeof args.body !== "string") return args;
+
+  const profile = await getPriorityProfile(ctx.userId);
+  const signature = profile?.data.signature;
+  if (!signature?.enabled || !signature.text.trim()) return args;
+
+  return { ...args, body: appendSignature(args.body, signature) };
 }
 
 export interface SearchEmailsInput {

@@ -124,6 +124,8 @@ export {
 export type { EmailSummaryResult, SummaryData } from "./prompts/summarize.ts";
 export { generateEmailContent } from "./prompts/generate-email.ts";
 export type { GenerateEmailInput, GenerateEmailResult } from "./prompts/generate-email.ts";
+export { appendSignature, stripTrailingSignOff } from "./prompts/signature.ts";
+export type { StoredSignature } from "./prompts/signature.ts";
 export {
   refineEmailBody,
   REFINE_DIRECTIVES,

@@ -11,6 +11,7 @@ import {
 } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
 import { checkDailyLimit } from "@web/lib/limits";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -77,7 +78,7 @@ export async function POST(request: Request) {
     }
     const { approvalId, directive } = parsed.data;
 
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // ── Load and vet the approval ────────────────────────────────────
     const approval = await approvalStore.get(approvalId);

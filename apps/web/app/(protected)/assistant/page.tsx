@@ -10,9 +10,10 @@ import {
   ArrowLeftIcon, 
   Loader2Icon, 
   ShieldAlertIcon, 
-  CheckIcon, 
+  CheckIcon,
   XIcon,
-  Trash2Icon
+  Trash2Icon,
+  PencilIcon
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
@@ -21,6 +22,7 @@ import { useConversations, useConversationMessages, useDeleteConversation } from
 import { useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 import { Button } from "@web/components/ui/button";
+import { Textarea } from "@web/components/ui/textarea";
 import { Progress } from "@web/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tooltip";
 import { EmailReferenceCard, type EmailReference } from "@web/components/email-reference-card";
@@ -542,6 +544,16 @@ function AssistantPageInner() {
   const [refineCounts, setRefineCounts] = useState<Record<string, number>>({});
 
   /**
+   * Uncommitted hand-edits to a draft body, keyed by approvalId. Only holds
+   * an entry while the textarea differs from the server's `draftBody` — once
+   * saved (or reverted), the key is removed so the textarea falls back to
+   * reading `draftBody` directly rather than a stale local copy.
+   */
+  const [editDrafts, setEditDrafts] = useState<Record<string, string>>({});
+  const [savingEdit, setSavingEdit] = useState<string | null>(null);
+  const [editError, setEditError] = useState<{ approvalId: string; message: string } | null>(null);
+
+  /**
    * Rewrite a pending draft in place. The server is the only writer — it
    * refuses anything no longer PENDING — so on success we just adopt the body
    * it returns rather than optimistically editing and hoping it stuck.
@@ -598,6 +610,61 @@ function AssistantPageInner() {
       });
     } finally {
       setRefining(null);
+    }
+  };
+
+  /**
+   * Save a hand-typed edit to a pending draft — no AI call, unlike
+   * handleRefine. Same adopt-the-server-response pattern: the server is the
+   * only writer, so on success we take its returned body rather than trust
+   * the local textarea state (a concurrent refine/edit could have raced it).
+   */
+  const handleEditDraft = async (msg: ChatMessage) => {
+    const ar = msg.approvalRequired;
+    if (!ar || savingEdit) return;
+    const newBody = editDrafts[ar.approvalId];
+    if (newBody === undefined) return;
+
+    setSavingEdit(ar.approvalId);
+    setEditError(null);
+
+    try {
+      const res = await fetch("/api/approvals/edit", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId: ar.approvalId, body: newBody }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error ?? `Server error (${res.status})`);
+      }
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id && m.approvalRequired
+            ? {
+                ...m,
+                approvalRequired: {
+                  ...m.approvalRequired,
+                  args: { ...m.approvalRequired.args, body: data.body },
+                },
+              }
+            : m,
+        ),
+      );
+      setEditDrafts((prev) => {
+        const next = { ...prev };
+        delete next[ar.approvalId];
+        return next;
+      });
+    } catch (error) {
+      setEditError({
+        approvalId: ar.approvalId,
+        message: error instanceof Error ? error.message : "Could not save this edit.",
+      });
+    } finally {
+      setSavingEdit(null);
     }
   };
 
@@ -949,6 +1016,7 @@ function AssistantPageInner() {
                               </div>
                             );
                           }
+                          const approvalId = msg.approvalRequired.approvalId;
                           const draftBody =
                             typeof msg.approvalRequired.args?.body === "string"
                               ? (msg.approvalRequired.args.body as string)
@@ -968,6 +1036,11 @@ function AssistantPageInner() {
                               : null;
                           const refinesUsed = refineCounts[msg.approvalRequired.approvalId] ?? 0;
                           const refinesSpent = refinesUsed >= MAX_REFINEMENTS;
+                          const editedBody = editDrafts[approvalId];
+                          const hasUnsavedEdit = editedBody !== undefined && editedBody !== draftBody;
+                          const savingThisEdit = savingEdit === approvalId;
+                          const editErrorHere =
+                            editError !== null && editError.approvalId === approvalId ? editError.message : null;
 
                           return (
                             <div className="mt-4 border border-[#b08d57]/30 bg-[#b08d57]/5 rounded-xl p-5 max-w-2xl shadow-sm">
@@ -1025,17 +1098,54 @@ function AssistantPageInner() {
 
                                 {/* The message itself. Until this was shown, approving
                                     meant sending text the user had never read — the card
-                                    listed only To and Subject. Scrolls rather than
-                                    truncates: a body you can only half-see is no better
-                                    than one you cannot see when the point is consent. */}
+                                    listed only To and Subject. Editable when the tool has
+                                    a body at all: a human is already in this loop for
+                                    approval, so fixing a typo here costs no AI call and
+                                    can't touch anything the model didn't already write. */}
                                 {draftBody && (
                                   <div className="pt-2 border-t mt-1">
-                                    <div className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-1.5">
-                                      Message
+                                    <div className="font-mono text-[10px] text-muted-foreground uppercase tracking-widest mb-1.5 flex items-center justify-between">
+                                      <span className="flex items-center gap-1">
+                                        <PencilIcon className="size-2.5" />
+                                        Message {isRefinable && <span className="normal-case tracking-normal opacity-70">— editable</span>}
+                                      </span>
+                                      {isRefinable && hasUnsavedEdit && (
+                                        <Button
+                                          size="sm"
+                                          variant="outline"
+                                          onClick={() => handleEditDraft(msg)}
+                                          disabled={savingThisEdit}
+                                          className="h-6 px-2 text-[10px] gap-1"
+                                        >
+                                          {savingThisEdit ? (
+                                            <Loader2Icon className="size-2.5 animate-spin" />
+                                          ) : (
+                                            <CheckIcon className="size-2.5" />
+                                          )}
+                                          Save edit
+                                        </Button>
+                                      )}
                                     </div>
-                                    <div className="max-h-72 overflow-y-auto whitespace-pre-wrap wrap-break-word text-sm text-foreground font-sans leading-relaxed pr-1">
-                                      {draftBody}
-                                    </div>
+                                    {isRefinable ? (
+                                      <Textarea
+                                        value={editedBody ?? draftBody}
+                                        onChange={(e) =>
+                                          setEditDrafts((prev) => ({ ...prev, [approvalId]: e.target.value }))
+                                        }
+                                        disabled={savingThisEdit}
+                                        rows={6}
+                                        className="max-h-72 text-sm text-foreground font-sans leading-relaxed resize-y"
+                                      />
+                                    ) : (
+                                      <div className="max-h-72 overflow-y-auto whitespace-pre-wrap wrap-break-word text-sm text-foreground font-sans leading-relaxed pr-1">
+                                        {draftBody}
+                                      </div>
+                                    )}
+                                    {editErrorHere && (
+                                      <p className="text-[11px] text-destructive mt-1.5">
+                                        {editErrorHere}
+                                      </p>
+                                    )}
                                   </div>
                                 )}
                               </div>

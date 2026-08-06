@@ -8,10 +8,11 @@ import {
   AuditEventType,
   withAiUsage,
 } from "@repo/ai";
-import { getProtectedConfig } from "@repo/services/profile/index";
+import { getProtectedConfig, getPriorityProfile } from "@repo/services/profile/index";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
 import { matchProtectedKeyword, matchProtectedSender } from "@repo/shared";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
+import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
 
@@ -75,7 +76,7 @@ export async function POST(request: Request) {
     }
     const input = parsed.data;
 
-    const userTimeZone = request.headers.get("x-user-timezone") || undefined;
+    const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // ── AI readiness gate (same one-time latch /api/chat checks) ──────
     const readiness = await getAiReadiness(userId);
@@ -91,6 +92,8 @@ export async function POST(request: Request) {
 
     // ── Protected blocklist ──────────────────────────────────────────
     const protectedConfig = await getProtectedConfig(userId);
+    const profile = await getPriorityProfile(userId);
+    const signature = profile?.data.signature;
 
     // ...on the user's own prompt (deterministic refusal, no LLM call).
     if (matchProtectedKeyword(input.prompt, protectedConfig.keywords)) {
@@ -150,6 +153,7 @@ export async function POST(request: Request) {
         context: input.context,
         meeting: input.meeting,
         timeZone: userTimeZone,
+        signature,
       }),
     );
 

@@ -5,7 +5,10 @@ import {
   createEvent as corsairCreateEvent,
   updateEvent as corsairUpdateEvent,
   deleteEvent as corsairDeleteEvent,
+  normalizeToUtcTimestamp,
+  assertNotPast,
 } from "@repo/services/calendar/index";
+import { getEventStatus } from "@repo/shared/time";
 import {
   linkThreadEvent,
   closeThreadLink,
@@ -125,6 +128,9 @@ export class CorsairGetEventsExecutor
         (ctx as any).userTimeZone,
       );
 
+      // These start/end values are already real, offset-bearing instants
+      // from Google — no naive-string handling needed for the status check.
+      const eventsNow = new Date();
       const events = result.slice(0, MAX_EVENT_RESULTS).map((ev) => ({
         id: ev.id,
         title: ev.title,
@@ -134,6 +140,7 @@ export class CorsairGetEventsExecutor
         description: ev.description,
         location: ev.location,
         attendees: ev.attendees,
+        status: getEventStatus(ev, eventsNow),
       }));
 
       return { events };
@@ -185,6 +192,8 @@ export class CorsairCreateEventExecutor
       organizer: args.organizer,
     });
     try {
+      assertNotPast(args.start, (ctx as any).userTimeZone);
+
       if (args.organizer) {
         const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
         if (args.organizer.toLowerCase() !== authenticatedEmail.toLowerCase()) {
@@ -339,6 +348,8 @@ export class ScheduleThreadMeetingExecutor
       title: args.title,
     });
     try {
+      assertNotPast(args.start, ctx.userTimeZone);
+
       if (args.organizer) {
         const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
         if (args.organizer.toLowerCase() !== authenticatedEmail.toLowerCase()) {
@@ -409,6 +420,8 @@ export class RescheduleThreadMeetingExecutor
     ctx: CalendarToolContext,
   ): Promise<CreateEventOutput> {
     try {
+      assertNotPast(args.start, ctx.userTimeZone);
+
       const target = await resolveTargetOrThrow(
         ctx.userId,
         args.threadId,
@@ -491,9 +504,9 @@ export class CancelThreadMeetingExecutor
 
 function formatWhen(iso: string | undefined, timeZone?: string): string {
   if (!iso) return "(no time)";
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return iso;
   try {
+    const date = new Date(normalizeToUtcTimestamp(iso, timeZone));
+    if (Number.isNaN(date.getTime())) return iso;
     return date.toLocaleString("en-US", {
       weekday: "short",
       day: "numeric",
@@ -503,7 +516,10 @@ function formatWhen(iso: string | undefined, timeZone?: string): string {
       ...(timeZone ? { timeZone } : {}),
     });
   } catch {
-    return date.toISOString();
+    // Malformed iso or an invalid IANA zone (Intl.DateTimeFormat throws on
+    // a bad timeZone) must never take down the approval card — fall back to
+    // the raw string rather than crashing the preview render.
+    return iso;
   }
 }
 

@@ -180,15 +180,19 @@ export class ToolOrchestrator {
           }
 
           const approvalId = crypto.randomUUID();
+          const previewCtx = { userId, userTimeZone: ctx.userTimeZone, userEmail: ctx.userEmail };
+          const enrichedArgs = tool.enrichArgs
+            ? await tool.enrichArgs(rawArgs, previewCtx)
+            : rawArgs;
           const preview = tool.buildPreview
-            ? await tool.buildPreview(rawArgs, { userId, userTimeZone: ctx.userTimeZone, userEmail: ctx.userEmail })
-            : generatePreview(toolName, rawArgs, ctx.userTimeZone, ctx.userEmail);
+            ? await tool.buildPreview(enrichedArgs, previewCtx)
+            : generatePreview(toolName, enrichedArgs, ctx.userTimeZone, ctx.userEmail);
 
           await this.approvalStore.create({
             id: approvalId,
             toolName,
             toolCallId: rawArgs._toolCallId as string ?? "unknown",
-            args: rawArgs,
+            args: enrichedArgs,
             userId,
             requestId,
             preview,
