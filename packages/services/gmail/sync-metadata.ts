@@ -48,6 +48,25 @@ const CATEGORY_PRECEDENCE: Array<[label: string, category: string]> = [
   ["CATEGORY_FORUMS", "FORUMS"],
 ];
 
+/**
+ * Our category name → the Gmail tab label that produces it, for the five
+ * CATEGORY_* tabs only (SENT/SPAM/TRASH/DRAFT are locations, not tabs, and are
+ * not settable this way).
+ *
+ * Derived from CATEGORY_PRECEDENCE rather than written out a second time: the
+ * two directions must agree, and a hand-copied inverse is exactly the kind of
+ * pair that drifts silently when someone adds a category to one of them.
+ *
+ * Note these are Gmail *label ids*, which is what threads.modify takes.
+ * CATEGORY_TO_GMAIL_QUERY in metadata.ts looks similar but holds *search query*
+ * terms ("personal"), which are not interchangeable with these.
+ */
+export const CATEGORY_TAB_LABELS: Record<string, string> = Object.fromEntries(
+  CATEGORY_PRECEDENCE.filter(([label]) => label.startsWith("CATEGORY_")).map(
+    ([label, category]) => [category, label],
+  ),
+);
+
 export function deriveCategory(labels: string[]): string {
   if (!Array.isArray(labels) || labels.length === 0) {
     logger.debug("[CATEGORY] deriveCategory - no labels, returning OTHER");

@@ -405,18 +405,22 @@ export async function POST(request: Request) {
         shouldCharge = false;
       }
 
-      // Check if response is a cognitive refusal for sender identity / organizer rules
-      if (response.content) {
-        const lowerContent = response.content.toLowerCase();
-        if (
-          lowerContent.includes("only authorized to send") ||
-          lowerContent.includes("only authorized to schedule") ||
-          lowerContent.includes("cannot impersonate") ||
-          lowerContent.includes("only authorized to create")
-        ) {
-          shouldCharge = false;
-        }
-      }
+      // There used to be a substring match here on the assistant's own prose
+      // ("only authorized to send", "cannot impersonate", …) to avoid charging
+      // for a sender-identity refusal. Both halves of that are now wrong:
+      //
+      //   1. Identity is no longer refused. A "send as someone else" request
+      //      is carried out from the authenticated account and merely narrated
+      //      ("Sent from your account — I can only send as you"), so there is
+      //      real work to charge for. See SENDER IDENTITY RULES in
+      //      lib/assistant/system-prompt.ts.
+      //   2. That narration contains "can only send", so prose-matching would
+      //      now un-charge the successful sends it was meant to exclude.
+      //
+      // Do not reintroduce billing decisions keyed on generated wording: it
+      // couples the price of a turn to a prompt edit, silently and with no
+      // test covering it. Refusals that genuinely do no work are already
+      // caught by the tool_error check above.
     }
 
     if (shouldCharge) {

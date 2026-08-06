@@ -12,6 +12,13 @@ import {
   useTrashThread,
   useUntrashThread,
   useSetStarred,
+  useCategoryCounts,
+  useTrashThreads,
+  useUntrashThreads,
+  useSetThreadsStarred,
+  useSetThreadsRead,
+  useSetThreadsSpam,
+  useSetThreadsCategory,
   useStartClassificationJob,
   useRetryFailedClassifications,
   useClassificationCostEstimate,
@@ -40,7 +47,14 @@ import {
   InboxIcon,
   ArrowUpRightIcon,
   Trash2Icon,
-  ArchiveRestoreIcon
+  ArchiveRestoreIcon,
+  MailOpenIcon,
+  MailIcon,
+  StarOffIcon,
+  TagIcon,
+  ShieldAlertIcon,
+  ShieldCheckIcon,
+  XIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { trpc } from "@web/trpc/client";
@@ -53,6 +67,16 @@ import {
   PREFERENCE_LABELS,
 } from "@repo/shared";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tooltip";
+import { Checkbox } from "@web/components/ui/checkbox";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
+  DropdownMenuTrigger,
+} from "@web/components/ui/dropdown-menu";
 import {
   AlertDialog,
   AlertDialogAction,
@@ -71,6 +95,27 @@ const CATEGORIES = [
   { key: "SOCIAL", label: "Social" },
   { key: "FORUMS", label: "Forums" },
 ] as const;
+
+/**
+ * Where "Label as" can send a thread — the same four tabs the sidebar shows,
+ * on purpose.
+ *
+ * Gmail also has an Updates tab and the bulk endpoint accepts it, but Mailroid
+ * has no Updates view: filing mail there would move it somewhere the user
+ * cannot then navigate to, which is indistinguishable from losing it. If an
+ * Updates tab is ever added to the sidebar, adding it to CATEGORIES brings it
+ * back here for free.
+ */
+type LabelAsCategory = (typeof CATEGORIES)[number]["key"];
+
+/** Human name for a view key, wherever it happens to be defined. */
+function categoryLabel(key: string): string {
+  return (
+    CATEGORIES.find((c) => c.key === key)?.label ??
+    VIEW_META[key]?.title ??
+    key.charAt(0) + key.slice(1).toLowerCase()
+  );
+}
 
 /**
  * Headings for the sidebar-reached views. Without these every one of them
@@ -637,6 +682,125 @@ const itemVariants = {
   show: { opacity: 1, y: 0, transition: { type: "spring" as const, stiffness: 100, damping: 15 } }
 };
 
+/**
+ * The actions offered while conversations are ticked.
+ *
+ * Every action is DIRECTIONAL — "Mark read" and "Mark unread" are two
+ * commands, not one toggle. A selection of fifty rows has no single current
+ * state to invert, so a toggle would have to pick a majority and silently do
+ * the opposite of what the user meant for the rest.
+ *
+ * Which pair is shown depends on where you are: the Bin offers Restore rather
+ * than Bin, and Spam offers "Not spam" rather than "Report spam".
+ */
+function BulkActionBar({
+  count,
+  busy,
+  isBin,
+  isSpamView,
+  onClear,
+  onTrash,
+  onRestore,
+  onSpam,
+  onRead,
+  onStar,
+  onCategory,
+}: {
+  count: number;
+  busy: boolean;
+  isBin: boolean;
+  isSpamView: boolean;
+  onClear: () => void;
+  onTrash: () => void;
+  onRestore: () => void;
+  onSpam: (spam: boolean) => void;
+  onRead: (read: boolean) => void;
+  onStar: (starred: boolean) => void;
+  onCategory: (category: LabelAsCategory) => void;
+}) {
+  const action = (
+    key: string,
+    title: string,
+    Icon: React.ComponentType<{ className?: string }>,
+    onClick: () => void,
+  ) => (
+    <Button
+      key={key}
+      variant="ghost"
+      size="icon"
+      title={title}
+      aria-label={title}
+      disabled={busy}
+      className="h-8 w-8 text-muted-foreground hover:text-foreground"
+      onClick={onClick}
+    >
+      <Icon className="size-4" />
+    </Button>
+  );
+
+  return (
+    <div className="flex items-center gap-0.5">
+      <Button
+        variant="ghost"
+        size="icon"
+        title="Clear selection"
+        aria-label="Clear selection"
+        className="h-8 w-8 text-muted-foreground hover:text-foreground"
+        onClick={onClear}
+      >
+        <XIcon className="size-4" />
+      </Button>
+
+      <span className="mx-1 hidden text-xs font-medium text-foreground sm:inline">
+        {count} selected
+      </span>
+
+      {isBin
+        ? action("restore", "Restore from Bin", ArchiveRestoreIcon, onRestore)
+        : action("trash", "Move to Bin", Trash2Icon, onTrash)}
+
+      {!isBin &&
+        (isSpamView
+          ? action("notspam", "Not spam", ShieldCheckIcon, () => onSpam(false))
+          : action("spam", "Report spam", ShieldAlertIcon, () => onSpam(true)))}
+
+      {action("read", "Mark as read", MailOpenIcon, () => onRead(true))}
+      {action("unread", "Mark as unread", MailIcon, () => onRead(false))}
+      {action("star", "Add star", StarIcon, () => onStar(true))}
+      {action("unstar", "Remove star", StarOffIcon, () => onStar(false))}
+
+      <DropdownMenu>
+        <DropdownMenuTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon"
+            title="More actions"
+            aria-label="More actions"
+            disabled={busy}
+            className="h-8 w-8 text-muted-foreground hover:text-foreground"
+          >
+            <MoreVerticalIcon className="size-4" />
+          </Button>
+        </DropdownMenuTrigger>
+        <DropdownMenuContent align="start" className="w-48">
+          <DropdownMenuSub>
+            <DropdownMenuSubTrigger>
+              <TagIcon className="size-4" /> Label as
+            </DropdownMenuSubTrigger>
+            <DropdownMenuSubContent>
+              {CATEGORIES.map(({ key, label }) => (
+                <DropdownMenuItem key={key} onClick={() => onCategory(key)}>
+                  {label}
+                </DropdownMenuItem>
+              ))}
+            </DropdownMenuSubContent>
+          </DropdownMenuSub>
+        </DropdownMenuContent>
+      </DropdownMenu>
+    </div>
+  );
+}
+
 function DossierLayout({
   title,
   subtitle,
@@ -666,6 +830,13 @@ function DossierLayout({
   const { trashThreadAsync } = useTrashThread();
   const { untrashThreadAsync } = useUntrashThread();
   const { setStarredAsync } = useSetStarred();
+  const { trashThreadsAsync } = useTrashThreads();
+  const { untrashThreadsAsync } = useUntrashThreads();
+  const { setThreadsStarredAsync } = useSetThreadsStarred();
+  const { setThreadsReadAsync } = useSetThreadsRead();
+  const { setThreadsSpamAsync } = useSetThreadsSpam();
+  const { setThreadsCategoryAsync } = useSetThreadsCategory();
+  const { data: categoryCounts } = useCategoryCounts();
 
   /**
    * Builds a thread URL that carries the current list view (category, q,
@@ -688,8 +859,23 @@ function DossierLayout({
 
   const isBin = category === "TRASH";
   const isDraftView = category === "DRAFT";
+  const isSpamView = category === "SPAM";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [archivedIds, setArchivedIds] = useState<string[]>([]);
+
+  /**
+   * Threads ticked for a bulk action. Distinct from `selectedThreadId`, which
+   * is the keyboard cursor — one is "which row am I on", the other is "which
+   * rows will the toolbar act on", and they are styled differently for that
+   * reason.
+   *
+   * Scoped to the rendered page on purpose: acting on a whole folder would be
+   * one Gmail call per thread with nothing bounding it, which is the shape of
+   * the quota incident in FUTURE_IMPLEMENTATIONS.md. The banner therefore
+   * states the folder total without offering to act on it.
+   */
+  const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
+  const [bulkBusy, setBulkBusy] = useState(false);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [mobileView, setMobileView] = useState<"list" | "detail">("list");
   const [refreshing, setRefreshing] = useState(false);
@@ -834,6 +1020,123 @@ function DossierLayout({
     }
   };
 
+  // ── Bulk selection ────────────────────────────────────────────────
+
+  const selectableThreads = useMemo(
+    // Drafts are excluded: starring, spamming or relabelling something unsent
+    // is meaningless, and Bin already has a per-row action there.
+    () => (isDraftView ? [] : visibleThreads),
+    [isDraftView, visibleThreads],
+  );
+
+  const checkedCount = checkedIds.size;
+  const allOnPageChecked =
+    selectableThreads.length > 0 && checkedCount === selectableThreads.length;
+
+  /**
+   * Keep the selection to rows that are actually on screen.
+   *
+   * Prunes rather than clears, and keys off the ids rather than the array
+   * identity, because `threads` is a fresh `.slice()` on every render and
+   * useInboxSync invalidates the list every time a webhook touches the
+   * mailbox — clearing on either would empty the user's ticks mid-task for no
+   * visible reason. Pruning still empties the selection when the page, folder
+   * or query changes (none of the old ids survive), and drops any single row
+   * that vanished underneath us, which is the one case where acting on the
+   * stale tick would be wrong.
+   */
+  const visibleIdSignature = useMemo(
+    () => visibleThreads.map((t) => t.threadId).join(","),
+    [visibleThreads],
+  );
+
+  useEffect(() => {
+    setCheckedIds((prev) => {
+      if (prev.size === 0) return prev;
+      const present = new Set(visibleThreads.map((t) => t.threadId));
+      const next = new Set(Array.from(prev).filter((id) => present.has(id)));
+      // Same set — return the old reference so this doesn't re-render forever.
+      return next.size === prev.size ? prev : next;
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [visibleIdSignature]);
+
+  const toggleChecked = useCallback((threadId: string) => {
+    setCheckedIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(threadId)) next.delete(threadId);
+      else next.add(threadId);
+      return next;
+    });
+  }, []);
+
+  const toggleCheckAll = useCallback(() => {
+    setCheckedIds((prev) =>
+      prev.size === selectableThreads.length
+        ? new Set()
+        : new Set(selectableThreads.map((t) => t.threadId)),
+    );
+  }, [selectableThreads]);
+
+  /**
+   * Runs one bulk action and reports honestly.
+   *
+   * The mutation resolving does NOT mean every thread moved — the server
+   * returns per-thread outcomes so a partly-applied batch stays visible
+   * instead of being rounded up to "done". `removesRows` hides the affected
+   * rows straight away (Bin, Spam, moving to another tab), and restores the
+   * ones that turned out to fail.
+   */
+  const runBulk = async (
+    label: string,
+    action: (
+      threadIds: string[],
+    ) => Promise<{ succeeded: string[]; failed: Array<{ threadId: string; error: string }> }>,
+    opts?: { removesRows?: boolean },
+  ) => {
+    // Read the selection once. Everything below — the optimistic hide, the
+    // request, the rollback, the counts in the toast — must refer to the same
+    // set of ids, or a tick changed mid-flight would leave them disagreeing.
+    const ids = Array.from(checkedIds);
+    if (ids.length === 0 || bulkBusy) return;
+    setBulkBusy(true);
+    if (opts?.removesRows) setArchivedIds((prev) => [...prev, ...ids]);
+
+    try {
+      const result = await action(ids);
+      const failedIds = new Set(result.failed.map((f) => f.threadId));
+
+      if (opts?.removesRows && failedIds.size > 0) {
+        setArchivedIds((prev) => prev.filter((id) => !failedIds.has(id)));
+      }
+
+      if (result.failed.length === 0) {
+        toast.success(`${label} ${result.succeeded.length} ${result.succeeded.length === 1 ? "conversation" : "conversations"}`);
+      } else if (result.succeeded.length === 0) {
+        toast.error(`Couldn't ${label.toLowerCase()} any of the ${ids.length}`, {
+          description: result.failed[0]?.error,
+        });
+      } else {
+        toast.warning(
+          `${label} ${result.succeeded.length} of ${ids.length} — ${result.failed.length} failed`,
+          { description: result.failed[0]?.error },
+        );
+      }
+      setCheckedIds(new Set());
+    } catch (err) {
+      // A throw here is the whole batch being refused up front (mailbox
+      // paused, or cooling down after a quota error) — nothing was attempted.
+      if (opts?.removesRows) {
+        setArchivedIds((prev) => prev.filter((id) => !ids.includes(id)));
+      }
+      toast.error(`Couldn't ${label.toLowerCase()}`, {
+        description: err instanceof Error ? err.message : "Please try again.",
+      });
+    } finally {
+      setBulkBusy(false);
+    }
+  };
+
   const handleToggleStar = async (threadId: string, starred: boolean) => {
     try {
       await setStarredAsync({ threadId, starred });
@@ -881,7 +1184,18 @@ function DossierLayout({
         {/* Gmail Style Toolbar */}
         <div className="flex items-center justify-between h-12 px-4 border-b border-border bg-background sticky top-0 z-10">
           <div className="flex items-center gap-4 text-muted-foreground/70">
-            
+            {/* Select-all. Always rendered (where selection applies at all) so
+                the capability is visible before anything is ticked. */}
+            {selectableThreads.length > 0 && (
+              <Checkbox
+                checked={allOnPageChecked}
+                onCheckedChange={toggleCheckAll}
+                aria-label={allOnPageChecked ? "Deselect all" : "Select all on this page"}
+                title={allOnPageChecked ? "Deselect all" : "Select all on this page"}
+                className="ml-1"
+              />
+            )}
+
             <RefreshCwIcon
               className={cn(
                 "size-4 hover:text-foreground cursor-pointer transition-colors",
@@ -889,14 +1203,78 @@ function DossierLayout({
               )}
               onClick={handleRefresh}
             />
-            {headerActions}
+            {/* The category tabs and the bulk actions compete for the same
+                strip, so the actions replace them while a selection exists —
+                as Gmail does. */}
+            {checkedCount > 0 ? (
+              <BulkActionBar
+                count={checkedCount}
+                busy={bulkBusy}
+                isBin={isBin}
+                isSpamView={isSpamView}
+                onClear={() => setCheckedIds(new Set())}
+                onTrash={() =>
+                  runBulk("Moved to Bin", (threadIds) => trashThreadsAsync({ threadIds }), {
+                    removesRows: true,
+                  })
+                }
+                onRestore={() =>
+                  runBulk("Restored", (threadIds) => untrashThreadsAsync({ threadIds }), {
+                    removesRows: true,
+                  })
+                }
+                onSpam={(spam) =>
+                  runBulk(
+                    spam ? "Reported as spam" : "Marked not spam",
+                    (threadIds) => setThreadsSpamAsync({ threadIds, spam }),
+                    { removesRows: true },
+                  )
+                }
+                onRead={(read) =>
+                  runBulk(read ? "Marked read" : "Marked unread", (threadIds) =>
+                    setThreadsReadAsync({ threadIds, read }),
+                  )
+                }
+                onStar={(starred) =>
+                  runBulk(starred ? "Starred" : "Unstarred", (threadIds) =>
+                    setThreadsStarredAsync({ threadIds, starred }),
+                  )
+                }
+                onCategory={(target) =>
+                  runBulk(
+                    `Moved to ${categoryLabel(target)}`,
+                    (threadIds) => setThreadsCategoryAsync({ threadIds, category: target }),
+                    // Leaving the current tab means leaving this list.
+                    { removesRows: category !== target },
+                  )
+                }
+              />
+            ) : (
+              headerActions
+            )}
           </div>
           <div className="flex items-center gap-2 text-xs text-muted-foreground">
-            {pagination}
+            {checkedCount > 0 ? `${checkedCount} selected` : pagination}
           </div>
         </div>
 
         {banner}
+
+        {/*
+          Stated, not offered. Acting on every conversation in a folder is
+          deliberately not built yet (one Gmail call per thread, no batch
+          endpoint), so the total is context for the selection rather than a
+          button — an affordance here would promise something that does not
+          exist.
+        */}
+        {allOnPageChecked && (
+          <div className="px-4 py-2 text-center text-xs text-muted-foreground bg-muted/40 border-b border-border">
+            All {selectableThreads.length} conversations on this page are selected.
+            {category && categoryCounts?.[category] != null && (
+              <> {categoryLabel(category)} holds {categoryCounts[category]} in total.</>
+            )}
+          </div>
+        )}
 
         {/* Content list */}
         <div className="flex-1 overflow-y-auto">
@@ -934,6 +1312,7 @@ function DossierLayout({
             >
               {visibleThreads.map((thread, index) => {
                 const isSelected = selectedThreadId === thread.threadId;
+                const isChecked = checkedIds.has(thread.threadId);
                 // Search results (Gmail and AI) don't carry isUnread — those
                 // services don't join messageMetadata — so they render in the
                 // read style. See the note on searchEmails in
@@ -962,17 +1341,34 @@ function DossierLayout({
                     }}
                     className={cn(
                       "group relative flex flex-row items-center justify-between py-3 px-4 cursor-pointer border-b border-border transition-colors",
-                      // Read mail is tinted so blocks of it recede; unread sits
-                      // on the plain background. Selection wins over both.
-                      isSelected
-                        ? "bg-accent/40"
-                        : isUnread
-                          ? "bg-transparent hover:bg-muted/50"
-                          : "bg-muted/30 hover:bg-muted/50"
+                      // Three states, and they must stay distinguishable: a
+                      // ticked row (bulk target) outranks the keyboard cursor,
+                      // which outranks read/unread tinting.
+                      isChecked
+                        ? "bg-primary/10 hover:bg-primary/15"
+                        : isSelected
+                          ? "bg-accent/40"
+                          : isUnread
+                            ? "bg-transparent hover:bg-muted/50"
+                            : "bg-muted/30 hover:bg-muted/50"
                     )}
                   >
                     {/* Left & Center: Icons + Sender + Subject + Snippet */}
                     <div className="flex items-center gap-3 min-w-0 flex-1 pr-4">
+                      {/* Always visible, never hover-only: a bulk action
+                          nobody can see they can start does not exist. */}
+                      {!isDraftView && (
+                        <span
+                          onClick={(e) => e.stopPropagation()}
+                          className="flex shrink-0 items-center"
+                        >
+                          <Checkbox
+                            checked={isChecked}
+                            onCheckedChange={() => toggleChecked(thread.threadId)}
+                            aria-label={isChecked ? "Deselect conversation" : "Select conversation"}
+                          />
+                        </span>
+                      )}
                       {/* Unread dot. Still rendered when read, just invisible,
                           so sender names stay column-aligned down the list. */}
                       <span
