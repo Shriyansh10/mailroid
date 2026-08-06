@@ -11,6 +11,13 @@ import {
   setThreadRead,
   replyToEmail,
   forwardEmail,
+  trashThreads,
+  untrashThreads,
+  setThreadsStarred,
+  setThreadsRead,
+  setThreadsImportant,
+  setThreadsSpam,
+  setThreadsCategory,
 } from "@repo/services/gmail/index.js";
 import {
   getDraft,
@@ -43,6 +50,26 @@ import {
 
 const TAGS = ["Gmail"];
 const getPath = generatePath("/gmail");
+
+/**
+ * One selection page's worth of threads. Matches PAGE_SIZE in the inbox — the
+ * UI can only select what it has rendered — but is enforced here because the
+ * real reason for the limit is server-side: every id costs one Gmail call.
+ */
+const MAX_BULK_THREADS = 50;
+const bulkThreadIds = z.array(z.string()).min(1).max(MAX_BULK_THREADS);
+
+/**
+ * Only the five inbox tabs are settable. SENT/DRAFT/TRASH/SPAM/OTHER are
+ * locations rather than tabs: SPAM has its own procedure, TRASH is trash/
+ * untrash, and the rest are not things a user can relabel a thread into.
+ */
+const SETTABLE_CATEGORIES = ["PRIMARY", "PROMOTIONS", "SOCIAL", "UPDATES", "FORUMS"] as const;
+
+const bulkResultModel = z.object({
+  succeeded: z.array(z.string()),
+  failed: z.array(z.object({ threadId: z.string(), error: z.string() })),
+});
 
 export const gmailRouter = router({
   list: protectedProcedure
@@ -228,6 +255,95 @@ export const gmailRouter = router({
       });
       await setThreadRead(ctx.user!.id, input.threadId, input.read);
       return { success: true };
+    }),
+
+  // ── Bulk mailbox actions ───────────────────────────────────────────
+  //
+  // Same thread scoping as the single-id procedures above, applied to a
+  // selection. Two things differ and both are deliberate:
+  //
+  //   * MAX_BULK_THREADS is enforced here, not only in the UI. The cap exists
+  //     because each id is a separate Gmail call, so an uncapped array is an
+  //     uncapped burst — a client bug or a later caller must not be able to
+  //     ask for one.
+  //   * The output reports per-thread failures instead of throwing. A batch
+  //     can genuinely half-succeed, and the user needs to be told which half.
+
+  trashMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/trash-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.trashMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length,
+      });
+      return trashThreads(ctx.user!.id, input.threadIds);
+    }),
+
+  untrashMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/untrash-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.untrashMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length,
+      });
+      return untrashThreads(ctx.user!.id, input.threadIds);
+    }),
+
+  setStarredMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-starred-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds, starred: z.boolean() }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setStarredMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length, starred: input.starred,
+      });
+      return setThreadsStarred(ctx.user!.id, input.threadIds, input.starred);
+    }),
+
+  setReadMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-read-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds, read: z.boolean() }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setReadMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length, read: input.read,
+      });
+      return setThreadsRead(ctx.user!.id, input.threadIds, input.read);
+    }),
+
+  setImportantMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-important-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds, important: z.boolean() }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setImportantMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length, important: input.important,
+      });
+      return setThreadsImportant(ctx.user!.id, input.threadIds, input.important);
+    }),
+
+  setSpamMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-spam-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds, spam: z.boolean() }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setSpamMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length, spam: input.spam,
+      });
+      return setThreadsSpam(ctx.user!.id, input.threadIds, input.spam);
+    }),
+
+  setCategoryMany: protectedProcedure
+    .meta({ openapi: { method: "POST", path: getPath("/set-category-many"), tags: TAGS } })
+    .input(z.object({ threadIds: bulkThreadIds, category: z.enum(SETTABLE_CATEGORIES) }))
+    .output(bulkResultModel)
+    .mutation(async ({ ctx, input }) => {
+      logger.info("[TRPC] gmail.setCategoryMany called", {
+        userId: ctx.user!.id, count: input.threadIds.length, category: input.category,
+      });
+      return setThreadsCategory(ctx.user!.id, input.threadIds, input.category);
     }),
 
   // ── Drafts ─────────────────────────────────────────────────────────

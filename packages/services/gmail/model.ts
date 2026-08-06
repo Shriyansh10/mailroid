@@ -24,6 +24,7 @@ export const threadSummarySchema = z.object({
   isReplyNeeded: z.boolean().optional(),
   isUnread: z.boolean().optional(),
   isStarred: z.boolean().optional(),
+  isImportant: z.boolean().optional(),
   /** Gmail-style category (PRIMARY/UPDATES/PROMOTIONS/SPAM/…), enriched from message_metadata for display bucketing. */
   category: z.string().optional(),
   /** Gmail draft resource id — present only on DRAFT rows, needed to reopen/send the draft. */

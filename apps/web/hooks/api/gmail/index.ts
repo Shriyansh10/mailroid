@@ -451,6 +451,12 @@ const useInboxInvalidate = () => {
     void utils.gmail.categoryCounts.invalidate();
     void utils.gmail.listPriority.invalidate();
     void utils.gmail.priorityCounts.invalidate();
+    // The search views render the same rows and offer the same actions, so
+    // they go stale for the same reasons. Left out originally because only
+    // the category list had actions on it; acting on a search result without
+    // these leaves the row showing its old state until the query is retyped.
+    void utils.gmail.search.invalidate();
+    void utils.gmail.searchLocal.invalidate();
   };
 };
 
@@ -499,6 +505,90 @@ export const useSetRead = () => {
       frontendLogger.error("[INBOX_HOOK]", "useSetRead error", { error: error.message }),
   });
   return { setRead: result.mutate, setReadAsync: result.mutateAsync, ...result };
+};
+
+// ── Bulk mailbox actions ────────────────────────────────────────────
+//
+// Same invalidation as the single-thread actions. What differs is the result:
+// these resolve to { succeeded, failed } rather than throwing on the first
+// problem, because a 50-thread batch can genuinely half-succeed. Callers must
+// look at `failed` — a resolved promise here does NOT mean everything worked.
+
+export const useTrashThreads = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.trashMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useTrashThreads error", { error: error.message }),
+  });
+  return { trashThreadsAsync: result.mutateAsync, ...result };
+};
+
+export const useUntrashThreads = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.untrashMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useUntrashThreads error", { error: error.message }),
+  });
+  return { untrashThreadsAsync: result.mutateAsync, ...result };
+};
+
+export const useSetThreadsStarred = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setStarredMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetThreadsStarred error", { error: error.message }),
+  });
+  return { setThreadsStarredAsync: result.mutateAsync, ...result };
+};
+
+export const useSetThreadsRead = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setReadMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetThreadsRead error", { error: error.message }),
+  });
+  return { setThreadsReadAsync: result.mutateAsync, ...result };
+};
+
+/**
+ * Not wired to any UI yet, deliberately. The whole stack works — Gmail's
+ * IMPORTANT label, the isImportant mirror, and this hook — but the sidebar has
+ * no Important view, so marking a thread important would change a state the
+ * user has no way to go and look at. Surface this the same day that view
+ * lands, not before.
+ */
+export const useSetThreadsImportant = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setImportantMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetThreadsImportant error", { error: error.message }),
+  });
+  return { setThreadsImportantAsync: result.mutateAsync, ...result };
+};
+
+export const useSetThreadsSpam = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setSpamMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetThreadsSpam error", { error: error.message }),
+  });
+  return { setThreadsSpamAsync: result.mutateAsync, ...result };
+};
+
+export const useSetThreadsCategory = () => {
+  const invalidate = useInboxInvalidate();
+  const result = trpc.gmail.setCategoryMany.useMutation({
+    onSuccess: invalidate,
+    onError: (error) =>
+      frontendLogger.error("[INBOX_HOOK]", "useSetThreadsCategory error", { error: error.message }),
+  });
+  return { setThreadsCategoryAsync: result.mutateAsync, ...result };
 };
 
 /**

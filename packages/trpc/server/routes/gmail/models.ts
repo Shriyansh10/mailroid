@@ -22,6 +22,7 @@ export const threadSummaryOutputModel = z.object({
   isReplyNeeded: z.boolean().optional(),
   isUnread: z.boolean().optional(),
   isStarred: z.boolean().optional(),
+  isImportant: z.boolean().optional(),
   /** PRIMARY/PROMOTIONS/SPAM/TRASH/DRAFT/… — lets rows render view-specific actions. */
   category: z.string().optional(),
   /** Gmail draft resource id; DRAFT rows only. Required to reopen or send the draft. */

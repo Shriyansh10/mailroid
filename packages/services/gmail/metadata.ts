@@ -141,6 +141,7 @@ export async function getEmailsByCategory(
     isReplyNeeded: messageMetadata.isReplyNeeded,
     isUnread: messageMetadata.isUnread,
     isStarred: messageMetadata.isStarred,
+    isImportant: messageMetadata.isImportant,
     category: messageMetadata.category,
     draftId: messageMetadata.draftId,
     rn: sql<number>`
@@ -169,6 +170,7 @@ export async function getEmailsByCategory(
     isReplyNeeded: sq.isReplyNeeded,
     isUnread: sq.isUnread,
     isStarred: sq.isStarred,
+    isImportant: sq.isImportant,
     category: sq.category,
     draftId: sq.draftId,
   })
@@ -193,6 +195,7 @@ export async function getEmailsByCategory(
   isReplyNeeded: row.isReplyNeeded,
   isUnread: row.isUnread,
   isStarred: row.isStarred,
+  isImportant: row.isImportant,
   category: row.category ?? undefined,
   // Carried so a Draft row can be reopened for editing without a second
   // round trip to resolve its Gmail draft id.

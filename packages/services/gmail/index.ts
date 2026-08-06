@@ -9,11 +9,23 @@ import { logger } from "@repo/logger";
 import { getProtectedConfig } from "../profile/index.ts";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { partitionSearchResults } from "./model.ts";
-import { deriveCategory, deriveFlags, upsertMessageMetadata } from "./sync-metadata.ts";
+import {
+  CATEGORY_TAB_LABELS,
+  deriveCategory,
+  deriveFlags,
+  upsertMessageMetadata,
+} from "./sync-metadata.ts";
 import { normalizeMessageId } from "./message-id.ts";
 import { withGmailRetry } from "./retry.ts";
 import { buildThreadFromDb } from "./thread-cache.ts";
-import { getCooldown, isGmailUnavailable, isQuotaError } from "./quota-cooldown.ts";
+import {
+  assertSyncAllowed,
+  getCooldown,
+  GmailQuotaCooldownError,
+  isGmailUnavailable,
+  isQuotaError,
+} from "./quota-cooldown.ts";
+import { SyncPausedError } from "./pause.ts";
 import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
 import type {
   ThreadSummary,
@@ -881,6 +893,299 @@ export async function setThreadRead(
   });
 }
 
+/** Mark a whole thread important or not important (Gmail's IMPORTANT label). */
+export async function setThreadImportant(
+  tenantId: string,
+  threadId: string,
+  important: boolean,
+): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.modify({
+    id: threadId,
+    ...(important ? { addLabelIds: ["IMPORTANT"] } : { removeLabelIds: ["IMPORTANT"] }),
+  });
+
+  await db
+    .update(messageMetadata)
+    .set({ isImportant: important, updatedAt: new Date() })
+    .where(
+      and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+    );
+
+  logger.info("[SERVICE] setThreadImportant completed", {
+    tenantId, threadId, important, durationMs: Date.now() - startMs,
+  });
+}
+
+/**
+ * Report a thread as spam, or take it back out of Spam.
+ *
+ * Spamming is a location change, so INBOX comes off at the same time — Gmail
+ * does this itself in its UI and leaving it on produces a thread that is in
+ * both places. Un-spamming does NOT simply put INBOX back: where the thread
+ * belongs depends on labels only Gmail can decide, so we re-read it and
+ * recompute through the same deriveCategory path the sync uses, exactly as
+ * untrashThread does. Guessing here would file mail into the wrong tab.
+ */
+export async function setThreadSpam(
+  tenantId: string,
+  threadId: string,
+  spam: boolean,
+): Promise<void> {
+  const startMs = Date.now();
+  const tenant = corsair.withTenant(tenantId);
+
+  await tenant.gmail.api.threads.modify({
+    id: threadId,
+    ...(spam
+      ? { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] }
+      : { removeLabelIds: ["SPAM"] }),
+  });
+
+  if (spam) {
+    await db
+      .update(messageMetadata)
+      .set({ category: "SPAM", isInInbox: false, updatedAt: new Date() })
+      .where(
+        and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+      );
+  } else {
+    const thread = (await tenant.gmail.api.threads.get({
+      id: threadId,
+      format: "metadata",
+    })) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
+
+    for (const msg of thread.messages ?? []) {
+      if (!msg.id) continue;
+      const labels = msg.labelIds ?? [];
+      const flags = deriveFlags(labels);
+      await db
+        .update(messageMetadata)
+        .set({
+          category: deriveCategory(labels) as any,
+          gmailLabels: labels,
+          isInInbox: flags.isInInbox,
+          isStarred: flags.isStarred,
+          isImportant: flags.isImportant,
+          updatedAt: new Date(),
+        })
+        .where(
+          and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.entityId, msg.id)),
+        );
+    }
+  }
+
+  logger.info("[SERVICE] setThreadSpam completed", {
+    tenantId, threadId, spam, durationMs: Date.now() - startMs,
+  });
+}
+
+/**
+ * Move a thread to one of Gmail's five inbox tabs.
+ *
+ * The tabs are mutually exclusive, so the other four labels come off in the
+ * same call — adding CATEGORY_PROMOTIONS without removing CATEGORY_PERSONAL
+ * leaves the thread carrying both and deriveCategory then files it by our
+ * precedence order rather than by what the user asked for.
+ */
+export async function setThreadCategory(
+  tenantId: string,
+  threadId: string,
+  category: string,
+): Promise<void> {
+  const startMs = Date.now();
+  const targetLabel = CATEGORY_TAB_LABELS[category];
+  if (!targetLabel) {
+    throw new Error(
+      `Cannot move a thread to ${category}: only the inbox tabs (${Object.keys(CATEGORY_TAB_LABELS).join(", ")}) can be set this way.`,
+    );
+  }
+
+  const tenant = corsair.withTenant(tenantId);
+  const others = Object.values(CATEGORY_TAB_LABELS).filter((l) => l !== targetLabel);
+
+  await tenant.gmail.api.threads.modify({
+    id: threadId,
+    addLabelIds: [targetLabel],
+    removeLabelIds: others,
+  });
+
+  await db
+    .update(messageMetadata)
+    .set({ category: category as any, updatedAt: new Date() })
+    .where(
+      and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
+    );
+
+  logger.info("[SERVICE] setThreadCategory completed", {
+    tenantId, threadId, category, durationMs: Date.now() - startMs,
+  });
+}
+
+// ── Bulk mailbox write actions ───────────────────────────────────────
+//
+// One click in the inbox can now touch 50 threads, and Gmail has no
+// thread-level batch endpoint — messages.batchModify is message-scoped, and
+// every write path here is deliberately thread-scoped (see the note above
+// trashThread). So a bulk action is N ordinary calls, which makes it the
+// heaviest burst of Gmail traffic the UI can produce.
+//
+// Two consequences drive the shape below:
+//
+//   1. It runs through withGmailRetry, so the whole batch is refused up front
+//      while the mailbox is paused or cooling down. The single-thread
+//      functions above still call the API directly and skip that check —
+//      tolerable at one call, not at fifty.
+//   2. A quota error ABORTS the remainder instead of continuing. Gmail's
+//      429 window moves further out with every request made inside it, so
+//      "carry on and collect the failures" is precisely how a brief cooldown
+//      became a seven-hour outage once already. See retry.ts.
+//
+// Partial success is therefore normal and is reported, never flattened into
+// a single throw: the caller has to be able to tell the user which threads
+// actually moved.
+
+export interface BulkThreadResult {
+  succeeded: string[];
+  failed: Array<{ threadId: string; error: string }>;
+}
+
+/** Deliberately modest: 50 threads at 5 in flight is ~10 sequential rounds. */
+const BULK_CONCURRENCY = 5;
+
+/** Backpressure, as opposed to "this one thread failed" — stop the batch. */
+function isBackpressure(err: unknown): boolean {
+  return (
+    err instanceof GmailQuotaCooldownError ||
+    err instanceof SyncPausedError ||
+    isQuotaError(err)
+  );
+}
+
+function errorMessage(err: unknown): string {
+  return err instanceof Error ? err.message : String(err);
+}
+
+async function runBulkThreadAction(
+  tenantId: string,
+  threadIds: string[],
+  operation: string,
+  perThread: (threadId: string) => Promise<void>,
+): Promise<BulkThreadResult> {
+  const startMs = Date.now();
+
+  // One pre-flight for the batch. Without it a paused mailbox discovers it is
+  // paused once per thread.
+  await assertSyncAllowed(tenantId, { trigger: "ui", operation });
+
+  const succeeded: string[] = [];
+  const failed: Array<{ threadId: string; error: string }> = [];
+  let cursor = 0;
+  let abortErr: unknown = null;
+
+  async function worker(): Promise<void> {
+    while (abortErr === null) {
+      const index = cursor++;
+      if (index >= threadIds.length) return;
+      const threadId = threadIds[index]!;
+
+      try {
+        await withGmailRetry(`${operation} ${threadId}`, () => perThread(threadId), {
+          tenantId,
+          trigger: "ui",
+        });
+        succeeded.push(threadId);
+      } catch (err) {
+        failed.push({ threadId, error: errorMessage(err) });
+        if (isBackpressure(err)) {
+          abortErr = err;
+          return;
+        }
+      }
+    }
+  }
+
+  await Promise.all(
+    Array.from({ length: Math.min(BULK_CONCURRENCY, threadIds.length) }, worker),
+  );
+
+  // Threads we never got to. They are failures from the caller's point of
+  // view — the user asked for them and they did not happen — so they must be
+  // reported rather than silently dropped.
+  if (abortErr !== null) {
+    const attempted = new Set([...succeeded, ...failed.map((f) => f.threadId)]);
+    for (const threadId of threadIds) {
+      if (!attempted.has(threadId)) {
+        failed.push({ threadId, error: `Not attempted: ${errorMessage(abortErr)}` });
+      }
+    }
+  }
+
+  logger.info("[SERVICE] runBulkThreadAction completed", {
+    tenantId,
+    operation,
+    requested: threadIds.length,
+    succeeded: succeeded.length,
+    failed: failed.length,
+    aborted: abortErr !== null,
+    durationMs: Date.now() - startMs,
+  });
+
+  return { succeeded, failed };
+}
+
+export function trashThreads(tenantId: string, threadIds: string[]) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.trash", (id) =>
+    trashThread(tenantId, id),
+  );
+}
+
+export function untrashThreads(tenantId: string, threadIds: string[]) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.untrash", (id) =>
+    untrashThread(tenantId, id),
+  );
+}
+
+export function setThreadsStarred(tenantId: string, threadIds: string[], starred: boolean) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.setStarred", (id) =>
+    setThreadStarred(tenantId, id, starred),
+  );
+}
+
+export function setThreadsRead(tenantId: string, threadIds: string[], read: boolean) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.setRead", (id) =>
+    setThreadRead(tenantId, id, read),
+  );
+}
+
+export function setThreadsImportant(
+  tenantId: string,
+  threadIds: string[],
+  important: boolean,
+) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.setImportant", (id) =>
+    setThreadImportant(tenantId, id, important),
+  );
+}
+
+export function setThreadsSpam(tenantId: string, threadIds: string[], spam: boolean) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.setSpam", (id) =>
+    setThreadSpam(tenantId, id, spam),
+  );
+}
+
+export function setThreadsCategory(
+  tenantId: string,
+  threadIds: string[],
+  category: string,
+) {
+  return runBulkThreadAction(tenantId, threadIds, "threads.setCategory", (id) =>
+    setThreadCategory(tenantId, id, category),
+  );
+}
+
 /**
  * Search emails by query string (uses Gmail search syntax).
  * Returns ThreadSummary[] matching the query.
@@ -1185,13 +1490,24 @@ export async function ingestMessage(
     .set({ hydrationStatus: "DONE", hydrationAttempts: 0, updatedAt: new Date() })
     .where(eq(messageMetadata.entityId, messageId));
 
-  // Trigger priority classification for unread emails (commit success before
-  // emitting event). Spam/Bin/Draft are skipped for the same reason the batch
-  // classifier skips them (see UNCLASSIFIABLE_CATEGORIES in classification.ts):
-  // incoming spam is overwhelmingly unread, so without this every spam
-  // delivery would spend an LLM call ranking mail nothing will ever display.
+  // Trigger priority classification for genuinely new mail (commit success
+  // before emitting event). Spam/Bin/Draft are skipped for the same reason
+  // the batch classifier skips them (see UNCLASSIFIABLE_CATEGORIES in
+  // classification.ts): incoming spam is overwhelmingly unread, so without
+  // this every spam delivery would spend an LLM call ranking mail nothing
+  // will ever display.
+  //
+  // Deliberately NOT gated on flags.isUnread. That reflects Gmail's label
+  // state *right now*, from the messages.get call above — not the state when
+  // the mail arrived. If it was read externally (e.g. the prod server) before
+  // this catch-up sync reached it, isUnread is already false, and gating on
+  // it silently skipped classification forever with no recovery path (see
+  // BUGS.md). triggerClassification is already the authoritative "this is
+  // new mail, classify it now" signal from the caller — webhook-sync sets it
+  // true only for genuinely new mail (messagesAdded), false for label-only
+  // churn — so isUnread added nothing here but this bug.
   const isClassifiable = !["SPAM", "TRASH", "DRAFT"].includes(category);
-  if (flags.isUnread && triggerClassification && isClassifiable) {
+  if (triggerClassification && isClassifiable) {
     const { inngest } = await import("@repo/inngest");
     void inngest
       .send({
