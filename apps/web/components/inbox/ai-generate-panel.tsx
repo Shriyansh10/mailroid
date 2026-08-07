@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { SparklesIcon, Loader2Icon } from "lucide-react";
+import { SparklesIcon, Loader2Icon, WandSparklesIcon } from "lucide-react";
 import { toast } from "sonner";
 
 import { Button } from "@web/components/ui/button";
@@ -18,9 +18,20 @@ import {
   type GenerateEmailMeeting,
 } from "@web/hooks/api/generate-email";
 
+/**
+ * One button with two meanings, chosen by draft state rather than by which
+ * affordance the user came through. An empty draft is written from scratch; a
+ * draft with anything in it — a template, hand-typed text, or a template the
+ * user then edited — is revised in place, keeping what is already there.
+ *
+ * Keying off content rather than off "a template was applied" is what makes
+ * the third state (template, then edited) well-defined instead of ambiguous.
+ */
 export function AiGeneratePanel({
   mode,
   context,
+  draftBody,
+  draftSubject,
   meeting,
   onGenerated,
   disabled,
@@ -28,20 +39,39 @@ export function AiGeneratePanel({
   mode: "compose" | "reply" | "forward";
   context?: GenerateEmailContext;
   /**
+   * The composer's current body. Its emptiness is the switch between generate
+   * and update, so it has to be the live value, not a snapshot from mount.
+   * The subject is deliberately not part of that test: update edits the body,
+   * and a subject alone leaves nothing to edit.
+   */
+  draftBody?: string;
+  draftSubject?: string;
+  /**
    * The invite currently switched on in the compose surface. Passed so the
    * draft states the real time rather than inventing one — read at generate
    * time, so toggling the invite or changing the time before clicking
    * Generate is always reflected.
    */
   meeting?: GenerateEmailMeeting;
-  onGenerated: (result: { subject?: string; body: string }) => void;
+  onGenerated: (
+    result: { subject?: string; body: string },
+    meta: { wasUpdate: boolean },
+  ) => void;
   disabled?: boolean;
 }) {
   const { generate, isPending } = useGenerateEmail();
   const [open, setOpen] = useState(false);
   const [prompt, setPrompt] = useState("");
   const [lastPrompt, setLastPrompt] = useState<string | null>(null);
-  const [alsoSubject, setAlsoSubject] = useState(true);
+  // null = untouched, so the default can follow draft state without an effect
+  // fighting the user's own choice once they've made one.
+  const [subjectChoice, setSubjectChoice] = useState<boolean | null>(null);
+
+  const isUpdate = Boolean(draftBody?.trim());
+  // Off by default when updating: a template's subject is a deliberate
+  // choice, and silently rewriting it is the kind of overreach that makes
+  // people stop trusting the button.
+  const alsoSubject = subjectChoice ?? !isUpdate;
 
   const handleGenerate = async () => {
     const trimmed = prompt.trim();
@@ -52,9 +82,11 @@ export function AiGeneratePanel({
         prompt: trimmed,
         generateSubject: mode === "compose" ? alsoSubject : undefined,
         context,
+        // Omitted, not sent empty — presence is what selects update mode.
+        ...(isUpdate ? { draftBody, draftSubject } : {}),
         meeting,
       });
-      onGenerated(result);
+      onGenerated(result, { wasUpdate: isUpdate });
       setLastPrompt(trimmed);
       setOpen(false);
       // The server already charged a credit for this generation — tell the
@@ -63,7 +95,13 @@ export function AiGeneratePanel({
       // ever refetches on mount or on this event).
       window.dispatchEvent(new Event("assistant-action-completed"));
     } catch (err) {
-      toast.error(err instanceof Error ? err.message : "Couldn't generate the email");
+      toast.error(
+        err instanceof Error
+          ? err.message
+          : isUpdate
+            ? "Couldn't update the draft"
+            : "Couldn't generate the email",
+      );
     }
   };
 
@@ -79,11 +117,20 @@ export function AiGeneratePanel({
     >
       <PopoverTrigger asChild>
         <Button type="button" variant="outline" size="sm" disabled={disabled} className="gap-1.5">
-          <SparklesIcon className="size-3.5" />
-          Generate with AI
+          {isUpdate ? (
+            <WandSparklesIcon className="size-3.5" />
+          ) : (
+            <SparklesIcon className="size-3.5" />
+          )}
+          {isUpdate ? "Update draft with AI" : "Generate with AI"}
         </Button>
       </PopoverTrigger>
       <PopoverContent align="start" className="w-96 flex flex-col gap-3">
+        {isUpdate && (
+          <p className="text-xs text-muted-foreground">
+            Your draft is edited in place, not replaced.
+          </p>
+        )}
         {lastPrompt && (
           <p className="text-xs text-muted-foreground">
             Last prompt: <span className="italic">&ldquo;{lastPrompt}&rdquo;</span>
@@ -93,11 +140,13 @@ export function AiGeneratePanel({
           value={prompt}
           onChange={(e) => setPrompt(e.target.value)}
           placeholder={
-            mode === "forward"
-              ? "e.g. Forward to my manager with a quick heads-up"
-              : mode === "reply"
-                ? "e.g. Politely decline and suggest next week"
-                : "e.g. Ask the vendor for an updated quote"
+            isUpdate
+              ? "e.g. Make it shorter and mention the deadline"
+              : mode === "forward"
+                ? "e.g. Forward to my manager with a quick heads-up"
+                : mode === "reply"
+                  ? "e.g. Politely decline and suggest next week"
+                  : "e.g. Ask the vendor for an updated quote"
           }
           rows={4}
           disabled={isPending}
@@ -107,10 +156,10 @@ export function AiGeneratePanel({
           <label className="flex items-center gap-2 text-sm cursor-pointer">
             <Checkbox
               checked={alsoSubject}
-              onCheckedChange={(v) => setAlsoSubject(v === true)}
+              onCheckedChange={(v) => setSubjectChoice(v === true)}
               disabled={isPending}
             />
-            <span>Also generate subject</span>
+            <span>{isUpdate ? "Also update the subject" : "Also generate subject"}</span>
           </label>
         )}
         <div className="flex items-center justify-between gap-2">
@@ -119,12 +168,16 @@ export function AiGeneratePanel({
             {isPending ? (
               <>
                 <Loader2Icon className="size-3.5 animate-spin" />
-                Generating…
+                {isUpdate ? "Updating…" : "Generating…"}
               </>
             ) : (
               <>
-                <SparklesIcon className="size-3.5" />
-                Generate
+                {isUpdate ? (
+                  <WandSparklesIcon className="size-3.5" />
+                ) : (
+                  <SparklesIcon className="size-3.5" />
+                )}
+                {isUpdate ? "Update" : "Generate"}
               </>
             )}
           </Button>

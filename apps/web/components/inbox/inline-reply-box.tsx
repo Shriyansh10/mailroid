@@ -234,9 +234,24 @@ export function InlineReplyBox({
     run();
   };
 
-  const applyGenerated = (result: { body: string }) => {
+  const applyGenerated = (
+    result: { body: string },
+    meta: { wasUpdate: boolean },
+  ) => {
+    const previous = body;
     const run = () => setBody(result.body);
-    if (body.trim()) {
+
+    // The user asked for this edit, so confirming it would be asking
+    // permission for the thing just requested. Undo is the safety net instead.
+    if (meta.wasUpdate) {
+      run();
+      toast.success("Draft updated", {
+        action: { label: "Undo", onClick: () => setBody(previous) },
+      });
+      return;
+    }
+
+    if (previous.trim()) {
       setPendingApply({ kind: "body", run });
       return;
     }
@@ -495,6 +510,10 @@ export function InlineReplyBox({
             subject: quoted.subject,
             body: quoted.body,
           }}
+          // The user's own reply so far. The quoted original is deliberately
+          // not part of this — it travels as `context` above — so a fresh
+          // reply reads as empty and still offers "Generate with AI".
+          draftBody={body}
           // The invite attached to this reply, so the drafted body states its
           // real time rather than asking about availability for a slot the
           // invite already books.
@@ -511,7 +530,11 @@ export function InlineReplyBox({
         placeholder={mode === "forward" ? "Add a note (optional)…" : "Write your reply…"}
         disabled={submitting}
         rows={5}
-        className="resize-none"
+        // resize-none stops the user dragging it taller, but field-sizing-content
+        // on the base Textarea still grows it to fit — so a long reply, or one
+        // the AI just expanded, walks the Send button down the thread. Cap it
+        // and scroll inside instead.
+        className="resize-none max-h-[45dvh] overflow-y-auto"
       />
 
       <MeetingInviteFields
@@ -564,7 +587,7 @@ export function InlineReplyBox({
             <AlertDialogDescription>
               {pendingApply?.kind === "meeting"
                 ? "This template has its own meeting settings, which will overwrite the ones you've set."
-                : "Your current reply will be replaced with the template or generated text."}
+                : "Your current reply will be replaced with the template."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

@@ -4,11 +4,11 @@
  * SCOPE, deliberately narrow: this is a parser for UI editing, NOT an RFC 5322
  * implementation. It handles what a person types or pastes into a recipient
  * field and what Gmail's own To/Cc headers contain — display names, angle
- * brackets, quoted names with commas in them, and lists separated by commas or
- * semicolons. Group syntax, parenthesised comments, folded headers and quoted
- * local-parts are explicitly out of scope: the server hands the joined string
- * to Gmail, which is the real parser. Don't grow this file chasing legal-but-
- * never-seen grammar.
+ * brackets, quoted names with commas in them, and lists separated by commas,
+ * semicolons or spaces. Group syntax, parenthesised comments, folded headers
+ * and quoted local-parts are explicitly out of scope: the server hands the
+ * joined string to Gmail, which is the real parser. Don't grow this file
+ * chasing legal-but-never-seen grammar.
  *
  * Recipient lines travel through the whole app as comma-joined strings, which
  * is what an RFC header already is — chips are purely a rendering concern.
@@ -25,6 +25,8 @@ export function isValidAddress(address: string): boolean {
  * Separators inside quotes or angle brackets don't count, which is the only
  * genuinely fiddly part: `"Agarwal, Shriyansh" <a@b.com>` is ONE recipient,
  * and splitting naively on commas would silently turn it into two bogus ones.
+ *
+ * Whitespace separates too, but only in the second pass — see splitBareRun.
  */
 export function parseAddressList(value: string | undefined | null): string[] {
   if (!value) return [];
@@ -53,7 +55,41 @@ export function parseAddressList(value: string | undefined | null): string[] {
   }
   parts.push(current);
 
-  return parts.map(extractAddress).filter(Boolean);
+  return parts.flatMap(splitBareRun).map(extractAddress).filter(Boolean);
+}
+
+/**
+ * Second pass: split a comma-delimited part on whitespace.
+ *
+ * A space means two different things depending on context. In
+ * `a@b.com c@d.com` it separates two recipients; in
+ * `Shriyansh Agarwal <a@b.com>` it sits inside one recipient's name. An
+ * angle group is what tells them apart, so each `…<addr>` is taken whole and
+ * only what trails the last one is split on whitespace. That keeps
+ * `Bob <b@x.com> c@d.com` as two recipients rather than dropping the second,
+ * which is what happens if the whole part is handed to extractAddress.
+ *
+ * The one thing this gets "wrong" is a bare name with no address —
+ * `Shriyansh Agarwal` becomes two invalid chips rather than one. Both render
+ * as unsendable either way, so nothing is lost but tidiness.
+ */
+function splitBareRun(part: string): string[] {
+  if (!part.includes("<")) return part.split(/\s+/);
+
+  const out: string[] = [];
+  const groupRe = /<[^>]*>/g;
+  let cursor = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = groupRe.exec(part)) !== null) {
+    const end = match.index + match[0].length;
+    out.push(part.slice(cursor, end)); // the display name plus its <addr>
+    cursor = end;
+  }
+
+  const tail = part.slice(cursor).trim();
+  if (tail) out.push(...tail.split(/\s+/));
+  return out;
 }
 
 /**

@@ -284,6 +284,10 @@ function TemplateDialog({
               id="template-body"
               placeholder="Hi ,&#10;&#10;Thanks for your time today..."
               rows={8}
+              // field-sizing-content on the base Textarea makes this grow to
+              // fit, so a long template pushes "Create template" off-screen
+              // and scrolls the dialog instead of the text box. Cap it.
+              className="max-h-[45dvh] overflow-y-auto"
               {...register("body")}
             />
             {errors.body && <p className="text-destructive text-sm">{errors.body.message}</p>}

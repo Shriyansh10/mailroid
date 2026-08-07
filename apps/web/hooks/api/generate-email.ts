@@ -28,6 +28,13 @@ export interface GenerateEmailRequest {
   prompt: string;
   generateSubject?: boolean;
   context?: GenerateEmailContext;
+  /**
+   * The composer's current body. Sending it switches the server from writing
+   * to editing, so it must be omitted — not sent empty — when the draft is
+   * blank. Distinct from `context`, which is someone else's email.
+   */
+  draftBody?: string;
+  draftSubject?: string;
   meeting?: GenerateEmailMeeting;
 }
 
