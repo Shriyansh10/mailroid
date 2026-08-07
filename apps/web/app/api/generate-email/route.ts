@@ -39,6 +39,12 @@ const GenerateEmailRequestSchema = z.object({
       body: z.string().optional(),
     })
     .optional(),
+  // The user's own in-progress draft. Present → the model edits it in place
+  // instead of writing from scratch. Capped well above the 12k the prompt
+  // layer slices to, so an oversized draft is truncated there rather than
+  // rejected here with a validation error the composer can't explain.
+  draftBody: z.string().max(20_000).optional(),
+  draftSubject: z.string().max(500).optional(),
   // The invite being attached alongside this email, so the body can state the
   // real time instead of inventing one and hedging about availability.
   meeting: z
@@ -95,8 +101,15 @@ export async function POST(request: Request) {
     const profile = await getPriorityProfile(userId);
     const signature = profile?.data.signature;
 
-    // ...on the user's own prompt (deterministic refusal, no LLM call).
-    if (matchProtectedKeyword(input.prompt, protectedConfig.keywords)) {
+    // ...on the user's own prompt and draft (deterministic refusal, no LLM
+    // call). The draft counts: a protected topic is protected whichever field
+    // it arrives in, and an update sends the draft to the model just as
+    // surely as the prompt does.
+    if (
+      matchProtectedKeyword(input.prompt, protectedConfig.keywords) ||
+      matchProtectedKeyword(input.draftBody ?? "", protectedConfig.keywords) ||
+      matchProtectedKeyword(input.draftSubject ?? "", protectedConfig.keywords)
+    ) {
       return NextResponse.json(
         {
           error:
@@ -151,6 +164,8 @@ export async function POST(request: Request) {
         prompt: input.prompt,
         generateSubject: input.generateSubject,
         context: input.context,
+        draftBody: input.draftBody,
+        draftSubject: input.draftSubject,
         meeting: input.meeting,
         timeZone: userTimeZone,
         signature,
@@ -158,6 +173,12 @@ export async function POST(request: Request) {
     );
 
     // ── Write-guard on the generated body (body-only replyToEmail shape) ──
+    //
+    // In update mode this sees the RESTORED body — the draft's real addresses
+    // and links, not placeholders. That is deliberate: the guard is the last
+    // gate before the user sends, so it must judge what actually goes out. It
+    // does mean a draft carrying, say, a real card number can be blocked on
+    // update where a from-scratch generation would never have produced one.
     const guardResult = writeGuard.evaluate("replyToEmail", { body: result.body });
     if (!guardResult.passed) {
       return NextResponse.json(

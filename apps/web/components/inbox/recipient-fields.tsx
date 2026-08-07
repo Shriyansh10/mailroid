@@ -165,6 +165,15 @@ export const RecipientFields = forwardRef<RecipientFieldsHandle, RecipientFields
         commit(field, text);
         return;
       }
+      if (e.key === " " && isValidAddress(text)) {
+        // Space commits only a finished address. Committing unconditionally
+        // would break a display name apart as it's typed — the space in
+        // "Shriyansh Agarwal <a@b.com>" belongs to the recipient, not
+        // between two of them.
+        e.preventDefault();
+        commit(field, text);
+        return;
+      }
       if (e.key === "Tab" && text.trim()) {
         // Commit, but let Tab move focus as usual.
         commit(field, text);
@@ -178,7 +187,7 @@ export const RecipientFields = forwardRef<RecipientFieldsHandle, RecipientFields
 
     const handlePaste = (field: RecipientField) => (e: React.ClipboardEvent<HTMLInputElement>) => {
       const text = e.clipboardData.getData("text");
-      if (!/[,;\n]/.test(text)) return; // single address: let it type normally
+      if (!/[,;\s]/.test(text)) return; // single address: let it type normally
       e.preventDefault();
       commit(field, `${pending[field]}${text}`);
     };

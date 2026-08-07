@@ -1,7 +1,7 @@
 "use client";
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
-import { useForm } from "react-hook-form";
+import { useForm, useWatch, type Control } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import { z } from "zod";
 import { PencilIcon, SendIcon, Loader2Icon, SaveIcon, Trash2Icon } from "lucide-react";
@@ -111,6 +111,50 @@ interface ComposeDialogProps {
 }
 
 const EMPTY = { to: "", cc: "", bcc: "", subject: "", body: "" };
+
+// Derived from the schema, not hand-written from EMPTY: `body` has a zod
+// default, so its input type is optional while its output type isn't, and a
+// hand-written shape matches neither side of the resolver.
+type ComposeControl = Control<
+  z.input<typeof composeSchema>,
+  unknown,
+  z.output<typeof composeSchema>
+>;
+
+/**
+ * Subscribes the AI panel to the body and subject on its own.
+ *
+ * The panel's label has to flip the moment the draft stops being empty, which
+ * means watching the body — but `form.watch("body")` in the dialog would
+ * re-render the whole modal, recipient chips and meeting fields included, on
+ * every keystroke. Isolating the subscription here keeps that cost to the one
+ * component that actually depends on the value.
+ */
+function ComposeAiPanel({
+  control,
+  meeting,
+  onGenerated,
+  disabled,
+}: {
+  control: ComposeControl;
+  meeting?: React.ComponentProps<typeof AiGeneratePanel>["meeting"];
+  onGenerated: React.ComponentProps<typeof AiGeneratePanel>["onGenerated"];
+  disabled?: boolean;
+}) {
+  const body = useWatch({ control, name: "body" });
+  const subject = useWatch({ control, name: "subject" });
+
+  return (
+    <AiGeneratePanel
+      mode="compose"
+      draftBody={body}
+      draftSubject={subject}
+      meeting={meeting}
+      onGenerated={onGenerated}
+      disabled={disabled}
+    />
+  );
+}
 
 // ── Component ────────────────────────────────────────────────────────
 
@@ -228,12 +272,35 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   );
 
   const applyGenerated = useCallback(
-    (result: { subject?: string; body: string }) => {
+    (result: { subject?: string; body: string }, meta: { wasUpdate: boolean }) => {
+      const previous = {
+        subject: form.getValues("subject"),
+        body: form.getValues("body"),
+      };
       const run = () => {
         form.setValue("body", result.body);
         if (result.subject !== undefined) form.setValue("subject", result.subject);
       };
-      if (form.getValues("body")?.trim()) {
+
+      // An update was asked for explicitly, so "Replace your current draft
+      // text?" would be asking permission for the thing just requested. Apply
+      // it and offer the way back instead — the draft it edited is still the
+      // user's work, and a rewrite they dislike must not be a dead end.
+      if (meta.wasUpdate) {
+        run();
+        toast.success("Draft updated", {
+          action: {
+            label: "Undo",
+            onClick: () => {
+              form.setValue("body", previous.body);
+              form.setValue("subject", previous.subject);
+            },
+          },
+        });
+        return;
+      }
+
+      if (previous.body?.trim()) {
         setPendingApply({ kind: "body", run });
         return;
       }
@@ -487,8 +554,8 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           >
             <div className="flex flex-wrap items-center gap-2">
               <TemplatePicker onSelect={applyTemplate} disabled={isSubmitting} />
-              <AiGeneratePanel
-                mode="compose"
+              <ComposeAiPanel
+                control={form.control}
                 // So the drafted body states the invite's real time instead of
                 // inventing one and asking the recipient to confirm a slot the
                 // invite already books.
@@ -552,7 +619,13 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                       placeholder="Write your message…"
                       disabled={isSubmitting}
                       rows={8}
-                      className="min-h-32 sm:min-h-48"
+                      // The base Textarea sets field-sizing-content, so it
+                      // grows to fit and `rows` is only a floor. Without a
+                      // ceiling a long body (a template, or anything the AI
+                      // just expanded) pushes Send and the meeting fields off
+                      // the bottom and makes the whole dialog scroll. Cap it
+                      // and let the text box scroll on its own instead.
+                      className="min-h-32 sm:min-h-48 max-h-[45dvh] overflow-y-auto"
                       {...field}
                     />
                   </FormControl>
@@ -621,7 +694,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
             <AlertDialogDescription>
               {pendingApply?.kind === "meeting"
                 ? "This template has its own meeting settings, which will overwrite the ones you've set."
-                : "Your current message will be replaced with the template or generated text."}
+                : "Your current message will be replaced with the template."}
             </AlertDialogDescription>
           </AlertDialogHeader>
           <AlertDialogFooter>

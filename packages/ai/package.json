@@ -11,7 +11,7 @@
     "./chat/types": "./src/chat/types.ts"
   },
   "scripts": {
-    "test": "node --import tsx --test src/usage/*.test.ts src/tools/*.test.ts"
+    "test": "node --import tsx --test src/usage/*.test.ts src/tools/*.test.ts src/security/*.test.ts"
   },
   "dependencies": {
     "@repo/database": "workspace:*",
