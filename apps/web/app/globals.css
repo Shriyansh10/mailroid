@@ -122,3 +122,127 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   MARKETING — the landing page only.
+
+   Every value below is a literal, never `var(--background)`. That is the
+   point: next-themes puts `.dark` on <html> whenever the visitor's OS is
+   dark (providers/global.tsx), which would otherwise invert this page's
+   white editorial body. Nothing in here reads an app token, and nothing
+   in here writes one.
+
+   Tokens come from DESIGN.md. Do not add a fourth canvas colour.
+   ═══════════════════════════════════════════════════════════════════ */
+
+@theme {
+  --color-mr-indigo: #1b1938;
+  --color-mr-indigo-deep: #0e0c1f;
+  --color-mr-violet: #c9b4fa;
+  --color-mr-teal: #0e3030;
+  --color-mr-teal-mid: #155555;
+  --color-mr-canvas: #ffffff;
+  --color-mr-soft: #fafaf8;
+  --color-mr-ink: #292827;
+  --color-mr-mute: #73706d;
+  --color-mr-faint: #9a9794;
+  --color-mr-line: #e8e4dd;
+  --color-mr-line-dark: #3f3a52;
+  --color-mr-on-dark: #bcbac9;
+}
+
+.mailroid-marketing {
+  background-color: #ffffff;
+  color: #292827;
+  font-family: var(--font-geist-sans), system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  font-synthesis-weight: none;
+  -webkit-font-smoothing: antialiased;
+  scroll-behavior: smooth;
+}
+
+/* Sub-default weights are the brand's typographic signature — 460 / 540 /
+   600, never 400 / 500 / 700. Geist VF's variable axis is what makes those
+   available; `font-synthesis-weight: none` above stops the browser faking
+   them if the variable face ever fails to load. */
+.mailroid-marketing .w460 { font-variation-settings: "wght" 460; font-weight: 460; }
+.mailroid-marketing .w540 { font-variation-settings: "wght" 540; font-weight: 540; }
+.mailroid-marketing .w600 { font-variation-settings: "wght" 600; font-weight: 600; }
+
+/* Type scale. Sizes stair-step down with the viewport rather than at
+   breakpoints, so the 0.96 leading never collapses mid-range. */
+.mailroid-marketing .t-beat {
+  font-size: clamp(2.25rem, 6vw, 5rem);
+  line-height: 0.94;
+  letter-spacing: -0.02em;
+}
+.mailroid-marketing .t-hero {
+  font-size: clamp(2.25rem, 5.2vw, 4rem);
+  line-height: 0.96;
+  letter-spacing: -0.015em;
+}
+.mailroid-marketing .t-section {
+  font-size: clamp(1.875rem, 3.9vw, 3rem);
+  line-height: 0.98;
+  letter-spacing: -0.0275em;
+}
+.mailroid-marketing .t-band {
+  font-size: clamp(1.375rem, 2.2vw, 1.75rem);
+  line-height: 1.14;
+  letter-spacing: -0.0225em;
+}
+.mailroid-marketing .t-card {
+  font-size: 1.375rem;
+  line-height: 1.15;
+  letter-spacing: -0.0143em;
+}
+.mailroid-marketing .t-lead {
+  font-size: 1.125rem;
+  line-height: 1.55;
+  letter-spacing: -0.0075em;
+}
+.mailroid-marketing .t-body { font-size: 1rem; line-height: 1.6; }
+.mailroid-marketing .t-cap { font-size: 0.875rem; line-height: 1.5; }
+.mailroid-marketing .t-micro {
+  font-size: 0.75rem;
+  line-height: 1.4;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
+
+/* Anchor targets clear the sticky nav. */
+.mailroid-marketing [id] { scroll-margin-top: 96px; }
+
+/* ── Ambient motion ──────────────────────────────────────────────────
+   Three loops, all transform/opacity only. Everything else on the page
+   is a one-shot reveal driven by Framer Motion. */
+
+@keyframes mr-float {
+  0%, 100% { transform: translateY(0); }
+  50%      { transform: translateY(-6px); }
+}
+@keyframes mr-caret {
+  0%, 45%   { opacity: 1; }
+  55%, 100% { opacity: 0; }
+}
+@keyframes mr-draw {
+  from { transform: scaleY(0); }
+  to   { transform: scaleY(1); }
+}
+
+.mailroid-marketing .mr-float {
+  animation: mr-float 12s ease-in-out infinite;
+  will-change: transform;
+}
+.mailroid-marketing .mr-caret { animation: mr-caret 1.15s step-end infinite; }
+
+/* One switch turns off everything, including the ambient loops. Guards
+   below are belt-and-braces for the Framer components, which also read
+   useReducedMotion(). */
+@media (prefers-reduced-motion: reduce) {
+  .mailroid-marketing,
+  .mailroid-marketing * {
+    animation: none !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
