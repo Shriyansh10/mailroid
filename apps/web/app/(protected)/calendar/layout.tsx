@@ -7,7 +7,8 @@ import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 import { 
   LogOutIcon, PencilIcon, CalendarDaysIcon, 
   BotIcon, SparklesIcon, InboxIcon, SendIcon,
-  KeyboardIcon, PaletteIcon, CalendarClockIcon
+  KeyboardIcon, PaletteIcon, CalendarClockIcon,
+  LayoutTemplateIcon, PlugIcon
 } from "lucide-react";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -182,6 +183,17 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/shortcuts")}>
                 <KeyboardIcon className="mr-2 h-4 w-4" />
                 <span>Keyboard Shortcuts</span>
+              </DropdownMenuItem>
+              {/* Email Templates was missing here while the inbox menu had it —
+                  two hand-maintained copies of one menu, already drifted. Both
+                  now list the same settings. */}
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/templates")}>
+                <LayoutTemplateIcon className="mr-2 h-4 w-4" />
+                <span>Email Templates</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/connections")}>
+                <PlugIcon className="mr-2 h-4 w-4" />
+                <span>Connected Services</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={handleLogout}>

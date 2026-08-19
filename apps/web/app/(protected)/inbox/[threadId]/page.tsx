@@ -52,10 +52,14 @@ import {
   buildEventInput,
   MeetingInviteFields,
   type MeetingState,
+  type ThreadMeeting,
 } from "@web/components/inbox/meeting-invite-fields";
 import { ThreadMeetingCard } from "@web/components/inbox/thread-meeting-card";
+// The same rule the server's write guards use — see @repo/shared/calendar.
+import { isUpcomingMeeting } from "@repo/shared/calendar";
 import {
   formatDuration,
+  formatMeetingWindow,
   formatTimeOfDay,
 } from "@web/components/calendar/event-form-utils";
 
@@ -67,7 +71,17 @@ import {
  * which is exactly what keeping them as one object instead of two pieces of
  * state prevents.
  */
-type BoxState = { mode: InlineReplyMode; draftId?: string } | null;
+type BoxState = {
+  mode: InlineReplyMode;
+  draftId?: string;
+  /**
+   * Text to open the box with, for actions that have something to say before
+   * the user does — currently only "propose a new time". Distinct from a
+   * resumed draft: this is a suggestion the user is expected to edit, not
+   * their own saved words.
+   */
+  seedBody?: string;
+} | null;
 
 export default function ThreadDetailPage() {
   const { threadId } = useParams<{ threadId: string }>();
@@ -232,9 +246,10 @@ export default function ThreadDetailPage() {
   const { updateEventAsync } = useUpdateEvent();
   const { deleteEventAsync } = useDeleteEvent();
   const {
-    primaryMeeting,
+    meetings: threadMeetings,
+    upcomingMeetings,
+    upcomingMeeting,
     deletedLink,
-    isGuest: isGuestOnMeeting,
   } = useThreadMeetings(threadId);
   const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
@@ -256,7 +271,12 @@ export default function ThreadDetailPage() {
     // A different thread means a different (or no) meeting to move.
     seededEventIdRef.current = null;
     setIsScheduling(false);
-    if (primaryMeeting) return;
+    // `upcomingMeeting` is null both when there is nothing live to move and
+    // when there are SEVERAL — see the hook. Both get create-mode defaults,
+    // which is right in both cases: with several, nothing here says which one
+    // the user means, so the form must not pre-aim at one of them. Pressing
+    // Reschedule on a specific card is what supplies the missing referent.
+    if (upcomingMeeting) return;
 
     const tomorrow = new Date();
     tomorrow.setDate(tomorrow.getDate() + 1);
@@ -267,52 +287,121 @@ export default function ThreadDetailPage() {
       startTime: formatTimeOfDay(10 * 60),
       duration: formatDuration(60),
     });
-  }, [threadId, primaryMeeting]);
+  }, [threadId, upcomingMeeting]);
 
   // Seed from the thread's existing meeting so "Reschedule" moves it rather
   // than adding a second one. Once per event id, so an explicit choice to
   // create another isn't undone by a refetch.
   useEffect(() => {
-    if (!primaryMeeting) return;
-    if (seededEventIdRef.current === primaryMeeting.eventId) return;
-    seededEventIdRef.current = primaryMeeting.eventId;
-    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
-  }, [primaryMeeting]);
+    // Deliberately `upcomingMeeting`. Seeding from a finished meeting is what
+    // put the form into update mode against something that already happened —
+    // pressing Confirm would move a meeting the guests had already attended,
+    // and the server now refuses it. The form must not get there.
+    if (!upcomingMeeting) return;
+    if (seededEventIdRef.current === upcomingMeeting.eventId) return;
+    seededEventIdRef.current = upcomingMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, upcomingMeeting));
+  }, [upcomingMeeting]);
 
   // Cancelling from the card. The tRPC delete route already closes the thread
   // link as CANCELLED, so there is no second call to keep in step.
-  const [isCancellingMeeting, setIsCancellingMeeting] = useState(false);
-  const handleCancelMeeting = async () => {
-    if (!primaryMeeting) return;
+  // The event id currently being cancelled, not a bare boolean: a thread can
+  // show several cards, and one shared flag would grey out every meeting's
+  // buttons because one of them is mid-delete.
+  const [cancellingEventId, setCancellingEventId] = useState<string | null>(null);
+  const handleCancelMeeting = async (meeting: ThreadMeeting) => {
     if (
-      !window.confirm(
-        `Cancel "${primaryMeeting.title}"? Attendees will be notified.`,
-      )
+      !window.confirm(`Cancel "${meeting.title}"? Attendees will be notified.`)
     ) {
       return;
     }
-    setIsCancellingMeeting(true);
+    setCancellingEventId(meeting.eventId);
     try {
-      await deleteEventAsync({ id: primaryMeeting.eventId });
+      await deleteEventAsync({ id: meeting.eventId });
       toast.success("Meeting cancelled", {
         description: "Attendees have been notified",
       });
       // The form may still be open in "move" mode pointing at the event that
-      // no longer exists.
-      setIsScheduling(false);
-      setMeetingState((prev) => ({ ...prev, mode: "create", target: undefined }));
-      seededEventIdRef.current = null;
+      // no longer exists — but only if it was pointing at THIS one. Resetting
+      // unconditionally would silently turn a reschedule of a different
+      // meeting back into "create a new one" mid-edit.
+      if (meetingState.target?.eventId === meeting.eventId) {
+        setIsScheduling(false);
+        setMeetingState((prev) => ({ ...prev, mode: "create", target: undefined }));
+        seededEventIdRef.current = null;
+      }
     } catch (err: unknown) {
       toast.error("Couldn't cancel the meeting", {
         description: err instanceof Error ? err.message : "Please try again.",
       });
     } finally {
-      setIsCancellingMeeting(false);
+      setCancellingEventId(null);
     }
+  };
+
+  /**
+   * Open the form to move ONE named meeting.
+   *
+   * Explicit rather than inferred: with more than one meeting on the thread
+   * the auto-seed below deliberately does nothing, so pressing Reschedule on a
+   * card is the only thing that says which meeting is meant. The ref is
+   * stamped too, so the auto-seed effect can't overwrite the choice on the
+   * next refetch.
+   */
+  const startReschedule = (meeting: ThreadMeeting) => {
+    seededEventIdRef.current = meeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, meeting));
+    setIsScheduling(true);
+  };
+
+  /**
+   * Open the form to create a NEW meeting, whatever it was last pointing at.
+   *
+   * The reset is the whole function. Without it, a thread holding one finished
+   * meeting and one live one would have auto-seeded the form into "move the
+   * live one", and pressing "Schedule a new meeting" on the finished card
+   * would move that other meeting instead — the exact silent-wrong-target this
+   * work exists to close.
+   */
+  const startNewMeeting = () => {
+    seededEventIdRef.current = null;
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    setMeetingState({
+      ...emptyMeetingState(),
+      enabled: true,
+      date: tomorrow,
+      startTime: formatTimeOfDay(10 * 60),
+      duration: formatDuration(60),
+    });
+    setIsScheduling(true);
   };
 
   /** Whether submitting moves the thread's meeting or creates a new one. */
   const isMovingMeeting = meetingState.mode === "update" && !!meetingState.target;
+
+  // The meeting the open form is pointing at, resolved from the form's own
+  // target rather than from "the thread's meeting" — with several on the
+  // thread those are different meetings, and the banner naming the wrong one
+  // is how a user confirms a move they didn't intend.
+  const movingMeeting =
+    threadMeetings.find((m) => m.eventId === meetingState.target?.eventId) ?? null;
+
+  /**
+   * Cards in reading order: what is coming up, soonest first, then history,
+   * most recent first.
+   *
+   * The wire order is `createdAt` desc — right for "which meeting did I just
+   * make", wrong for a list someone is scanning. With one card it never
+   * mattered; with several, a call from last month sitting above tomorrow's
+   * makes the reader do the sorting.
+   */
+  const orderedMeetings = [...threadMeetings].sort((a, b) => {
+    const aUpcoming = isUpcomingMeeting(a);
+    if (aUpcoming !== isUpcomingMeeting(b)) return aUpcoming ? -1 : 1;
+    const delta = Date.parse(a.start) - Date.parse(b.start);
+    return aUpcoming ? delta : -delta;
+  });
 
   // The form now renders under the meeting card, well below the button that
   // opens it on a long thread, so opening it has to bring it into view.
@@ -402,6 +491,31 @@ export default function ThreadDetailPage() {
   const handleReply = () => setBox({ mode: "reply" });
   const handleReplyAll = () => setBox({ mode: "replyAll" });
   const handleForward = () => setBox({ mode: "forward" });
+
+  /**
+   * A guest asking the organiser for a different time.
+   *
+   * This is a mail, not an API call, and that is not a shortcut: the Google
+   * Calendar API has no propose-new-time field — an attendee may set only
+   * `responseStatus` and a free-text `comment`. Google's own feature is an
+   * email (an iCalendar COUNTER) underneath. Replying on the thread the
+   * meeting already came from is the version of that which creates no second
+   * conversation.
+   *
+   * Opens a normal reply, seeded and fully editable. Deliberately not sent
+   * automatically — proposing a time is a message to a person, and the words
+   * are the user's to choose.
+   */
+  const handleProposeNewTime = (meeting: ThreadMeeting) => {
+    const when = formatMeetingWindow(meeting.start, meeting.end);
+    setBox({
+      mode: "reply",
+      seedBody:
+        `Would it be possible to move "${meeting.title}"?\n\n` +
+        `It's currently set for ${when}. ` +
+        `A different time would work better for me — happy to fit around you.\n\n`,
+    });
+  };
 
   // Resuming a draft from the Draft view: /inbox/[threadId]?draftId=... —
   // fetch it and auto-open the box, once per distinct draftId (a ref, not a
@@ -593,12 +707,15 @@ export default function ThreadDetailPage() {
           size="icon"
           className="size-8 relative"
           onClick={() => setIsScheduling((s) => !s)}
-          title={primaryMeeting ? "Move this thread's meeting" : "Schedule Meeting"}
+          title={upcomingMeeting ? "Move this thread's meeting" : "Schedule Meeting"}
         >
           <CalendarIcon className={cn("size-4", isScheduling ? "text-primary" : "text-muted-foreground")} />
           {/* Without the dot this icon looks identical whether the thread has
               a meeting or not, so there was no reason to ever click it. */}
-          {primaryMeeting && (
+          {/* The dot means "there is a meeting to act on here". A finished one
+              is history and gets no dot — it would send the user to a form
+              that can only create a new meeting anyway. */}
+          {upcomingMeetings.length > 0 && (
             <span className="absolute top-1 right-1 size-1.5 rounded-full bg-primary" />
           )}
         </Button>
@@ -619,21 +736,53 @@ export default function ThreadDetailPage() {
             link existed for a while before anything displayed it, which meant
             the only way to discover a meeting was to click an unlabelled
             calendar icon and hope. */}
-        {(primaryMeeting || deletedLink) && (
-          <ThreadMeetingCard
-            meeting={primaryMeeting}
-            deletedLink={deletedLink}
-            isGuest={isGuestOnMeeting}
-            busy={submittingMeeting || isCancellingMeeting}
-            onReschedule={() => setIsScheduling(true)}
-            onCancel={handleCancelMeeting}
-            onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
-          />
+        {(threadMeetings.length > 0 || deletedLink) && (
+          <div className="space-y-3">
+            {/* Its own card, above the live ones. A vanished meeting is a
+                warning, not a meeting, and folding it into the list would put
+                a red banner in a row of things the user can still act on. */}
+            {deletedLink && (
+              <ThreadMeetingCard
+                deletedLink={deletedLink}
+                onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
+              />
+            )}
+
+            {/* EVERY meeting, not just the newest.
+
+                A thread genuinely holds more than one: the assistant's
+                precheck offers "keep it and add a SECOND, separate meeting",
+                and `resolveWriteTarget` has a whole `ambiguous` branch for it.
+                Rendering `meetings[0]` alone meant the second meeting — the
+                one the user had just been asked about and agreed to — existed
+                in the database, in Google, and in Dobbie's answers, while the
+                thread page showed no sign of it. Implemented, and not Visible.
+
+                Each card carries its own verbs, because with two meetings
+                "reschedule it" has no referent: the card the button sits on is
+                what says which meeting is meant. */}
+            {orderedMeetings.map((m) => (
+              <ThreadMeetingCard
+                key={m.eventId}
+                meeting={m}
+                isGuest={m.role === "GUEST"}
+                isPast={!isUpcomingMeeting(m)}
+                busy={submittingMeeting || cancellingEventId === m.eventId}
+                onReschedule={() => startReschedule(m)}
+                onCancel={() => void handleCancelMeeting(m)}
+                onScheduleNew={startNewMeeting}
+                onProposeNewTime={() => handleProposeNewTime(m)}
+              />
+            ))}
+          </div>
         )}
 
-        {/* Directly under the card, so pressing Reschedule opens the form
-            beneath the meeting it acts on rather than somewhere above the
-            button, off the user's eyeline.
+        {/* Directly under the cards, so pressing Reschedule opens the form
+            below the meeting it acts on rather than somewhere above the
+            button, off the user's eyeline. With more than one meeting the
+            form is no longer adjacent to the card that opened it, which is
+            why it names its target: `existing={movingMeeting}` renders the
+            "moving this meeting" banner from the form's own target.
 
             The fields are the compose invite component, not a second
             implementation of it. The thread's own copy is how this form ended
@@ -670,7 +819,7 @@ export default function ThreadDetailPage() {
             <MeetingInviteFields
               value={meetingState}
               onChange={setMeetingState}
-              existing={primaryMeeting}
+              existing={movingMeeting}
               disabled={submittingMeeting}
               density="compact"
               showToggle={false}
@@ -763,7 +912,7 @@ export default function ThreadDetailPage() {
             draftId={box.draftId}
             subject={boxSubject}
             {...prefillRecipients}
-            initialBody={box.draftId ? activeDraft?.body : undefined}
+            initialBody={box.draftId ? activeDraft?.body : box.seedBody}
             onClose={closeBox}
             onSent={() => void refetchThread()}
           />

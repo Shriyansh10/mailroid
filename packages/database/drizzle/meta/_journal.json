@@ -288,6 +288,13 @@
       "when": 1785960855549,
       "tag": "0042_brown_cerise",
       "breakpoints": true
+    },
+    {
+      "idx": 43,
+      "version": "7",
+      "when": 1787092976711,
+      "tag": "0043_petite_arachne",
+      "breakpoints": true
     }
   ]
 }

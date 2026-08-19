@@ -16,6 +16,8 @@ import {
   resolveThreadMeetings,
   getUnacknowledgedDeletion,
   getEventWriteRole,
+  respondToEvent,
+  CalendarEventGoneError,
 } from "../../../services/index.js";
 import { getCalendarVersion } from "@repo/services/calendar/version.js";
 import { buildThreadSharedProperties } from "@repo/services/gmail/thread-headers.js";
@@ -27,6 +29,8 @@ import {
   createEventOutputModel,
   updateEventInputModel,
   threadMeetingsOutputModel,
+  respondToEventInputModel,
+  respondToEventOutputModel,
 } from "./models.js";
 
 const TAGS = ["Calendar"];
@@ -228,6 +232,48 @@ export const calendarRouter = router({
       // disagreed afterward.
       await requireOrganizer(ctx.user!.id, id, "move");
       return updateEvent(ctx.user!.id, id, rest);
+    }),
+
+  /**
+   * RSVP to a meeting you were invited to.
+   *
+   * The one write here that deliberately does NOT call `requireOrganizer`, and
+   * the reason is the whole point: answering an invitation is precisely the
+   * thing a *guest* does. Running the organiser guard would reject exactly the
+   * people this exists for.
+   *
+   * What keeps it safe is shape, not a permission check. `respondToEvent`
+   * takes no attendee argument — it finds the row matching the connected
+   * Google account and rewrites only that one, echoing every other attendee
+   * back untouched. There is no input through which a caller could reach
+   * someone else's response, the time, or the guest list.
+   */
+  respond: protectedProcedure
+    .meta({
+      openapi: {
+        method: "POST",
+        path: getPath("/respond"),
+        tags: TAGS,
+      },
+    })
+    .input(respondToEventInputModel)
+    .output(respondToEventOutputModel)
+    .mutation(async ({ ctx, input }) => {
+      try {
+        const response = await respondToEvent(ctx.user!.id, input.id, input.response);
+        return { id: input.id, response };
+      } catch (err) {
+        if (err instanceof CalendarEventGoneError) {
+          throw new TRPCError({ code: "NOT_FOUND", message: err.message });
+        }
+        throw new TRPCError({
+          code: "BAD_REQUEST",
+          message:
+            err instanceof Error
+              ? err.message
+              : "We couldn't record your response.",
+        });
+      }
     }),
 
   delete: protectedProcedure

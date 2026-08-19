@@ -11,7 +11,15 @@ export const calendarEventOutputModel = z.object({
   description: z.string().optional(),
   location: z.string().optional(),
   attendees: z.array(z.string()).optional(),
+  /** The organizer / Meet host. Singular — Calendar events have one owner. */
+  organizerEmail: z.string().optional(),
+  /** This user's own RSVP; undefined when they aren't a guest on it. */
+  myResponseStatus: z
+    .enum(["needsAction", "accepted", "declined", "tentative"])
+    .optional(),
   meetLink: z.string().optional(),
+  /** See calendarEventSchema.meetStatus in @repo/services/calendar/model.ts. */
+  meetStatus: z.enum(["none", "created", "pending", "failed"]).optional(),
   status: z.string().optional(),
   htmlLink: z.string().optional(),
 });
@@ -33,6 +41,8 @@ export const createEventInputModel = z.object({
   // Absent for calendar-only events (the /calendar page).
   threadId: z.string().optional(),
   entityId: z.string().optional(),
+  /** Attach a Google Meet conference. Create-only — see the note on the model. */
+  addMeet: z.boolean().optional(),
 });
 
 // ── Thread-linked meetings ──────────────────────────────────────────
@@ -45,6 +55,17 @@ export const threadMeetingOutputModel = z.object({
   end: z.string(),
   attendees: z.array(z.string()),
   htmlLink: z.string().optional(),
+  /** The Google Meet join URL, when the meeting has a conference attached. */
+  meetLink: z.string().optional(),
+  /** Where and what — the details Google mails to guests but not the organiser. */
+  location: z.string().optional(),
+  description: z.string().optional(),
+  /** The organizer / Meet host. Singular — Calendar events have one owner. */
+  organizerEmail: z.string().optional(),
+  /** This user's own RSVP; undefined when they aren't a guest on it. */
+  myResponseStatus: z
+    .enum(["needsAction", "accepted", "declined", "tentative"])
+    .optional(),
   /**
    * ORGANIZER: this user scheduled it and can move or cancel it.
    * GUEST: they were invited, and the card is read-only for them.
@@ -89,6 +110,18 @@ export const threadMeetingsOutputModel = z.object({
  */
 export const createEventOutputModel = calendarEventOutputModel.extend({
   linked: z.boolean(),
+});
+
+// ── RSVP ────────────────────────────────────────────────────────────
+
+export const respondToEventInputModel = z.object({
+  id: z.string(),
+  response: z.enum(["accepted", "declined", "tentative"]),
+});
+
+export const respondToEventOutputModel = z.object({
+  id: z.string(),
+  response: z.enum(["accepted", "declined", "tentative"]),
 });
 
 // ── Update event input ──────────────────────────────────────────────

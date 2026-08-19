@@ -20,6 +20,14 @@ export const calendarEvents = pgTable(
     attendees: jsonb("attendees"),
     status: text("status"),
     htmlLink: text("html_link"),
+    // The Google Meet join URL (`hangoutLink`), when the event has one.
+    //
+    // Distinct from `htmlLink`, which opens the event in Google Calendar's UI.
+    // Persisted because resolveThreadMeetings serves the thread card from this
+    // row whenever it exists and only falls back to a live fetch when it does
+    // not — so without a column here the card would show no join link for every
+    // meeting that has already synced.
+    meetLink: text("meet_link"),
     // extendedProperties.shared.mailroidThreadRootMsgId, when present: the
     // RFC822 Message-ID of the root message of the thread this meeting was
     // scheduled from.

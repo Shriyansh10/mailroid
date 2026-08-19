@@ -186,7 +186,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
   // A reply-shaped compose carries a threadId, so it can find and move that
   // thread's meeting. A fresh compose has none — no banner, no link, correct.
-  const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
+  const { upcomingMeeting, deletedLink } = useThreadMeetings(threadId);
 
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   // A pending template/AI apply awaiting overwrite confirmation.
@@ -227,11 +227,16 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
       seededEventIdRef.current = null;
       return;
     }
-    if (!primaryMeeting) return;
-    if (seededEventIdRef.current === primaryMeeting.eventId) return;
-    seededEventIdRef.current = primaryMeeting.eventId;
-    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
-  }, [open, primaryMeeting]);
+    // `upcomingMeeting`, not `primaryMeeting`: seeding from a meeting that
+    // has already ended puts these fields into update mode against something
+    // that cannot be moved, so Send would try to reschedule a call the
+    // guests already attended. A finished meeting leaves the invite in
+    // create mode, which is the only thing that still makes sense.
+    if (!upcomingMeeting) return;
+    if (seededEventIdRef.current === upcomingMeeting.eventId) return;
+    seededEventIdRef.current = upcomingMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, upcomingMeeting));
+  }, [open, upcomingMeeting]);
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   //
@@ -432,9 +437,30 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
             })
               .then((event) => {
                 if (event.linked) {
+                  // A Meet link that was asked for and did not arrive is never
+                  // reported as a plain success — from here that is
+                  // indistinguishable from never having asked, which is exactly
+                  // the silent degradation the product forbids.
+                  if (event.meetStatus === "failed") {
+                    toast.warning("Meeting created, but without a Google Meet link", {
+                      description:
+                        "Google refused the conference request. Add a link in Google Calendar, or schedule again to retry.",
+                    });
+                    return;
+                  }
+                  if (event.meetStatus === "pending") {
+                    toast.success("Calendar invite created", {
+                      description:
+                        "Google is still setting up the Meet link — it will appear on the thread shortly.",
+                    });
+                    return;
+                  }
                   toast.success("Calendar invite created");
                   return;
                 }
+                // Checked before the Meet status on purpose: an unlinked event
+                // is the one that risks a duplicate meeting if the user tries
+                // again, so it is the thing they have to be told about.
                 // Partial success — the event exists, only the link failed.
                 // No Retry: it would create a second event.
                 toast.warning("Meeting created, but not linked to this thread", {
@@ -638,7 +664,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
               value={meetingState}
               onChange={setMeetingState}
               disabled={isSubmitting}
-              existing={primaryMeeting}
+              existing={upcomingMeeting}
               deletedLink={deletedLink}
               onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
             />

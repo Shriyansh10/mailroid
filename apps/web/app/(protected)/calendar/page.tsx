@@ -8,7 +8,8 @@ import {
   ChevronRight as ChevronRightIcon, 
   Plus as PlusIcon, 
   Sparkles as SparklesIcon,
-  Calendar as CalendarIcon
+  Calendar as CalendarIcon,
+  Video as VideoIcon
 } from "lucide-react";
 import { Button } from "@web/components/ui/button";
 import { Card, CardHeader, CardTitle, CardContent } from "@web/components/ui/card";
@@ -31,6 +32,7 @@ import {
   useUpdateEvent,
   useDeleteEvent,
 } from "@web/hooks/api/calendar";
+import { useGetConnectedAccounts } from "@web/hooks/api/tentant";
 import EventModal from "@web/components/calendar/EventModal";
 import {
   allDaySpanInDays,
@@ -47,6 +49,12 @@ interface ModalData {
   location?: string;
   attendees?: string[];
   allDay?: boolean;
+  /** Read-only in the modal — Google owns the conference, not this form. */
+  meetLink?: string;
+  /** The organizer / Meet host. Drives whether this user may edit at all. */
+  organizerEmail?: string;
+  /** This user's own RSVP, when they are a guest on it. */
+  myResponseStatus?: "needsAction" | "accepted" | "declined" | "tentative";
 }
 
 interface EventTimes {
@@ -133,6 +141,26 @@ export default function CalendarPage() {
   const [modalOpen, setModalOpen] = useState(false);
   const [modalMode, setModalMode] = useState<"create" | "edit">("create");
   const [modalData, setModalData] = useState<ModalData | undefined>(undefined);
+
+  /**
+   * Whether the open event is this user's to change.
+   *
+   * Compared against the *connected Calendar account*, not the better-auth
+   * login: those can legitimately differ, and the one Google cares about is
+   * the account that owns the event. Unknown organiser (an older synced row,
+   * or connections still loading) falls back to editable — the server's
+   * `requireOrganizer` is the actual gate, so a wrong guess here costs a clear
+   * error rather than data, and locking people out of their own meetings on a
+   * missing field would be the worse failure.
+   */
+  const { data: connectedAccounts } = useGetConnectedAccounts();
+  const canEditModalEvent = useMemo(() => {
+    if (modalMode === "create") return true;
+    const organizer = modalData?.organizerEmail?.toLowerCase();
+    const self = connectedAccounts?.calendarEmail?.toLowerCase();
+    if (!organizer || !self) return true;
+    return organizer === self;
+  }, [modalMode, modalData?.organizerEmail, connectedAccounts?.calendarEmail]);
 
   // Ref for the calendar API
   const calendarRef = useRef<FullCalendar>(null);
@@ -228,6 +256,13 @@ export default function CalendarPage() {
         description: matchedEvent?.description,
         location: matchedEvent?.location,
         attendees: matchedEvent?.attendees,
+        // Read off the matched event rather than the FullCalendar object: the
+        // list-card call site below fabricates a minimal `event` with no
+        // extendedProps, so taking it from there would silently lose the Meet
+        // link on exactly one of the two ways into this modal.
+        meetLink: matchedEvent?.meetLink,
+        organizerEmail: matchedEvent?.organizerEmail,
+        myResponseStatus: matchedEvent?.myResponseStatus,
       });
       setModalMode("edit");
       setModalOpen(true);
@@ -283,6 +318,11 @@ export default function CalendarPage() {
         description: match.description,
         location: match.location,
         attendees: match.attendees,
+        // The deep link is how the thread card sends you to the meeting, so
+        // this is the *most* likely way someone arrives wanting the join link.
+        meetLink: match.meetLink,
+        organizerEmail: match.organizerEmail,
+        myResponseStatus: match.myResponseStatus,
       });
       setModalMode("edit");
       setModalOpen(true);
@@ -539,6 +579,12 @@ export default function CalendarPage() {
       >
         {status === "in-progress" && <LiveDot />}
         {eventInfo.timeText && <span className="font-mono font-bold mr-1.5 opacity-80">{eventInfo.timeText}</span>}
+        {/* Before the title, not after: in month view the title truncates, and
+            a marker placed after it is the first thing to disappear on exactly
+            the events that have the longest names. */}
+        {eventInfo.event.extendedProps?.meetLink && (
+          <VideoIcon className="size-3 shrink-0" aria-label="Has a Google Meet link" />
+        )}
         <span className="font-sans font-semibold truncate">{eventInfo.event.title}</span>
       </div>
     );
@@ -628,6 +674,9 @@ export default function CalendarPage() {
                       >
                         <div className="flex items-center gap-1.5">
                           {status === "in-progress" && <LiveDot />}
+                          {event.meetLink && (
+                            <VideoIcon className="size-3 shrink-0 text-muted-foreground" aria-label="Has a Google Meet link" />
+                          )}
                           <div className="text-xs font-semibold text-foreground truncate">{event.title}</div>
                         </div>
                         <div className="text-[10px] text-muted-foreground font-mono mt-1 flex items-center gap-1.5">
@@ -822,6 +871,7 @@ export default function CalendarPage() {
         isOpen={modalOpen}
         mode={modalMode}
         initialData={modalData}
+        canEdit={canEditModalEvent}
         onSave={handleModalSave}
         onDelete={handleModalDelete}
         onClose={() => setModalOpen(false)}
