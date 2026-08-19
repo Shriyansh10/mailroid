@@ -5,6 +5,7 @@ import { threadCalendarEvents } from "@repo/database/models/thread-calendar-even
 import { getEvent, getEventOrganizerEmail } from "./index.ts";
 import { findGuestThreadMeetings, type GuestResolution } from "./guest-links.ts";
 import { getAccountEmail } from "../gmail/index.ts";
+import { isUpcomingMeeting, partitionMeetingsByTime } from "@repo/shared/calendar";
 
 /**
  * Thread ↔ calendar-event links.
@@ -60,6 +61,27 @@ export interface ThreadMeeting {
   end: string;
   attendees: string[];
   htmlLink?: string;
+  /** The Google Meet join URL, when the meeting has a conference attached. */
+  meetLink?: string;
+  /**
+   * Where and what. Carried so the thread card can show the organiser the same
+   * details Google mails to the *guests* — the organiser gets no such mail, so
+   * without these the person who scheduled the meeting is the one person who
+   * cannot see what they scheduled.
+   */
+  location?: string;
+  description?: string;
+  /**
+   * The organizer, i.e. the Meet host. Singular by Google's own data model —
+   * `organizer` on a Calendar event is one object, not a list. Co-hosts are a
+   * Meet-side concept with no representation in the Calendar API at all.
+   */
+  organizerEmail?: string;
+  /**
+   * This user's own RSVP. `needsAction` means invited but unanswered;
+   * `undefined` means the question does not apply to them.
+   */
+  myResponseStatus?: "needsAction" | "accepted" | "declined" | "tentative";
   /**
    * Whether this user owns the meeting or was only invited. Write paths must
    * check it: only the organiser can move or cancel.
@@ -189,6 +211,11 @@ async function resolveLinks(
     .from(calendarEvents)
     .where(eq(calendarEvents.userId, userId));
 
+  // Resolved once for the whole list. Failure is not fatal: without it the
+  // RSVP control simply reads as unanswered, which is a smaller wrong than
+  // refusing to show the meeting at all.
+  const selfEmail = await getAccountEmail(userId).catch(() => null);
+
   const byEventId = new Map(cached.map((row) => [row.eventId, row]));
   const resolved: ThreadMeeting[] = [];
 
@@ -214,6 +241,11 @@ async function resolveLinks(
         end: row.endTime.toISOString(),
         attendees: extractAttendees(row.attendees),
         htmlLink: row.htmlLink ?? undefined,
+        meetLink: row.meetLink ?? undefined,
+        location: row.location ?? undefined,
+        description: row.description ?? undefined,
+        organizerEmail: row.organizerEmail ?? undefined,
+        myResponseStatus: extractMyResponse(row.attendees, selfEmail),
         role: link.role ?? "ORGANIZER",
       });
       continue;
@@ -239,6 +271,11 @@ async function resolveLinks(
         end: live.end,
         attendees: live.attendees ?? [],
         htmlLink: live.htmlLink,
+        meetLink: live.meetLink,
+        location: live.location,
+        description: live.description,
+        organizerEmail: live.organizerEmail,
+        myResponseStatus: live.myResponseStatus,
         role: link.role ?? "ORGANIZER",
       });
     } catch (error) {
@@ -303,22 +340,34 @@ export async function resolveThreadMeetings(
     )
     .orderBy(desc(threadCalendarEvents.createdAt));
 
-  if (links.length > 0) {
+  // An ORGANISER's links are complete by construction: a row is written at
+  // creation for every meeting they schedule, so there is nothing a join could
+  // add and no reason to pay for one.
+  const hasGuestLink = links.some((l) => l.role === "GUEST");
+  if (links.length > 0 && !hasGuestLink) {
     return { meetings: await resolveLinks(userId, links), resolution: "none" };
   }
 
-  // No link rows. Either there is genuinely no meeting, or this user was
-  // invited to one rather than scheduling it — in which case the join runs
-  // through the thread's Message-IDs instead.
+  // A GUEST's links are only ever as complete as the last join that produced
+  // them, so holding one must NOT stop the join running again. It used to:
+  // the first view linked the meeting that existed then, every later view took
+  // the links path above, and a second meeting scheduled afterwards was
+  // invisible to the guest forever while the organiser saw both. The join is
+  // TTL-bounded (see LOOKUP_TTL_MS), not free-running.
   const guest = await findGuestThreadMeetings(userId, threadId);
-  if (guest.eventIds.length === 0) {
-    return { meetings: [], resolution: guest.resolution };
-  }
 
-  // Make it durable. linkThreadEvent is idempotent, so the remote lookup that
-  // found this fires at most once per thread — every later load takes the
-  // ordinary link path above.
+  // Links we already hold, plus anything the join just found. Existing rows
+  // keep their position, so newest-scheduled-first ordering survives.
+  const known = new Map(links.map((l) => [l.eventId, l]));
   for (const eventId of guest.eventIds) {
+    if (known.has(eventId)) continue;
+    known.set(eventId, {
+      eventId,
+      calendarId: DEFAULT_CALENDAR_ID,
+      role: "GUEST" as const,
+    });
+
+    // Make it durable, so the card survives the next lookup failure.
     try {
       await linkThreadEvent({ userId, threadId, eventId, role: "GUEST" });
     } catch (error) {
@@ -333,15 +382,11 @@ export async function resolveThreadMeetings(
     }
   }
 
-  const meetings = await resolveLinks(
-    userId,
-    guest.eventIds.map((eventId) => ({
-      eventId,
-      calendarId: DEFAULT_CALENDAR_ID,
-      role: "GUEST" as const,
-    })),
-  );
+  if (known.size === 0) {
+    return { meetings: [], resolution: guest.resolution };
+  }
 
+  const meetings = await resolveLinks(userId, [...known.values()]);
   return { meetings, resolution: "guest-linked" };
 }
 
@@ -419,10 +464,43 @@ export async function getUnacknowledgedDeletion(
   };
 }
 
+// ── Meeting lifecycle ─────────────────────────────────────────────────
+
+// Re-exported, not redefined: the rule itself lives in @repo/shared so the
+// thread card can ask the same question this file's write guards ask. A second
+// copy here is how a card comes to offer a Reschedule button that the resolver
+// then refuses.
+export { isUpcomingMeeting, partitionMeetingsByTime } from "@repo/shared/calendar";
+
+/**
+ * The thread's meetings that scheduling decisions are allowed to see.
+ *
+ * This — not `getActiveThreadMeetings` — is what the precheck and the write
+ * resolver read. "Schedule a meeting with John" means create one; a meeting
+ * that ended yesterday must not turn that into "you already have one, shall I
+ * move it?", which is the entire bug this exists to close.
+ */
+export async function getUpcomingThreadMeetings(
+  userId: string,
+  threadId: string,
+): Promise<ThreadMeeting[]> {
+  const meetings = await getActiveThreadMeetings(userId, threadId);
+  return partitionMeetingsByTime(meetings).upcoming;
+}
+
 // ── Write targeting ───────────────────────────────────────────────────
 
 export type WriteTarget =
   | { kind: "none" }
+  /**
+   * The thread has meetings, but every one of them is over. Distinct from
+   * "none" because the two deserve different sentences and because collapsing
+   * them would leave the user's own history looking like it never existed.
+   * Never a licence to move the past meeting — there is no useful sense in
+   * which something that already ended can be rescheduled. If the user wants
+   * to meet again, that is a NEW meeting.
+   */
+  | { kind: "past-only"; meetings: ThreadMeeting[] }
   | { kind: "one"; meeting: ThreadMeeting }
   | { kind: "ambiguous"; meetings: ThreadMeeting[] };
 
@@ -436,7 +514,14 @@ export type WriteTarget =
  */
 export type SelectionResult =
   | { kind: "found"; meeting: ThreadMeeting }
-  | { kind: "notFound"; meetings: ThreadMeeting[] };
+  | { kind: "notFound"; meetings: ThreadMeeting[] }
+  /**
+   * The token resolved, and it names a meeting that is over. Its own case
+   * rather than folding into `notFound`: the meeting demonstrably exists and
+   * saying "no meeting matches that" about something the user can see on the
+   * thread would be a lie told by a safety check.
+   */
+  | { kind: "past"; meeting: ThreadMeeting };
 
 export async function resolveSelection(
   userId: string,
@@ -445,7 +530,9 @@ export async function resolveSelection(
 ): Promise<SelectionResult> {
   const meetings = await getActiveThreadMeetings(userId, threadId);
   const match = meetings.find((m) => selectionIdFor(m.eventId) === selectionId);
-  return match ? { kind: "found", meeting: match } : { kind: "notFound", meetings };
+  if (!match) return { kind: "notFound", meetings };
+  if (!isUpcomingMeeting(match)) return { kind: "past", meeting: match };
+  return { kind: "found", meeting: match };
 }
 
 export type SelectionDrift = "missing" | "changed" | null;
@@ -494,8 +581,14 @@ export async function resolveWriteTarget(
 ): Promise<WriteTarget> {
   const meetings = await getActiveThreadMeetings(userId, threadId);
   if (meetings.length === 0) return { kind: "none" };
-  if (meetings.length === 1) return { kind: "one", meeting: meetings[0]! };
-  return { kind: "ambiguous", meetings };
+
+  // Past meetings are not candidates. Ambiguity is counted AFTER this split,
+  // which is the point: a thread holding yesterday's call and tomorrow's is
+  // not ambiguous, it has exactly one meeting left to move.
+  const { upcoming } = partitionMeetingsByTime(meetings);
+  if (upcoming.length === 0) return { kind: "past-only", meetings };
+  if (upcoming.length === 1) return { kind: "one", meeting: upcoming[0]! };
+  return { kind: "ambiguous", meetings: upcoming };
 }
 
 /**
@@ -647,4 +740,33 @@ function extractAttendees(raw: unknown): string[] {
         : undefined,
     )
     .filter((e): e is string => typeof e === "string");
+}
+
+/** The four values Google uses; anything else is treated as unknown. */
+const RESPONSE_STATUSES = ["needsAction", "accepted", "declined", "tentative"] as const;
+type ResponseStatus = (typeof RESPONSE_STATUSES)[number];
+
+/**
+ * This user's own RSVP out of the stored attendee blob.
+ *
+ * `calendar_events.attendees` holds Google's attendee objects verbatim, so the
+ * answer is already local — no extra API call to show a guest what they last
+ * replied.
+ */
+function extractMyResponse(raw: unknown, selfEmail: string | null): ResponseStatus | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const selfLower = selfEmail?.toLowerCase();
+  for (const entry of raw) {
+    if (typeof entry !== "object" || entry === null) continue;
+    const a = entry as { email?: unknown; self?: unknown; responseStatus?: unknown };
+    const isSelf =
+      a.self === true ||
+      (!!selfLower && typeof a.email === "string" && a.email.toLowerCase() === selfLower);
+    if (!isSelf) continue;
+    const status = a.responseStatus;
+    return RESPONSE_STATUSES.includes(status as ResponseStatus)
+      ? (status as ResponseStatus)
+      : undefined;
+  }
+  return undefined;
 }

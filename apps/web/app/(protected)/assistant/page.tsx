@@ -13,7 +13,8 @@ import {
   CheckIcon,
   XIcon,
   Trash2Icon,
-  PencilIcon
+  PencilIcon,
+  VideoIcon
 } from "lucide-react";
 import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
@@ -23,10 +24,16 @@ import { useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 import { Button } from "@web/components/ui/button";
 import { Textarea } from "@web/components/ui/textarea";
+import { Switch } from "@web/components/ui/switch";
 import { Progress } from "@web/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tooltip";
 import { EmailReferenceCard, type EmailReference } from "@web/components/email-reference-card";
 import { cn } from "@web/lib/utils";
+// Imported, not mirrored like REFINE_OPTIONS below: this is the rule that
+// decides what the executor will actually do, and a card drawing a switch
+// from a second copy of it is exactly how "Google Meet: no" ends up on a
+// card whose approval creates one. The module is dependency-free.
+import { resolveAddMeet } from "@repo/shared/calendar";
 
 /**
  * The refinement directions offered on a pending draft. Mirrors
@@ -46,6 +53,17 @@ type RefineDirective = (typeof REFINE_OPTIONS)[number]["directive"];
 
 /** Mirrors MAX_REFINEMENTS in app/api/approvals/refine/route.ts. */
 const MAX_REFINEMENTS = 3;
+
+/**
+ * Tools whose approval card carries the "Add Google Meet" switch. Mirrors
+ * TOGGLEABLE in app/api/approvals/options/route.ts — the server is the
+ * authority; this only decides whether to draw the control.
+ *
+ * Reschedule and cancel are absent on purpose: their update call never sends
+ * conferenceDataVersion, which is what preserves an existing Meet link when a
+ * meeting moves. A switch there would be a control that does nothing.
+ */
+const MEET_TOGGLE_TOOLS = new Set(["createEvent", "scheduleThreadMeeting"]);
 
 interface RenderableItem {
   type: "message" | "tool_call";
@@ -553,6 +571,10 @@ function AssistantPageInner() {
   const [savingEdit, setSavingEdit] = useState<string | null>(null);
   const [editError, setEditError] = useState<{ approvalId: string; message: string } | null>(null);
 
+  /** Which approval has a structured option (e.g. Add Google Meet) mid-flight. */
+  const [togglingOption, setTogglingOption] = useState<string | null>(null);
+  const [optionError, setOptionError] = useState<{ approvalId: string; message: string } | null>(null);
+
   /**
    * Rewrite a pending draft in place. The server is the only writer — it
    * refuses anything no longer PENDING — so on success we just adopt the body
@@ -665,6 +687,65 @@ function AssistantPageInner() {
       });
     } finally {
       setSavingEdit(null);
+    }
+  };
+
+  /**
+   * Flip a structured option on a still-pending approval — today only
+   * "Add a Google Meet link" on the two meeting-creating tools.
+   *
+   * Its own decision rather than something folded into approving the meeting:
+   * creating a conference sends a join URL to every guest, so the user has to
+   * be able to see it *and* change it before saying yes. Same
+   * adopt-the-server-response rule as the edit path — the server rewrites the
+   * preview alongside the args, so a card can never end up displaying a
+   * different intent from the one it will execute.
+   */
+  const handleToggleOption = async (
+    msg: ChatMessage,
+    field: string,
+    value: boolean,
+  ) => {
+    const ar = msg.approvalRequired;
+    if (!ar || togglingOption) return;
+
+    setTogglingOption(ar.approvalId);
+    setOptionError(null);
+
+    try {
+      const res = await fetch("/api/approvals/options", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ approvalId: ar.approvalId, field, value }),
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        throw new Error(data.error ?? `Server error (${res.status})`);
+      }
+
+      setMessages((prev) =>
+        prev.map((m) =>
+          m.id === msg.id && m.approvalRequired
+            ? {
+                ...m,
+                approvalRequired: {
+                  ...m.approvalRequired,
+                  args: data.args as Record<string, unknown>,
+                  preview: data.preview ?? m.approvalRequired.preview,
+                },
+              }
+            : m,
+        ),
+      );
+    } catch (error) {
+      setOptionError({
+        approvalId: ar.approvalId,
+        message:
+          error instanceof Error ? error.message : "Could not change this option.",
+      });
+    } finally {
+      setTogglingOption(null);
     }
   };
 
@@ -1087,6 +1168,36 @@ function AssistantPageInner() {
                                         <div>
                                           <span className="font-medium text-muted-foreground">End:</span> {new Date(String(args.end)).toLocaleString()}
                                         </div>
+                                      )}
+                                      {/* Its own line, always shown on the two
+                                          meeting-creating tools and never
+                                          inferred from silence: a join link
+                                          goes out to every guest, so "no" has
+                                          to be as visible as "yes", and both
+                                          have to be changeable before the user
+                                          commits to either. */}
+                                      {MEET_TOGGLE_TOOLS.has(msg.approvalRequired.toolName) && (
+                                        <div className="flex items-center justify-between gap-3 pt-1">
+                                          <span className="flex items-center gap-1.5">
+                                            <VideoIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                                            <span className="font-medium text-muted-foreground">Google Meet:</span>{" "}
+                                            {resolveAddMeet(args)
+                                              ? "a join link will be created"
+                                              : "no join link"}
+                                          </span>
+                                          <Switch
+                                            checked={resolveAddMeet(args)}
+                                            disabled={togglingOption === approvalId}
+                                            onCheckedChange={(v) =>
+                                              void handleToggleOption(msg, "addMeet", v)
+                                            }
+                                          />
+                                        </div>
+                                      )}
+                                      {optionError !== null && optionError.approvalId === approvalId && (
+                                        <p className="text-[11px] text-destructive">
+                                          {optionError.message}
+                                        </p>
                                       )}
                                     </div>
                                   );

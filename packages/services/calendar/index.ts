@@ -1,9 +1,14 @@
+import { createHash } from "node:crypto";
+
 import { corsair } from "@repo/corsair";
+import { db, eq } from "@repo/database";
+import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
 import type {
   CalendarEvent,
   GetEventsInput,
   CreateEventInput,
   UpdateEventInput,
+  MeetStatus,
 } from "./model.ts";
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -17,7 +22,27 @@ interface RawEventTime {
 interface RawAttendee {
   email?: string;
   displayName?: string;
+  /** Google's own marker for "this is the authenticated account". */
+  self?: boolean;
+  responseStatus?: string;
   [key: string]: unknown;
+}
+
+/**
+ * The conferencing block Google attaches to an event.
+ *
+ * `createRequest.status.statusCode` is the only place that says whether a
+ * conference we asked for actually happened: "pending", "success" or
+ * "failure". `hangoutLink` being absent does not distinguish those.
+ */
+interface RawConferenceData {
+  createRequest?: {
+    requestId?: string;
+    conferenceSolutionKey?: { type?: string };
+    status?: { statusCode?: string };
+  };
+  entryPoints?: { entryPointType?: string; uri?: string }[];
+  conferenceId?: string;
 }
 
 interface RawEvent {
@@ -29,6 +54,7 @@ interface RawEvent {
   end?: RawEventTime;
   attendees?: RawAttendee[];
   hangoutLink?: string;
+  conferenceData?: RawConferenceData;
   status?: string;
   htmlLink?: string;
   [key: string]: unknown;
@@ -182,10 +208,42 @@ export async function getEventOrganizerEmail(
 }
 
 /**
+ * The join URL, from either place Google puts it.
+ *
+ * `hangoutLink` is the convenient top-level copy, but it is not always
+ * populated the instant a conference is created — the video entry point is,
+ * so falling back to it means a freshly created Meet is returned on the same
+ * call rather than looking absent until the next read.
+ */
+function extractMeetLink(raw: RawEvent): string | undefined {
+  if (raw.hangoutLink) return raw.hangoutLink;
+  const video = raw.conferenceData?.entryPoints?.find(
+    (entry) => entry.entryPointType === "video" && !!entry.uri,
+  );
+  return video?.uri ?? undefined;
+}
+
+/**
  * Normalize a raw Google Calendar event into our CalendarEvent shape.
  * Handles both timed events (dateTime) and all-day events (date).
+ *
+ * `meetStatusOverride` exists because a plain read cannot see the difference
+ * between "nobody asked for a conference" and "one was asked for and is still
+ * being made" — only the call that did the asking knows. Every other caller
+ * gets the honest read-side answer: a link means created, no link means none.
  */
-function normalizeEvent(raw: RawEvent): CalendarEvent {
+function normalizeEvent(
+  raw: RawEvent,
+  meetStatusOverride?: MeetStatus,
+  selfEmail?: string | null,
+): CalendarEvent {
+  const meetLink = extractMeetLink(raw);
+  // `self` is Google's own marker and is authoritative when present; the email
+  // comparison is the fallback for reads where Google didn't set it.
+  const selfLower = selfEmail?.toLowerCase();
+  const me = raw.attendees?.find(
+    (a) => a.self === true || (!!selfLower && a.email?.toLowerCase() === selfLower),
+  );
   return {
     id: raw.id ?? "",
     title: raw.summary ?? "(No title)",
@@ -197,10 +255,50 @@ function normalizeEvent(raw: RawEvent): CalendarEvent {
     attendees: raw.attendees
       ?.map((a: RawAttendee) => a.email)
       .filter((e): e is string => !!e),
-    meetLink: raw.hangoutLink ?? undefined,
+    // No longer dropped: the thread card names the host, which is the one
+    // thing that tells a user which Google account they must be signed in as
+    // to be let into their own meeting.
+    organizerEmail: (raw.organizer as { email?: string } | undefined)?.email ?? undefined,
+    myResponseStatus:
+      me?.responseStatus === "accepted" ||
+      me?.responseStatus === "declined" ||
+      me?.responseStatus === "tentative" ||
+      me?.responseStatus === "needsAction"
+        ? me.responseStatus
+        : undefined,
+    meetLink,
+    meetStatus: meetStatusOverride ?? (meetLink ? "created" : "none"),
     status: raw.status ?? undefined,
     htmlLink: raw.htmlLink ?? undefined,
   };
+}
+
+/**
+ * A stable conference request id for an event.
+ *
+ * Google treats a repeat of the same `requestId` as the *same* conference, so
+ * this must never be random per attempt. Otherwise:
+ *
+ *   create Meet → Google makes a conference → network times out → we retry
+ *      stable id → the same conference comes back
+ *      fresh id  → a second conference is minted
+ *
+ * Hashed rather than used raw because Google caps `requestId` and event ids
+ * have no length guarantee worth relying on.
+ */
+function meetRequestId(eventId: string): string {
+  return createHash("sha256").update(eventId).digest("hex").slice(0, 32);
+}
+
+/** What Google says came of a conference request, if it says anything at all. */
+function readMeetStatus(raw: RawEvent): MeetStatus {
+  const code = raw.conferenceData?.createRequest?.status?.statusCode;
+  if (code === "success") return "created";
+  if (code === "pending") return "pending";
+  if (code === "failure") return "failed";
+  // No createRequest block at all: either the conference predates this request
+  // or Google ignored it. A link present is the only positive evidence here.
+  return extractMeetLink(raw) ? "created" : "failed";
 }
 
 /**
@@ -353,15 +451,21 @@ export async function getEvents(
 ): Promise<CalendarEvent[]> {
   const tenant = corsair.withTenant(tenantId);
 
-  const result = await tenant.googlecalendar.api.events.getMany({
-    timeMin: normalizeToUtcTimestamp(input.timeMin, userTimeZone),
-    timeMax: normalizeToUtcTimestamp(input.timeMax, userTimeZone),
-    singleEvents: true,
-    orderBy: "startTime",
-    maxResults: 250,
-  });
+  // One lookup for the whole page of events, not one per event.
+  const [result, selfEmail] = await Promise.all([
+    tenant.googlecalendar.api.events.getMany({
+      timeMin: normalizeToUtcTimestamp(input.timeMin, userTimeZone),
+      timeMax: normalizeToUtcTimestamp(input.timeMax, userTimeZone),
+      singleEvents: true,
+      orderBy: "startTime",
+      maxResults: 250,
+    }),
+    getCalendarAccountEmail(tenantId),
+  ]);
 
-  return (result.items ?? []).map((item: RawEvent) => normalizeEvent(item));
+  return (result.items ?? []).map((item: RawEvent) =>
+    normalizeEvent(item, undefined, selfEmail),
+  );
 }
 
 /**
@@ -373,9 +477,12 @@ export async function getEvent(
 ): Promise<CalendarEvent> {
   const tenant = corsair.withTenant(tenantId);
 
-  const raw = await tenant.googlecalendar.api.events.get({ id: eventId });
+  const [raw, selfEmail] = await Promise.all([
+    tenant.googlecalendar.api.events.get({ id: eventId }),
+    getCalendarAccountEmail(tenantId),
+  ]);
 
-  return normalizeEvent(raw as unknown as RawEvent);
+  return normalizeEvent(raw as unknown as RawEvent, undefined, selfEmail);
 }
 
 /**
@@ -430,41 +537,107 @@ export async function createEvent(
     event: event as Parameters<typeof tenant.googlecalendar.api.events.create>[0]["event"],
   });
 
-  // Tell the guests.
+  // Tell the guests, and attach the Meet conference.
   //
-  // The plugin's eventsCreate declares `sendUpdates` but builds its POST with
-  // no query string, so the parameter is dead code there and Google emails
-  // nobody — a meeting Dobbie scheduled existed only on the organizer's
-  // calendar. eventsUpdate *does* pass it, so the event is immediately
-  // re-sent, whole, with `sendUpdates: "all"`.
+  // Both ride the same follow-up PUT, for the same underlying reason: the
+  // plugin's eventsCreate declares `sendUpdates` and `conferenceDataVersion`
+  // but builds its POST with **no query string at all**, so both are dead code
+  // there. Google emails nobody, and ignores `conferenceData` outright — a
+  // Meet link genuinely cannot be created on the POST. eventsUpdate *does*
+  // forward its query, so the event is immediately re-sent, whole, carrying
+  // whichever of the two this call needs.
   //
   // The body is the event Google just returned, echoed whole through the same
   // `stripReadOnly` the update path uses, because events.update is a PUT:
   // anything omitted would be cleared, and this write must not change the event
   // it is only trying to announce.
   const created = raw as unknown as RawEvent;
-  if (input.attendees?.length && created.id) {
+  const wantsMeet = input.addMeet === true;
+  const hasGuests = !!input.attendees?.length;
+
+  // Previously this ran only when there were guests to notify. A solo event
+  // that wants a Meet link still needs the PUT, since that is the only call
+  // that can carry conferenceDataVersion.
+  if ((hasGuests || wantsMeet) && created.id) {
+    const body = stripReadOnly(created);
+    if (wantsMeet) {
+      body.conferenceData = {
+        createRequest: {
+          requestId: meetRequestId(created.id),
+          conferenceSolutionKey: { type: "hangoutsMeet" },
+        },
+      };
+    }
+
     try {
-      const announced = await tenant.googlecalendar.api.events.update({
+      const announced = (await tenant.googlecalendar.api.events.update({
         id: created.id,
-        event: stripReadOnly(created) as Parameters<
+        event: body as Parameters<
           typeof tenant.googlecalendar.api.events.update
         >[0]["event"],
-        sendUpdates: "all",
-      });
-      return normalizeEvent(announced as unknown as RawEvent);
+        sendUpdates: hasGuests ? "all" : "none",
+        // ONLY here. Leaving it unset on every other update is what makes
+        // Google ignore the conferenceData those calls echo back, which is
+        // precisely what keeps a Meet link alive across a reschedule.
+        ...(wantsMeet ? { conferenceDataVersion: 1 } : {}),
+      })) as unknown as RawEvent;
+
+      if (!wantsMeet) return normalizeEvent(announced);
+      return await settleMeet(tenant, announced);
     } catch (err) {
-      // The event exists; only the invitations failed. Loud, because from the
-      // organizer's side an uninvited meeting looks exactly like an invited
-      // one — and retrying the create would schedule a second meeting.
+      // The event exists; only the invitations and/or the conference failed.
+      // Loud, because from the organizer's side an uninvited meeting looks
+      // exactly like an invited one — and retrying the create would schedule a
+      // second meeting.
       console.error(
-        `[calendar-service] Event ${created.id} created but attendees were not notified:`,
-        err,
+        `[calendar-service] Event ${created.id} created but the follow-up write failed`,
+        { notified: hasGuests, meetRequested: wantsMeet, error: err },
       );
+      // Say what actually happened rather than reporting a linkless event as
+      // if no conference had ever been asked for.
+      return normalizeEvent(created, wantsMeet ? "failed" : undefined);
     }
   }
 
-  return normalizeEvent(created);
+  return normalizeEvent(created, wantsMeet ? "failed" : undefined);
+}
+
+/** How long to wait before the single re-read for a still-pending conference. */
+const MEET_PENDING_RECHECK_MS = 1500;
+
+/**
+ * Resolve a conference request that Google may not have finished yet.
+ *
+ * Meet creation is asynchronous: the PUT can return `statusCode: "pending"`
+ * with no link on it. One bounded re-read covers the common case where it
+ * lands moments later. If it is still pending after that we say so and stop —
+ * the event is real and correctly created either way, and a later read (the
+ * calendar sync, or opening the thread) will pick the link up. What we must
+ * never do is return `pending` or `failure` dressed up as "no Meet link".
+ */
+async function settleMeet(
+  tenant: ReturnType<typeof corsair.withTenant>,
+  announced: RawEvent,
+): Promise<CalendarEvent> {
+  const status = readMeetStatus(announced);
+  if (status !== "pending") return normalizeEvent(announced, status);
+
+  await new Promise((resolve) => setTimeout(resolve, MEET_PENDING_RECHECK_MS));
+
+  try {
+    const refetched = (await tenant.googlecalendar.api.events.get({
+      id: announced.id ?? "",
+    })) as unknown as RawEvent;
+    return normalizeEvent(refetched, readMeetStatus(refetched));
+  } catch (err) {
+    // The re-read is an optimization, not the source of truth. Failing it does
+    // not make the conference failed — it stays pending, honestly.
+    console.error(
+      `[calendar-service] Meet re-read failed for event ${announced.id}; still pending`,
+      err,
+    );
+    return normalizeEvent(announced, "pending");
+  }
 }
 
 /**
@@ -585,6 +758,131 @@ export async function updateEvent(
   });
 
   return normalizeEvent(raw as unknown as RawEvent);
+}
+
+/** How an invited guest can answer. Mirrors Google's own vocabulary. */
+export type AttendeeResponse = "accepted" | "declined" | "tentative";
+
+/**
+ * The connected Google Calendar account's own address.
+ *
+ * Deliberately the *Calendar* connection rather than the better-auth login:
+ * they can legitimately differ, and the only identity Google matches an
+ * attendee row against is the one that authorised the calendar.
+ */
+async function getCalendarAccountEmail(tenantId: string): Promise<string | null> {
+  const [connection] = await db
+    .select({ calendarEmail: corsairConnectionEmails.calendarEmail })
+    .from(corsairConnectionEmails)
+    .where(eq(corsairConnectionEmails.userId, tenantId))
+    .limit(1);
+  return connection?.calendarEmail ?? null;
+}
+
+/**
+ * RSVP to an event this user was invited to.
+ *
+ * The one write in this file a non-organiser is allowed to make, and it is
+ * narrow by construction rather than by permission check: it rebuilds the
+ * attendee list unchanged except for the single entry whose address matches
+ * the connected account, and sends nothing else. There is no argument through
+ * which a caller could reach another person's response, the time, or the
+ * guest list.
+ *
+ * Uses PATCH via raw fetch rather than the plugin's `events.update`, for two
+ * reasons that both matter:
+ *
+ *   1. `events.update` is a PUT — the whole event — and Google refuses a
+ *      non-organiser writing organiser-owned fields. An RSVP would be rejected
+ *      for touching things it never meant to touch.
+ *   2. The plugin exposes no `events.patch` at all, so there is no way to send
+ *      only `attendees` through it.
+ *
+ * `sendUpdates: "none"` on purpose. Google notifies the organiser of an RSVP
+ * through its own mechanism; asking it to send updates here would mail *every*
+ * guest because one person clicked Maybe.
+ */
+export async function respondToEvent(
+  tenantId: string,
+  eventId: string,
+  response: AttendeeResponse,
+): Promise<AttendeeResponse> {
+  const tenant = corsair.withTenant(tenantId);
+
+  const selfEmail = await getCalendarAccountEmail(tenantId);
+  if (!selfEmail) {
+    throw new Error(
+      "We don't know which Google account is connected to your calendar, so we can't RSVP for you.",
+    );
+  }
+
+  let current: RawEvent;
+  try {
+    current = (await tenant.googlecalendar.api.events.get({
+      id: eventId,
+    })) as unknown as RawEvent;
+  } catch (err) {
+    if (isNotFound(err)) throw new CalendarEventGoneError(eventId);
+    throw err;
+  }
+  if (!current?.id || current.status === "cancelled") {
+    throw new CalendarEventGoneError(eventId);
+  }
+
+  const attendees = current.attendees ?? [];
+  const selfLower = selfEmail.toLowerCase();
+  const isSelf = (a: RawAttendee) =>
+    a.email?.toLowerCase() === selfLower || a.self === true;
+
+  if (!attendees.some(isSelf)) {
+    // Said plainly rather than silently succeeding. "RSVP saved" on a meeting
+    // that never invited you is a lie the user would only discover by asking
+    // the organiser why their answer never showed up.
+    throw new Error(
+      "You're not on the guest list for this meeting, so there's nothing to respond to.",
+    );
+  }
+
+  // Every other attendee is echoed back byte-for-byte. Rebuilding them from
+  // their addresses would drop displayName, optional, organizer and — the one
+  // that actually bites — everyone else's responseStatus.
+  const merged = attendees.map((a) =>
+    isSelf(a) ? { ...a, responseStatus: response } : a,
+  );
+
+  const accessToken = await tenant.googlecalendar.keys.get_access_token();
+  if (!accessToken) {
+    throw new Error("No Google Calendar access token is available for this account.");
+  }
+
+  const res = await fetch(
+    `https://www.googleapis.com/calendar/v3/calendars/primary/events/${encodeURIComponent(
+      eventId,
+    )}?sendUpdates=none`,
+    {
+      method: "PATCH",
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ attendees: merged }),
+    },
+  );
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    console.error("[calendar-service] RSVP failed", {
+      eventId,
+      status: res.status,
+      detail,
+    });
+    if (res.status === 404 || res.status === 410) {
+      throw new CalendarEventGoneError(eventId);
+    }
+    throw new Error("Google wouldn't record that response — try again in a moment.");
+  }
+
+  return response;
 }
 
 /**

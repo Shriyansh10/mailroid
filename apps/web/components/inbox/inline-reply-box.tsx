@@ -184,7 +184,7 @@ export function InlineReplyBox({
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
   const { updateEventAsync } = useUpdateEvent();
-  const { primaryMeeting, deletedLink } = useThreadMeetings(threadId);
+  const { upcomingMeeting, deletedLink } = useThreadMeetings(threadId);
   const { acknowledgeAsync } = useAcknowledgeThreadMeeting();
 
   const isFreshForward = mode === "forward" && !draftId;
@@ -212,11 +212,16 @@ export function InlineReplyBox({
   // a refetch must not quietly put them back into move mode.
   const seededEventIdRef = useRef<string | null>(null);
   useEffect(() => {
-    if (!primaryMeeting) return;
-    if (seededEventIdRef.current === primaryMeeting.eventId) return;
-    seededEventIdRef.current = primaryMeeting.eventId;
-    setMeetingState((prev) => meetingStateFromExisting(prev, primaryMeeting));
-  }, [primaryMeeting]);
+    // `upcomingMeeting`, not `primaryMeeting`: seeding from a meeting that
+    // has already ended puts these fields into update mode against something
+    // that cannot be moved, so Send would try to reschedule a call the
+    // guests already attended. A finished meeting leaves the invite in
+    // create mode, which is the only thing that still makes sense.
+    if (!upcomingMeeting) return;
+    if (seededEventIdRef.current === upcomingMeeting.eventId) return;
+    seededEventIdRef.current = upcomingMeeting.eventId;
+    setMeetingState((prev) => meetingStateFromExisting(prev, upcomingMeeting));
+  }, [upcomingMeeting]);
 
   // ── Template / AI apply, with overwrite confirmation ────────────────
   // Reply/forward never touch subject (it isn't shown inline).
@@ -541,7 +546,7 @@ export function InlineReplyBox({
         value={meetingState}
         onChange={setMeetingState}
         disabled={submitting}
-        existing={primaryMeeting}
+        existing={upcomingMeeting}
         deletedLink={deletedLink}
         onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
       />

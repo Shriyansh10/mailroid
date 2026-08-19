@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { trpc } from "@web/trpc/client";
+import { isUpcomingMeeting } from "@repo/shared/calendar";
 
 /**
  * Per-user realtime freshness for the calendar. Polls the cheap
@@ -53,13 +54,43 @@ export const useThreadMeetings = (threadId?: string) => {
     { enabled: !!threadId, staleTime: 30_000 },
   );
 
-  const primaryMeeting = data?.meetings?.[0] ?? null;
+  // ALL of them, newest-scheduled first. A thread can genuinely hold several:
+  // `precheckScheduleThreadMeeting` offers the user "keep it and add a SECOND,
+  // separate meeting", and `resolveWriteTarget` has an `ambiguous` branch for
+  // exactly this. Anything rendering only `meetings[0]` makes the meeting the
+  // user just agreed to create invisible.
+  const meetings = data?.meetings ?? [];
+
+  // Every meeting that hasn't ended yet — what a write may act on at all.
+  const upcomingMeetings = meetings.filter((m) => isUpcomingMeeting(m));
+
+  /**
+   * The thread's one live meeting, or null.
+   *
+   * Null in TWO cases, and the second is the point: no live meeting, and more
+   * than one. With two, "the thread's meeting" has no answer, and picking the
+   * newest is the guess `resolveWriteTarget` refuses to make server-side — a
+   * compose surface that silently seeds itself from one of two meetings moves
+   * a meeting the user never pointed at. Callers that need to act on a
+   * specific meeting take it from `meetings` and say which.
+   */
+  const upcomingMeeting = upcomingMeetings.length === 1 ? upcomingMeetings[0]! : null;
+
+  // Prefer a live meeting, fall back to history. Banner-seeding only.
+  const primaryMeeting = upcomingMeetings[0] ?? meetings[0] ?? null;
 
   return {
-    meetings: data?.meetings ?? [],
+    meetings,
+    /** Every meeting on this thread that has not ended. */
+    upcomingMeetings,
     // Newest-scheduled first (createdAt desc), which is what a banner should
     // describe. Deliberately not used to target a write — see resolveWriteTarget.
     primaryMeeting,
+    /**
+     * The single unambiguous meeting to seed a "move it" form from, or null.
+     * See above — null when there are none AND when there are several.
+     */
+    upcomingMeeting,
     deletedLink: data?.deletedLink ?? null,
     /** Why the list is empty, when it is. See threadMeetingsOutputModel. */
     resolution: data?.resolution ?? "none",
@@ -195,6 +226,43 @@ export const useUpdateEvent = () => {
     isIdle,
     isSuccess,
     isPending,
+    reset,
+    status,
+  };
+};
+
+/**
+ * RSVP to a meeting you were invited to.
+ *
+ * Invalidates the event list as well as thread meetings: the answer shows up
+ * in both places, and a card still reading "Not answered" after you answered
+ * is the sort of small lie that makes people click twice.
+ */
+export const useRespondToEvent = () => {
+  const utils = trpc.useUtils();
+  const {
+    mutateAsync: respondToEventAsync,
+    mutate: respondToEvent,
+    error,
+    isError,
+    isPending,
+    isSuccess,
+    reset,
+    status,
+  } = trpc.calendar.respond.useMutation({
+    onSuccess: () => {
+      void utils.calendar.threadMeetings.invalidate();
+      void utils.calendar.events.invalidate();
+    },
+  });
+
+  return {
+    respondToEventAsync,
+    respondToEvent,
+    error,
+    isError,
+    isPending,
+    isSuccess,
     reset,
     status,
   };

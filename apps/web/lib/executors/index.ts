@@ -20,6 +20,8 @@ import {
   buildRescheduleMeetingPreview,
   buildCancelMeetingPreview,
   precheckScheduleThreadMeeting,
+  precheckRescheduleThreadMeeting,
+  precheckCancelThreadMeeting,
 } from "./calendar";
 import type {
   GetEventsInput,
@@ -179,6 +181,11 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       execute: (args, ctx) =>
         rescheduleThreadExec.execute(args as RescheduleThreadMeetingInput, ctx as ToolExecutionContext),
       buildPreview: (args, ctx) => buildRescheduleMeetingPreview(args, ctx),
+      // Asking for approval is a promise that the action is possible. Without
+      // this, a thread with no meeting still minted a card, the user approved
+      // it, execute threw — and the model explained the refusal by inventing a
+      // cancellation that never happened.
+      precheck: (args, ctx) => precheckRescheduleThreadMeeting(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ rescheduleThreadMeeting wired");
   } else {
@@ -192,6 +199,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
       execute: (args, ctx) =>
         cancelThreadExec.execute(args as CancelThreadMeetingInput, ctx as ToolExecutionContext),
       buildPreview: (args, ctx) => buildCancelMeetingPreview(args, ctx),
+      precheck: (args, ctx) => precheckCancelThreadMeeting(args, ctx),
     });
     console.log("[registerProductionExecutors] ✅ cancelThreadMeeting wired");
   } else {

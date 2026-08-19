@@ -9,6 +9,7 @@ import {
   assertNotPast,
 } from "@repo/services/calendar/index";
 import { getEventStatus } from "@repo/shared/time";
+import { resolveAddMeet } from "@repo/shared/calendar";
 import {
   linkThreadEvent,
   closeThreadLink,
@@ -17,6 +18,8 @@ import {
   selectionIdFor,
   checkSelectionDrift,
   getActiveThreadMeetings,
+  getUpcomingThreadMeetings,
+  isUpcomingMeeting,
   userOwnsEvent,
   type ThreadMeeting,
 } from "@repo/services/calendar/thread-links";
@@ -161,6 +164,8 @@ export interface CreateEventInput {
   attendeeRefs?: string[];
   description?: string;
   organizer?: string;
+  /** Attach a Google Meet conference. Shown on, and editable from, the approval card. */
+  addMeet?: boolean;
 }
 
 export interface CreateEventOutput {
@@ -212,9 +217,17 @@ export class CorsairCreateEventExecutor
         allDay: false,
         attendees,
         description: args.description,
+        // Resolved, not read literally: an omitted flag means the model never
+        // decided, and the preview the user approved filled the same blank the
+        // same way. See resolveAddMeet.
+        addMeet: resolveAddMeet(args),
       }, (ctx as any).userTimeZone);
 
-      console.log("[executor:createEvent] SUCCESS", { id: result.id, title: result.title });
+      console.log("[executor:createEvent] SUCCESS", {
+        id: result.id,
+        title: result.title,
+        meetStatus: result.meetStatus,
+      });
       return { draft: false, id: result.id };
     } catch (error) {
       console.error("[executor:createEvent] ERROR", { error: String(error), userId: ctx.userId });
@@ -243,6 +256,14 @@ export interface GetThreadMeetingsOutput {
     start: string;
     end: string;
     attendees: string[];
+    /**
+     * This meeting has already ended. It is listed because it is part of the
+     * thread's history and the user may well be asking about it — but it can
+     * no longer be rescheduled or cancelled, and the resolver refuses a token
+     * naming one. Tagged rather than hidden so the model answers "you met on
+     * the 12th" correctly instead of proposing a move that will be refused.
+     */
+    past: boolean;
   }>;
 }
 
@@ -265,6 +286,7 @@ export class ThreadMeetingsExecutor
           start: m.start,
           end: m.end,
           attendees: m.attendees,
+          past: !isUpcomingMeeting(m),
         })),
       };
     } catch (error) {
@@ -285,6 +307,8 @@ export interface ScheduleThreadMeetingInput {
   organizer?: string;
   /** Set by the model only after the user has seen the thread's existing meetings and chosen to add another. */
   acknowledgedExistingMeetings?: boolean;
+  /** Attach a Google Meet conference. Shown on, and editable from, the approval card. */
+  addMeet?: boolean;
 }
 
 /**
@@ -316,7 +340,10 @@ export async function precheckScheduleThreadMeeting(
   // tell whether this thread already has a meeting, the safe answer is to stop
   // — swallowing the error would re-open the duplicate-invite path on exactly
   // the calendar outage that makes duplicates hardest to notice.
-  const meetings = await getActiveThreadMeetings(ctx.userId, threadId);
+  // Upcoming only. A meeting that already ended is history, not a conflict:
+  // "schedule a meeting with John" means create one, and letting yesterday's
+  // call turn that into "shall I move it?" is the bug this filter closes.
+  const meetings = await getUpcomingThreadMeetings(ctx.userId, threadId);
   if (meetings.length === 0) return null;
 
   const noun = meetings.length === 1 ? "meeting" : "meetings";
@@ -334,6 +361,73 @@ export async function precheckScheduleThreadMeeting(
     `Calling this tool again unchanged will report the same thing.`,
   ].join("\n");
 }
+
+/**
+ * Refuses a reschedule or cancel that has nothing to act on, BEFORE an approval
+ * card is minted.
+ *
+ * Without this the flow was: model calls rescheduleThreadMeeting on a thread
+ * with no meeting → orchestrator mints a card → user approves → execute throws
+ * "no scheduled meeting to reschedule" → the model, holding a refusal with no
+ * stated cause, tells the user the meeting "has already been cancelled". None
+ * of that is true, and the user was asked to approve an action that could never
+ * have succeeded. Observed on 20 Aug 2026.
+ *
+ * Two separate failures, one fix. Asking for approval is a promise that the
+ * action is possible, and a refusal has to state its own cause or the model
+ * will invent one.
+ *
+ * Only the two states that no argument can rescue are refused here — `none` and
+ * `past-only`. `ambiguous` is deliberately allowed through: a `selectionId` may
+ * name exactly one of those meetings, and the executor resolves that properly.
+ *
+ * Cheap and idempotent per the precheck contract: one read of links we own, no
+ * writes, and it runs again on the approve-side replay.
+ */
+async function precheckThreadMeetingWrite(
+  verb: "reschedule" | "cancel",
+  args: Record<string, unknown>,
+  ctx: { userId: string; userTimeZone?: string },
+): Promise<string | null> {
+  const threadId = args.threadId as string | undefined;
+  if (!threadId) return null; // Let the schema report the missing field.
+
+  // Deliberately not wrapped in a try/catch returning null: if we cannot tell
+  // whether this thread has a meeting, the safe answer is to stop rather than
+  // mint a card for an action we cannot vouch for.
+  const target = await resolveWriteTarget(ctx.userId, threadId);
+
+  if (target.kind === "none") {
+    return [
+      `This thread has no meeting scheduled from it, so there is nothing to ${verb}. NOTHING was changed and no approval was requested.`,
+      ``,
+      `Do NOT tell the user the meeting was cancelled, deleted, or removed — you do not know that, and it is usually false. What is true is narrower: no meeting on this thread is linked to it.`,
+      `If they were pointing at a meeting they saw through getEvents, say plainly that it did not come from this thread, and that you can only move or cancel meetings scheduled from the thread you are reading. Offer to schedule a new one.`,
+    ].join("\n");
+  }
+
+  if (target.kind === "past-only") {
+    const noun = target.meetings.length === 1 ? "meeting" : "meetings";
+    return [
+      `This thread's ${noun} already ended, and a finished meeting cannot be ${verb === "cancel" ? "cancelled" : "moved"}. NOTHING was changed and no approval was requested.`,
+      describeMeetings(target.meetings, ctx.userTimeZone),
+      ``,
+      `Say the meeting is over — not that it was cancelled — and offer to schedule a NEW one. Do not call this tool again for these.`,
+    ].join("\n");
+  }
+
+  return null;
+}
+
+export const precheckRescheduleThreadMeeting = (
+  args: Record<string, unknown>,
+  ctx: { userId: string; userTimeZone?: string },
+) => precheckThreadMeetingWrite("reschedule", args, ctx);
+
+export const precheckCancelThreadMeeting = (
+  args: Record<string, unknown>,
+  ctx: { userId: string; userTimeZone?: string },
+) => precheckThreadMeetingWrite("cancel", args, ctx);
 
 export class ScheduleThreadMeetingExecutor
   implements ToolExecutor<ScheduleThreadMeetingInput, CreateEventOutput>
@@ -376,6 +470,7 @@ export class ScheduleThreadMeetingExecutor
           attendees,
           description: args.description,
           sharedProperties,
+          addMeet: resolveAddMeet(args),
         },
         ctx.userTimeZone,
       );
@@ -557,6 +652,14 @@ function describeEvent(
   if (Array.isArray(attendees) && attendees.length > 0) {
     lines.push(`Attendees: ${attendees.join(", ")}`);
   }
+  // Always stated, both ways. "No line" would mean the user approves a join
+  // link being sent to every guest without ever having been shown that it was
+  // part of what they were approving.
+  lines.push(
+    resolveAddMeet(args)
+      ? "Google Meet: yes — a join link will be created"
+      : "Google Meet: no",
+  );
   return lines;
 }
 
@@ -583,6 +686,9 @@ export async function buildRescheduleMeetingPreview(
 
     if (target.kind === "none") {
       return "No meeting is scheduled from this thread — nothing to reschedule.";
+    }
+    if (target.kind === "past-only") {
+      return "This thread's meeting has already ended — a finished meeting cannot be moved. Schedule a new one instead.";
     }
     if (target.kind === "ambiguous") {
       const list = target.meetings
@@ -621,6 +727,9 @@ export async function buildCancelMeetingPreview(
 
     if (target.kind === "none") {
       return "No meeting is scheduled from this thread — nothing to cancel.";
+    }
+    if (target.kind === "past-only") {
+      return "This thread's meeting has already ended — there is nothing left to cancel.";
     }
     if (target.kind === "ambiguous") {
       const list = target.meetings
@@ -683,6 +792,18 @@ async function resolveTargetOrThrow(
       );
     }
 
+    // Resolves, but names a meeting that is over. Refused rather than acted
+    // on: moving a finished meeting re-invites everyone to something they
+    // already attended, and there is no reading of "reschedule" that wants
+    // that. The model is told to offer the only useful alternative.
+    if (selected.kind === "past") {
+      throw new Error(
+        `"${selected.meeting.title}" already ended (${formatWhen(selected.meeting.start)}). ` +
+          `A finished meeting cannot be ${verb === "cancel" ? "cancelled" : "moved"}, and nothing was changed. ` +
+          `Tell the user it is over and offer to schedule a NEW meeting instead — do not pick a different meeting.`,
+      );
+    }
+
     // The token survives a reschedule (it's derived from the eventId, not the
     // time), so a same-event drift check needs a SEPARATE signal:
     // expectedStart, injected server-side from the ledger of what
@@ -723,6 +844,18 @@ async function resolveTargetOrThrow(
   if (target.kind === "none") {
     throw new Error(
       `This thread has no scheduled meeting to ${verb}. Nothing was changed.`,
+    );
+  }
+
+  // Meetings exist, but every one of them is over. Deliberately NOT reported
+  // as "no meeting" — the user can see them on the thread, and a safety check
+  // that denies their own history reads as a bug rather than as a refusal.
+  if (target.kind === "past-only") {
+    const noun = target.meetings.length === 1 ? "meeting" : "meetings";
+    throw new Error(
+      `This thread's ${noun} already ended, and a finished meeting cannot be ${verb === "cancel" ? "cancelled" : "moved"}. Nothing was changed.\n` +
+        `${describeMeetings(target.meetings)}\n` +
+        `Say the meeting is over and offer to schedule a NEW one. Do not call this tool again for these.`,
     );
   }
 

@@ -98,6 +98,32 @@ function nameFromEmail(email: string): string {
     .join(" ");
 }
 
+/**
+ * The display name to keep when the query was a literal address — or
+ * `undefined` to let `nameFromEmail` derive one.
+ *
+ * Exists because `persistAndProject` OVERWRITES `display_name` on conflict,
+ * and `parseAddressList` treats everything before the address as a name. The
+ * assistant is now told to pass a user-typed address straight through, and it
+ * will sometimes pass the surrounding phrase with it — "schedule a call with
+ * sam@acme.com". Trusting that would permanently rename a real contact to
+ * "schedule a call with".
+ *
+ * So a name survives only from a genuine address form:
+ *
+ *   "alex@x.com"                 → undefined      (derive from the address)
+ *   "Alex Mehta <alex@x.com>"    → "Alex Mehta"   (a real name, keep it)
+ *   "call with alex@x.com"       → undefined      (prose, not a name)
+ *
+ * The address itself resolves in every case; only the name is discarded.
+ */
+export function explicitDisplayName(
+  query: string,
+  parsedDisplayName: string | undefined,
+): string | undefined {
+  return /^[^<>]*<[^<>]+>$/.test(query.trim()) ? parsedDisplayName : undefined;
+}
+
 // ── Candidates ───────────────────────────────────────────────────────
 
 export type ContactSource = "THREAD" | "MAILBOX" | "EXPLICIT";
@@ -345,7 +371,11 @@ export async function resolveRecipient(
   const literal = parseAddressList(trimmed);
   if (literal.length === 1 && trimmed.includes("@")) {
     const candidates = await persistAndProject(userId, [
-      { email: literal[0]!.email, displayName: literal[0]!.displayName, source: "EXPLICIT" },
+      {
+        email: literal[0]!.email,
+        displayName: explicitDisplayName(trimmed, literal[0]!.displayName),
+        source: "EXPLICIT",
+      },
     ]);
     return { candidates, ambiguous: false, notFound: false };
   }

@@ -114,3 +114,19 @@ export const useGetAccountsExist = () => {
   return { data, isLoading, isError, error };
 };
 
+/**
+ * Which Google accounts are connected, and whether their tokens still work.
+ *
+ * Richer than useGetAccountsExist, which only answers "is there a row" — this
+ * also carries the connected email and a live token check, which is what
+ * /settings/connections needs to distinguish "connected" from "connected but
+ * broken". Not cached hard: a connection that expired since page load is
+ * exactly the thing this screen exists to show.
+ */
+export const useGetConnectedAccounts = () => {
+  const { data, isLoading, isError, error, refetch } =
+    trpc.auth.getConnectedAccounts.useQuery(undefined, { staleTime: 30_000 });
+
+  return { data, isLoading, isError, error, refetch };
+};
+

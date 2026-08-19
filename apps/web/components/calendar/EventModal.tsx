@@ -4,7 +4,8 @@ import React, { useCallback, useEffect, useMemo, useRef, useState } from "react"
 import { z } from "zod";
 import { Controller, useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
-import { Trash2Icon } from "lucide-react";
+import { CalendarClockIcon, Trash2Icon, VideoIcon } from "lucide-react";
+import { RsvpControl, type ResponseStatus } from "@web/components/calendar/rsvp-control";
 
 import {
   Dialog,
@@ -26,6 +27,7 @@ import {
   allDaySpanInDays,
   combineDateAndTime,
   formatDuration,
+  formatMeetingWindow,
   formatTimeOfDay,
   parseDurationInput,
   parseLocalDateKey,
@@ -46,7 +48,33 @@ interface EventModalProps {
     location?: string;
     attendees?: string[];
     allDay?: boolean;
+    /**
+     * Read-only. The conference belongs to Google, and this form has no way to
+     * create, move or remove one — `updateEvent` deliberately never sends
+     * conferenceDataVersion, which is what keeps an existing link alive across
+     * a reschedule. So it is shown, never edited, and never sent back.
+     */
+    meetLink?: string;
+    /** The organizer / Meet host. Singular — Calendar events have one owner. */
+    organizerEmail?: string;
+    /** This user's own RSVP, when they are a guest on it. */
+    myResponseStatus?: ResponseStatus;
   };
+  /**
+   * False when this user was invited rather than being the organizer.
+   *
+   * The server already refuses a guest's write (`requireOrganizer` in the
+   * calendar tRPC route), so this is not the security boundary — it is the
+   * honesty one. Offering a full edit form that can only ever end in
+   * "you're not the organiser" wastes the user's typing to tell them
+   * something the UI knew before they started.
+   */
+  canEdit?: boolean;
+  /**
+   * Guest-only escape hatch. Absent means the button is not rendered — a
+   * button that does nothing is worse than no button.
+   */
+  onProposeNewTime?: () => void;
   onSave: (data: {
     id?: string;
     title: string;
@@ -219,6 +247,130 @@ function hasContent(draft: Draft): boolean {
   );
 }
 
+// ── Guest view ───────────────────────────────────────────────────────
+
+/**
+ * What an invited guest sees instead of the edit form.
+ *
+ * A read view rather than a disabled form, for the same reason the thread
+ * card hides Reschedule from guests rather than greying it out: a disabled
+ * control implies the permission might arrive, and it never will. Only the
+ * organiser can move or cancel a meeting, so the guest's real options are to
+ * join it or to ask for a different time.
+ */
+function GuestEventView({
+  initialData,
+  onClose,
+  onProposeNewTime,
+}: {
+  initialData: EventModalProps["initialData"];
+  onClose: () => void;
+  onProposeNewTime?: () => void;
+}) {
+  const when = initialData?.start
+    ? formatMeetingWindow(initialData.start, initialData.end ?? initialData.start)
+    : null;
+
+  return (
+    <div className="flex flex-col gap-4">
+      <div className="grid gap-1">
+        <span className="text-xs text-muted-foreground">Title</span>
+        <p className="font-medium break-words">{initialData?.title || "(No title)"}</p>
+      </div>
+
+      {when && (
+        <div className="grid gap-1">
+          <span className="text-xs text-muted-foreground">When</span>
+          <p className="font-mono text-sm">{when}</p>
+        </div>
+      )}
+
+      {initialData?.organizerEmail && (
+        <div className="grid gap-1">
+          <span className="text-xs text-muted-foreground">Host</span>
+          <p className="font-mono text-sm break-all">{initialData.organizerEmail}</p>
+        </div>
+      )}
+
+      {!!initialData?.attendees?.length && (
+        <div className="grid gap-1">
+          <span className="text-xs text-muted-foreground">
+            Guests ({initialData.attendees.length})
+          </span>
+          <div className="flex flex-col gap-0.5">
+            {initialData.attendees.map((email) => (
+              <span key={email} className="font-mono text-sm break-all">
+                {email}
+              </span>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {initialData?.meetLink && (
+        <div className="grid gap-2">
+          <span className="text-xs text-muted-foreground">Google Meet</span>
+          <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-2.5">
+            <VideoIcon className="size-4 shrink-0 text-muted-foreground" />
+            <span className="min-w-0 flex-1 truncate font-mono text-xs">
+              {initialData.meetLink}
+            </span>
+            <Button type="button" size="sm" asChild className="shrink-0">
+              <a href={initialData.meetLink} target="_blank" rel="noopener noreferrer">
+                Join
+              </a>
+            </Button>
+          </div>
+        </div>
+      )}
+
+      {initialData?.location && (
+        <div className="grid gap-1">
+          <span className="text-xs text-muted-foreground">Location</span>
+          <p className="text-sm break-words">{initialData.location}</p>
+        </div>
+      )}
+
+      {initialData?.description && (
+        <div className="grid gap-1">
+          <span className="text-xs text-muted-foreground">Description</span>
+          <p className="text-sm whitespace-pre-wrap break-words">
+            {initialData.description}
+          </p>
+        </div>
+      )}
+
+      {/* Answering is the guest's real action here, so it sits with the
+          content rather than down in the footer beside Close. */}
+      {initialData?.id && (
+        <RsvpControl
+          eventId={initialData.id}
+          status={initialData.myResponseStatus}
+          className="rounded-lg border bg-muted/40 p-3"
+        />
+      )}
+
+      <p className="text-xs text-muted-foreground">
+        Only the organiser can change this meeting.
+      </p>
+
+      <DialogFooter className="sm:justify-between">
+        <div>
+          {onProposeNewTime && (
+            <Button type="button" variant="outline" onClick={onProposeNewTime}>
+              <CalendarClockIcon className="size-4" />
+              Propose a new time
+            </Button>
+          )}
+        </div>
+        <Button type="button" variant="outline" onClick={onClose}>
+          Close
+        </Button>
+      </DialogFooter>
+    </div>
+  );
+}
+
 // ── Component ────────────────────────────────────────────────────────
 
 const COMMIT = { shouldValidate: true, shouldDirty: true } as const;
@@ -227,6 +379,8 @@ export default function EventModal({
   isOpen,
   mode,
   initialData,
+  canEdit = true,
+  onProposeNewTime,
   onSave,
   onDelete,
   onClose,
@@ -259,6 +413,17 @@ export default function EventModal({
     "duration",
     "days",
   ]);
+
+  /**
+   * A Meet meeting has no separate "where", so the empty Location box is
+   * nothing but noise on it.
+   *
+   * The field is only hidden, never cleared — react-hook-form keeps the value
+   * of a field that stops rendering, so an event that somehow holds both a
+   * conference and a room does not silently lose the room on save. That case
+   * also keeps the field visible, so it can never be edited blind.
+   */
+  const hideLocation = !!initialData?.meetLink && !initialData?.location?.trim();
 
   // Write-through setters for the date/time controls. `shouldValidate` means an
   // error clears as soon as the user fixes the field.
@@ -426,12 +591,21 @@ export default function EventModal({
               </span>
             ) : mode === "create" ? (
               "Add an event to your calendar."
+            ) : !canEdit ? (
+              "You were invited to this meeting."
             ) : (
               "Update this event."
             )}
           </DialogDescription>
         </DialogHeader>
 
+        {!canEdit ? (
+          <GuestEventView
+            initialData={initialData}
+            onClose={onClose}
+            onProposeNewTime={onProposeNewTime}
+          />
+        ) : (
         <form onSubmit={handleSubmit(onSubmit)} className="flex flex-col gap-4">
           {/* Title */}
           <div className="grid gap-2">
@@ -487,15 +661,46 @@ export default function EventModal({
             />
           </div>
 
-          {/* Location */}
-          <div className="grid gap-2">
-            <Label htmlFor="event-location">Location</Label>
-            <Input
-              id="event-location"
-              placeholder="Meeting room or link"
-              {...register("location")}
-            />
-          </div>
+          {/* Google Meet — shown, never edited. Sits above Location because
+              for a Meet meeting this IS the "where", and because the whole
+              point of opening the event is usually to get the join link. */}
+          {initialData?.meetLink && (
+            <div className="grid gap-2">
+              <Label>Google Meet</Label>
+              <div className="flex items-center gap-2 rounded-lg border bg-muted/40 p-2.5">
+                <VideoIcon className="size-4 shrink-0 text-muted-foreground" />
+                <span className="min-w-0 flex-1 truncate font-mono text-xs">
+                  {initialData.meetLink}
+                </span>
+                <Button type="button" size="sm" asChild className="shrink-0">
+                  <a
+                    href={initialData.meetLink}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >
+                    Join
+                  </a>
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {/* Location — hidden once Meet is the "where".
+              Conditioned on there being no location too, not on the Meet link
+              alone: an event created directly in Google Calendar can legitimately
+              carry both a room and a conference, and hiding a real value would
+              leave the user unable to see or edit something that is genuinely
+              on their meeting. */}
+          {!hideLocation && (
+            <div className="grid gap-2">
+              <Label htmlFor="event-location">Location</Label>
+              <Input
+                id="event-location"
+                placeholder="Meeting room or link"
+                {...register("location")}
+              />
+            </div>
+          )}
 
           {/* Description */}
           <div className="grid gap-2">
@@ -535,6 +740,7 @@ export default function EventModal({
             </div>
           </DialogFooter>
         </form>
+        )}
       </DialogContent>
     </Dialog>
   );

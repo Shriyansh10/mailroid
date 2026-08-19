@@ -22,6 +22,26 @@ import type {
   GenerateExecutiveBriefOutput,
 } from "./tool-executor.ts";
 
+/**
+ * Whether to attach a Google Meet link, on the two tools that create meetings.
+ *
+ * Deliberately its own approval-visible decision rather than something the
+ * model settles quietly inside "schedule a meeting": the approval card renders
+ * it as an explicit line and lets the user flip it before approving. Creating
+ * a conference sends a join URL to every guest, and that is not a side effect
+ * to bury inside a different confirmation.
+ *
+ * Create-only. The reschedule and cancel tools have no equivalent — their
+ * update call never sends `conferenceDataVersion`, which is precisely what
+ * preserves an existing Meet link when a meeting moves.
+ */
+const ADD_MEET_SCHEMA = z
+  .boolean()
+  .optional()
+  .describe(
+    "Attach a Google Meet link to this meeting. Set true when the meeting has guests and no physical location was given; false when the user named a place to meet. Say which you chose — omitting this is not 'no', it falls back to true whenever the meeting has guests. The user sees and can change it on the approval card.",
+  );
+
 // ── Tool registry ────────────────────────────────────────────────────
 
 /**
@@ -182,6 +202,7 @@ export class ToolRegistry {
           .describe("Attendee handles from resolveRecipient — use this, not attendees"),
         description: z.string().optional(),
         organizer: z.string().email().optional(),
+        addMeet: ADD_MEET_SCHEMA,
       }),
       outputSchema: z.object({
         draft: z.boolean(),
@@ -213,7 +234,9 @@ export class ToolRegistry {
       description:
         "List the calendar meetings already scheduled from an email thread. " +
         "Call this before scheduling from a thread, so you move an existing " +
-        "meeting instead of creating a duplicate.",
+        "meeting instead of creating a duplicate. Meetings marked past:true " +
+        "have already ended — report them if asked, but never offer to move " +
+        "or cancel one; if the user wants to meet again, schedule a NEW meeting.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
@@ -234,6 +257,11 @@ export class ToolRegistry {
             start: z.string(),
             end: z.string(),
             attendees: z.array(z.string()),
+            // Listed but not actionable. A finished meeting is still part of
+            // the thread's history and the user may be asking about it; it
+            // simply cannot be rescheduled or cancelled, and passing its
+            // selectionId to either tool is refused.
+            past: z.boolean(),
           }),
         ),
       }),
@@ -270,6 +298,7 @@ export class ToolRegistry {
           .describe(
             "Set true ONLY after you have shown the user this thread's existing meetings and they chose to add another one alongside them. Never set it to get past a refusal — that overrides a decision the user has not made.",
           ),
+        addMeet: ADD_MEET_SCHEMA,
       }),
       outputSchema: z.object({
         draft: z.boolean(),
@@ -377,17 +406,26 @@ export class ToolRegistry {
     this.register({
       name: "resolveRecipient",
       description:
-        "Turn a person's NAME into an attendee handle you can schedule with. " +
-        "You never see real email addresses — they are masked for privacy — so " +
-        "this is the ONLY way to name an attendee. Pass the resulting handle as " +
-        "attendeeRefs to findMeetingSlots, scheduleThreadMeeting or createEvent. " +
+        "Turn a person's name — OR an email address the user typed — into an " +
+        "attendee handle you can schedule with. This is the ONLY way to name an " +
+        "attendee: addresses inside email content are masked for privacy, so any " +
+        "address you recall from a message or simply infer is invented. " +
+        "An address the USER typed in their own message to you is real; pass it " +
+        "here verbatim and this resolves it in one step with nothing to " +
+        "disambiguate. Pass the resulting handle as attendeeRefs to " +
+        "findMeetingSlots, scheduleThreadMeeting or createEvent. " +
         "If it returns ambiguous:true, ask the user which person they mean; if " +
         "notFound:true, tell them and ask for the address. Never invent one.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
       inputSchema: z.object({
-        name: z.string().min(1).describe("The person's name as the user said it"),
+        name: z
+          .string()
+          .min(1)
+          .describe(
+            "What the user called the person — their name, or the email address itself if the user typed one. Pass an address through exactly as written: it resolves directly and skips disambiguation entirely.",
+          ),
         threadId: z
           .string()
           .optional()

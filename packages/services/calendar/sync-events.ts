@@ -89,6 +89,16 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
         attendees: event.attendees ?? null,
         status: event.status ?? null,
         htmlLink: event.htmlLink ?? null,
+        // The video entry point is populated a beat before `hangoutLink` on a
+        // freshly created conference, so read both or a just-scheduled meeting
+        // syncs with no join link.
+        meetLink:
+          event.hangoutLink ??
+          event.conferenceData?.entryPoints?.find(
+            (entry: { entryPointType?: string; uri?: string }) =>
+              entry.entryPointType === "video" && !!entry.uri,
+          )?.uri ??
+          null,
         // Present on every attendee's copy, so a guest's own synced row carries
         // the organiser's thread marker — the warm path for the guest card.
         threadMessageId:
@@ -115,6 +125,7 @@ export async function syncCalendarEvents(tenantId: string): Promise<void> {
           attendees: sql`EXCLUDED.attendees`,
           status: sql`EXCLUDED.status`,
           htmlLink: sql`EXCLUDED.html_link`,
+          meetLink: sql`EXCLUDED.meet_link`,
           threadMessageId: sql`EXCLUDED.thread_message_id`,
           updatedAtGoogle: sql`EXCLUDED.updated_at_google`,
           updatedAt: new Date(),

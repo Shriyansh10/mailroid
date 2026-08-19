@@ -1,6 +1,6 @@
 "use client";
 
-import { AlertTriangleIcon, CalendarClockIcon, RotateCcwIcon } from "lucide-react";
+import { AlertTriangleIcon, CalendarClockIcon, RotateCcwIcon, VideoIcon } from "lucide-react";
 
 import { Switch } from "@web/components/ui/switch";
 import { Label } from "@web/components/ui/label";
@@ -33,6 +33,15 @@ export interface ThreadMeeting {
   end: string;
   attendees: string[];
   htmlLink?: string;
+  /** Google Meet join URL, when the meeting has a conference attached. */
+  meetLink?: string;
+  /** Where and what — shown in the thread card's details disclosure. */
+  location?: string;
+  description?: string;
+  /** The organizer / Meet host. Singular — Calendar events have one owner. */
+  organizerEmail?: string;
+  /** This user's own RSVP; undefined when they aren't a guest on it. */
+  myResponseStatus?: "needsAction" | "accepted" | "declined" | "tentative";
 }
 
 export interface ThreadMeetingRef {
@@ -54,6 +63,16 @@ export interface MeetingState {
   location: string;
   description: string;
   /**
+   * Attach a Google Meet link to the meeting being created.
+   *
+   * Only meaningful on `mode: "create"`. Adding a conference to an existing
+   * event would require `conferenceDataVersion` on the update call, which
+   * `updateEvent` deliberately never sends — that omission is what keeps an
+   * existing Meet link alive across a reschedule. So the toggle is hidden
+   * while moving rather than shown as a control that quietly does nothing.
+   */
+  addMeet: boolean;
+  /**
    * Whether sending moves the thread's existing meeting or creates another.
    * Defaults to "update" the moment a live meeting is found, so the common
    * case — "let's push it to 6" — costs zero clicks. The escape hatch is a
@@ -72,6 +91,7 @@ export interface MeetingEventInput {
   description?: string;
   location?: string;
   attendees?: string[];
+  addMeet?: boolean;
 }
 
 /**
@@ -104,6 +124,11 @@ export function emptyMeetingState(): MeetingState {
     duration: formatDuration(60),
     location: "",
     description: "",
+    // On by default. An invite attached to an email is overwhelmingly a
+    // remote meeting, and the switch sits directly under Location where the
+    // user can see and flip it — the alternative is a link most meetings want
+    // being a step most people forget.
+    addMeet: true,
     mode: "create",
   };
 }
@@ -149,6 +174,11 @@ export function meetingStateFromTemplate(t: {
       : base.duration,
     location: t.meetingLocation ?? "",
     description: t.meetingDescription ?? "",
+    // A template that names a place is describing a meeting that happens
+    // there. This is the one point where a location is actually known up
+    // front, so it is the one place the default can be inferred rather than
+    // guessed at from keystrokes.
+    addMeet: !t.meetingLocation?.trim(),
   };
 }
 
@@ -172,7 +202,15 @@ export function meetingTimesFor(
   return {
     start: start.toISOString(),
     end: end.toISOString(),
-    ...(state.location.trim() ? { location: state.location.trim() } : {}),
+    // Prose context for the AI draft, NOT the Calendar field — so here the
+    // conference is worth naming even though it is deliberately not sent as
+    // the event's location. A generated email that says "let's meet at" and
+    // then names nothing reads worse than one that says Google Meet.
+    ...(state.mode !== "update" && state.addMeet
+      ? { location: "Google Meet" }
+      : state.location.trim()
+        ? { location: state.location.trim() }
+        : {}),
   };
 }
 
@@ -218,16 +256,27 @@ export function buildEventInput(
 
   const description = state.description.trim() || opts?.descriptionFallback;
 
+  // Meet owns the "where", so no location is sent at all. Deliberately not the
+  // literal string "Google Meet": Google keeps conferencing separate from
+  // location and renders its own join block, and a hardcoded string would
+  // still be sitting there claiming a Meet link on the one occasion the
+  // conference request fails.
+  const meetOwnsLocation = state.mode !== "update" && state.addMeet;
+  const location = meetOwnsLocation ? "" : state.location.trim();
+
   const input: MeetingEventInput = {
     title: title.trim() || "Meeting",
     start: start.toISOString(),
     end: end.toISOString(),
     ...(description ? { description } : {}),
-    ...(state.location.trim() ? { location: state.location.trim() } : {}),
+    ...(location ? { location } : {}),
     ...(attendees && attendees.length > 0 ? { attendees } : {}),
   };
 
   if (state.mode === "update" && state.target) {
+    // Deliberately without `addMeet`. The update path never sends
+    // conferenceDataVersion, so the flag would be silently ignored — and that
+    // omission is exactly what preserves the meeting's existing Meet link.
     return {
       kind: "update",
       calendarId: state.target.calendarId,
@@ -235,7 +284,7 @@ export function buildEventInput(
       input,
     };
   }
-  return { kind: "create", input };
+  return { kind: "create", input: { ...input, addMeet: state.addMeet } };
 }
 
 
@@ -285,6 +334,8 @@ export function MeetingInviteFields({
   const classes = fieldClasses[density];
   const isMoving = value.mode === "update" && !!value.target;
   const enabled = showToggle ? value.enabled : true;
+  /** Meet is only offered on create, so it only owns the location there. */
+  const meetIsLocation = !isMoving && value.addMeet;
 
   // A vanished meeting is never silently recreated: with no update target, the
   // only safe default is to say so and let the user decide. Recreating on its
@@ -395,13 +446,45 @@ export function MeetingInviteFields({
             disabled={disabled}
             density={density}
           />
+          {/* With Meet on, the meeting's "where" IS the conference, so the
+              field says so and stops taking input. The typed value is kept in
+              state rather than cleared — toggling Meet back off has to give
+              the user their own text back, not silently eat it. */}
           <Input
-            value={value.location}
+            value={meetIsLocation ? "Google Meet" : value.location}
             onChange={(e) => set({ location: e.target.value })}
             placeholder="Location or link (optional)"
-            disabled={disabled}
+            disabled={disabled || meetIsLocation}
+            readOnly={meetIsLocation}
             className={classes.input}
           />
+          {/* Create only. On a move the conference already exists and is
+              preserved untouched, so a toggle here would be a control with
+              nothing to control. */}
+          {!isMoving ? (
+            <div className="flex items-center justify-between gap-3">
+              <Label
+                htmlFor="meeting-add-meet"
+                className={cn("flex items-center gap-2 font-normal", classes.label)}
+              >
+                <VideoIcon className={density === "compact" ? "size-3.5" : "size-4"} />
+                Add Google Meet
+              </Label>
+              <Switch
+                id="meeting-add-meet"
+                checked={value.addMeet}
+                onCheckedChange={(v) => set({ addMeet: v })}
+                disabled={disabled}
+              />
+            </div>
+          ) : (
+            existing?.meetLink && (
+              <p className={cn("flex items-center gap-1.5 text-muted-foreground", classes.note)}>
+                <VideoIcon className="size-3.5 shrink-0" />
+                The existing Google Meet link is kept.
+              </p>
+            )
+          )}
           <Textarea
             value={value.description}
             onChange={(e) => set({ description: e.target.value })}

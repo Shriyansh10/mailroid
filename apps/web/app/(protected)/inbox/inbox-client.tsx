@@ -2,7 +2,7 @@
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
-import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, SparklesIcon, InboxIcon, SendIcon, StarIcon, FileTextIcon, ShieldAlertIcon, Trash2Icon, ChevronDownIcon, LayoutTemplateIcon } from "lucide-react";
+import { LogOutIcon, PencilIcon, SearchIcon, XIcon, CalendarDaysIcon, BotIcon, SparklesIcon, InboxIcon, SendIcon, StarIcon, FileTextIcon, ShieldAlertIcon, Trash2Icon, ChevronDownIcon, LayoutTemplateIcon, PlugIcon } from "lucide-react";
 import Image from "next/image";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
@@ -431,6 +431,10 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/templates")}>
                 <LayoutTemplateIcon className="mr-2 h-4 w-4" />
                 <span>Email Templates</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/connections")}>
+                <PlugIcon className="mr-2 h-4 w-4" />
+                <span>Connected Services</span>
               </DropdownMenuItem>
               {session?.user?.isAdmin && (
                 <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/developer")}>

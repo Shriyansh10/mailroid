@@ -34,8 +34,17 @@ import { hashMessageIdForCalendar } from "../gmail/message-id.ts";
  * durable link — it is paid at most once per thread.
  */
 
-/** How long a "no meeting on this thread" answer suppresses a remote call. */
-const NEGATIVE_TTL_MS = 15 * 60 * 1000;
+/**
+ * How long an answer from Google suppresses the next remote call.
+ *
+ * Written after EVERY completed lookup, not only empty ones. It used to mark
+ * "there is nothing here", which was enough while a thread could show only one
+ * meeting: once one was found and linked, the join never ran again. A thread
+ * can hold several, and a second one scheduled later has to be findable — so
+ * the join now runs on every guest thread view and this is what keeps that
+ * affordable.
+ */
+const LOOKUP_TTL_MS = 15 * 60 * 1000;
 
 /**
  * Why a thread has no meeting to show. `meetings: []` alone cannot distinguish
@@ -79,8 +88,8 @@ async function threadMessageIds(userId: string, threadId: string): Promise<strin
   return rows.map((r) => r.rfc822MessageId!).filter(Boolean);
 }
 
-/** True when a recent lookup already established there is nothing to find. */
-async function hasFreshNegativeMarker(userId: string, threadId: string): Promise<boolean> {
+/** True when Google was asked about this thread recently enough to trust. */
+async function hasFreshLookup(userId: string, threadId: string): Promise<boolean> {
   const [row] = await db
     .select({ id: threadMeetingLookups.id })
     .from(threadMeetingLookups)
@@ -96,7 +105,7 @@ async function hasFreshNegativeMarker(userId: string, threadId: string): Promise
   return !!row;
 }
 
-async function writeNegativeMarker(userId: string, threadId: string): Promise<void> {
+async function writeLookupMarker(userId: string, threadId: string): Promise<void> {
   const now = new Date();
   await db
     .insert(threadMeetingLookups)
@@ -104,13 +113,13 @@ async function writeNegativeMarker(userId: string, threadId: string): Promise<vo
       userId,
       threadId,
       checkedAt: now,
-      expiresAt: new Date(now.getTime() + NEGATIVE_TTL_MS),
+      expiresAt: new Date(now.getTime() + LOOKUP_TTL_MS),
     })
     .onConflictDoUpdate({
       target: [threadMeetingLookups.userId, threadMeetingLookups.threadId],
       set: {
         checkedAt: now,
-        expiresAt: new Date(now.getTime() + NEGATIVE_TTL_MS),
+        expiresAt: new Date(now.getTime() + LOOKUP_TTL_MS),
       },
     });
 }
@@ -236,13 +245,18 @@ export async function findGuestThreadMeetings(
       ),
     );
 
-  if (cached.length > 0) {
-    return { eventIds: cached.map((r) => r.eventId), resolution: "guest-linked" };
-  }
+  const localIds = cached.map((r) => r.eventId);
 
-  // A recent remote lookup already came back empty; don't ask again.
-  if (await hasFreshNegativeMarker(userId, threadId)) {
-    return { eventIds: [], resolution: "none" };
+  // A local hit is deliberately NOT an early return. `calendar_events` is a
+  // −7d/+30d sync cache, so holding one of a thread's meetings is no evidence
+  // it holds them all — the second one may be outside the window, or simply
+  // not synced yet. Returning here is what made a guest see one card while the
+  // organiser saw two.
+  if (await hasFreshLookup(userId, threadId)) {
+    return {
+      eventIds: localIds,
+      resolution: localIds.length > 0 ? "guest-linked" : "none",
+    };
   }
 
   // ── Cold path: ask Google ───────────────────────────────────────────
@@ -250,26 +264,46 @@ export async function findGuestThreadMeetings(
   // with. A guest added midway through a thread may not hold the root at all,
   // which is a real limit of the mechanism rather than an error.
   const rootMessageId = messageIds[0];
-  if (!rootMessageId) return { eventIds: [], resolution: "unindexed" };
+  if (!rootMessageId) {
+    return {
+      eventIds: localIds,
+      resolution: localIds.length > 0 ? "guest-linked" : "unindexed",
+    };
+  }
 
   try {
-    const eventIds = await remoteLookup(userId, rootMessageId);
+    const remoteIds = await remoteLookup(userId, rootMessageId);
 
-    if (eventIds.length === 0) {
-      await writeNegativeMarker(userId, threadId);
-      return { eventIds: [], resolution: "none" };
-    }
+    // Marked on success as well as on empty. The marker now means "recently
+    // asked", not "recently found nothing" — see LOOKUP_TTL_MS.
+    await writeLookupMarker(userId, threadId);
 
-    return { eventIds, resolution: "guest-linked" };
+    // Union, not replace. Google is authoritative for what exists, but the
+    // remote filter matches only the thread ROOT stamp, while the warm path
+    // matches any of the thread's Message-IDs — so each can hold something the
+    // other misses, and dropping either would reintroduce a missing card.
+    const merged = [...new Set([...localIds, ...remoteIds])];
+
+    return {
+      eventIds: merged,
+      resolution: merged.length > 0 ? "guest-linked" : "none",
+    };
   } catch (error) {
-    // No negative marker on failure: caching "nothing" because the request
-    // broke would turn a transient outage into fifteen minutes of confidently
-    // telling the user there is no meeting.
+    // No marker on failure: caching "nothing" because the request broke would
+    // turn a transient outage into fifteen minutes of confidently telling the
+    // user there is no meeting.
     console.error("[guest-links] remote lookup failed", {
       userId,
       threadId,
       error: String(error),
     });
-    return { eventIds: [], resolution: "lookup-failed" };
+
+    // Whatever the cache holds still beats showing nothing. Known limit: this
+    // cannot say "and there may be more" — `GuestResolution` has no partial
+    // state, so a thread with two meetings and a broken lookup shows the one
+    // that happened to be cached.
+    return localIds.length > 0
+      ? { eventIds: localIds, resolution: "guest-linked" }
+      : { eventIds: [], resolution: "lookup-failed" };
   }
 }
