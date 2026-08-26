@@ -1,6 +1,6 @@
 import winston from "winston";
 import { env } from "./env.ts";
-import { resolveLogFile } from "./log-root.ts";
+import { isTestRun, resolveLogFile } from "./log-root.ts";
 import { createRollup, formatDuration } from "./rollup.ts";
 import type {
   Rollup,
@@ -87,8 +87,15 @@ const transports: winston.transport[] = [
  * alongside raising the production level to "info", which increases volume by
  * design, and the box has no swap: a full disk is a worse outage than the one
  * being debugged.
+ *
+ * NEVER UNDER THE TEST RUNNER, and not even when LOG_FILE is set explicitly.
+ * The file is evidence, and a test writing into it is indistinguishable from
+ * the application writing into it — see isTestRun. A test that genuinely needs
+ * to exercise the file transport should build one with an explicit path rather
+ * than inherit the ambient default; the console transport still prints either
+ * way, so nothing goes quiet.
  */
-const fileTarget = resolveLogFile(env.LOG_FILE, isDevelopment);
+const fileTarget = isTestRun() ? null : resolveLogFile(env.LOG_FILE, isDevelopment);
 
 if (fileTarget) {
   transports.push(

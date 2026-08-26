@@ -39,6 +39,32 @@ export function findLogRoot(startDir: string = process.cwd()): string {
 }
 
 /**
+ * Is this process a test file being run by `node --test`?
+ *
+ * THIS EXISTS TO KEEP TEST OUTPUT OUT OF THE OPERATIONAL LOG. The file
+ * transport defaults on in development, and the test runner runs in
+ * development, so `pnpm test` appended straight into `<root>/logs/app.log` —
+ * 28 lines from one `@repo/services` run, measured.
+ *
+ * That is not untidiness, it is contaminated evidence. The log then carried
+ * `trigger="some-new-thing"` and `trigger="Webhook"` — call-ledger fixtures —
+ * sitting alongside real deliveries, and the runbook's idle baseline is
+ * literally "leave the API alone for five minutes, then count GMAIL_LEDGER
+ * lines". A test run during that window inflates the count with invented
+ * triggers and there is nothing in the file to say which lines were real.
+ *
+ * `NODE_TEST_CONTEXT` is set by Node itself in every test child process
+ * (`"child-v8"` here); it is not something a developer has to remember to set,
+ * which is the only reason it can be trusted. NODE_ENV is checked too, for
+ * runners that set it instead — but note that the logger's own env schema does
+ * not accept "test" as a NODE_ENV, so that branch is belt-and-braces rather
+ * than a supported configuration.
+ */
+export function isTestRun(env: NodeJS.ProcessEnv = process.env): boolean {
+  return Boolean(env.NODE_TEST_CONTEXT) || env.NODE_ENV === "test";
+}
+
+/**
  * Absolute path of the file to log to, or null for "do not log to a file".
  *
  * `LOG_FILE` wins when set. An absolute value is taken as given; a relative one

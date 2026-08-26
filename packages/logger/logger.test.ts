@@ -18,7 +18,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import path from "node:path";
 
-import { findLogRoot, resolveLogFile } from "./log-root.ts";
+import { findLogRoot, isTestRun, resolveLogFile } from "./log-root.ts";
+import { logFilePath } from "./index.ts";
 import { errorFields } from "./error-fields.ts";
 import { inspect } from "./check-log-file.ts";
 import { createRollup, formatDuration } from "./rollup.ts";
@@ -592,5 +593,37 @@ test("a display name changing does not change the digest", () => {
   assert.equal(
     hashMailboxList("Ana <ana@x.com>", SECRET),
     hashMailboxList("Ana Smith <ana@x.com>", SECRET),
+  );
+});
+
+// ── the test runner must not write into the operational log ──────────
+//
+// Measured before this guard existed: one `pnpm --filter @repo/services test`
+// appended 28 lines to <root>/logs/app.log, including call-ledger fixtures
+// like trigger="some-new-thing" sitting beside real webhook deliveries. The
+// runbook's idle baseline counts GMAIL_LEDGER lines in that file, so this is
+// contaminated evidence, not untidiness.
+
+test("Node's own test-context variable is what marks a test run", () => {
+  assert.equal(isTestRun({ NODE_TEST_CONTEXT: "child-v8" }), true);
+  assert.equal(isTestRun({ NODE_TEST_CONTEXT: "child" }), true);
+  assert.equal(isTestRun({ NODE_ENV: "test" }), true);
+});
+
+test("an ordinary process is not a test run", () => {
+  assert.equal(isTestRun({}), false);
+  assert.equal(isTestRun({ NODE_ENV: "development" }), false);
+  assert.equal(isTestRun({ NODE_ENV: "production" }), false);
+});
+
+// The strongest form of this assertion available: THIS file is running under
+// the runner right now, so a regression here fails rather than quietly
+// resuming the appends.
+test("the live logger has no file transport while tests are running", () => {
+  assert.equal(isTestRun(), true, "these tests do run under node --test");
+  assert.equal(
+    logFilePath,
+    null,
+    "the test runner must never inherit the ambient development log file",
   );
 });
