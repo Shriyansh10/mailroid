@@ -295,6 +295,13 @@
       "when": 1787092976711,
       "tag": "0043_petite_arachne",
       "breakpoints": true
+    },
+    {
+      "idx": 44,
+      "version": "7",
+      "when": 1787715597520,
+      "tag": "0044_secret_moondragon",
+      "breakpoints": true
     }
   ]
 }

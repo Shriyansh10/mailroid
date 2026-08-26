@@ -7,6 +7,7 @@ import { corsairConnectionEmails } from "@repo/database/models/corsair-connectio
 import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
+import { gmailRequestWithAuthRecovery } from "../gmail/gmail-request.ts";
 
 export async function ensureTenant({userId}: EnsureTenantInputType) {
     const { userId: parseduserId } = await ensureTenantInput.parseAsync({ userId });
@@ -122,19 +123,14 @@ export async function getConnectedPlugins(userId: string): Promise<ConnectedPlug
 export async function storeGmailConnectedEmail(userId: string): Promise<string | null> {
   console.log("[storeGmailConnectedEmail] START userId:", userId);
   try {
-    const tenant = corsair.withTenant(userId);
-
-    const accessToken = await tenant.gmail.keys.get_access_token();
-    if (!accessToken) {
-      console.log("[storeGmailConnectedEmail] ❌ no access token");
-      return null;
-    }
-
-    const response = await fetch("https://gmail.googleapis.com/gmail/v1/users/me/profile", {
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-      },
-    });
+    // Fourth of the four sites that paired keys.get_access_token() with a raw
+    // fetch. That pairing never refreshes, so it 401s on any stored token older
+    // than an hour — see gmail-request.ts for the incident this caused.
+    const response = await gmailRequestWithAuthRecovery(
+      userId,
+      "https://gmail.googleapis.com/gmail/v1/users/me/profile",
+      { ctx: { trigger: "oauth-callback", operation: "users.getProfile", targetId: userId } },
+    );
 
     if (!response.ok) {
       throw new Error(`Failed to fetch Gmail profile: ${response.statusText}`);

@@ -1,8 +1,8 @@
-import { corsair } from "@repo/corsair";
 import { db, eq, isNull, lt, or } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { logger } from "@repo/logger";
 
+import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 import { getPause, getPausedTenantIds, isTenantPaused } from "./pause.ts";
 
 const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC;
@@ -27,31 +27,23 @@ export async function startGmailWatch(
     return;
   }
 
-  const tenant = corsair.withTenant(tenantId);
-
-  // Trigger a lightweight API call to force Corsair to refresh the OAuth token if expired
-  try {
-    console.log('[gmail-watch] Triggering token refresh call via labels.list...');
-    await tenant.gmail.api.labels.list();
-  } catch (error) {
-    console.error(`[gmail-watch] Failed to trigger token refresh for tenant ${tenantId}:`, error);
-  }
-
-  const accessToken =
-    await tenant.gmail.keys.get_access_token();
-
-  const response = await fetch(
+  // This used to hand-roll its own token refresh: a throwaway labels.list()
+  // to make corsair's keyBuilder run, then keys.get_access_token(). That was
+  // the right instinct and the wrong place — three other call sites needed the
+  // same trick and did not have it, which is how the 2026-08-25 deadlock
+  // happened. The logic now lives once, in gmail-request.ts, and is triggered
+  // by an actual 401 rather than spent unconditionally on every renewal.
+  const response = await gmailRequestWithAuthRecovery(
+    tenantId,
     "https://gmail.googleapis.com/gmail/v1/users/me/watch",
     {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${accessToken}`,
-        "Content-Type": "application/json",
-      },
+      headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         topicName: TOPIC_NAME,
         labelIds: ["INBOX"],
       }),
+      ctx: { trigger: "watch-cron", operation: "users.watch", targetId: tenantId },
     },
   );
 

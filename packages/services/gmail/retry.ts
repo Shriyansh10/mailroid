@@ -2,10 +2,10 @@ import { logger } from "@repo/logger";
 
 import {
   assertSyncAllowed,
-  isQuotaError,
+  handleGmailFailure,
   markGmailHealthy,
-  recordQuotaError,
 } from "./quota-cooldown.ts";
+import { classifyGmailFailure } from "./gmail-errors.ts";
 
 /**
  * Retries a Gmail API call on transient failures with exponential backoff.
@@ -62,13 +62,13 @@ export async function withGmailRetry<T>(
     /** Test seam: lets a future retry.test.ts run without a database. */
     hooks?: {
       assertSyncAllowed?: typeof assertSyncAllowed;
-      recordQuotaError?: typeof recordQuotaError;
+      handleGmailFailure?: typeof handleGmailFailure;
       markGmailHealthy?: typeof markGmailHealthy;
     };
   } = {},
 ): Promise<T> {
   const assertFn = hooks?.assertSyncAllowed ?? assertSyncAllowed;
-  const recordFn = hooks?.recordQuotaError ?? recordQuotaError;
+  const failureFn = hooks?.handleGmailFailure ?? handleGmailFailure;
   const healthyFn = hooks?.markGmailHealthy ?? markGmailHealthy;
   const { operation, targetId } = parseLabel(label);
   const ctx = { trigger, operation, targetId };
@@ -99,13 +99,20 @@ export async function withGmailRetry<T>(
     } catch (err) {
       lastErr = err;
 
-      if (isQuotaError(err)) {
-        if (tenantId) await recordFn(tenantId, err, ctx).catch(() => {});
-        logger.warn("[GMAIL] rate limited — not retrying, cooling down instead", {
-          label,
-          tenantId,
-          attempt: attempt + 1,
-        });
+      // Quota and auth both stop the retry loop, for different reasons:
+      // retrying a 429 pushes Google's window further out (see above), and
+      // retrying a 401 just fails four more times against dead credentials.
+      // Neither is transient. handleGmailFailure decides which state to write
+      // — this code no longer classifies, so it cannot classify wrongly.
+      const kind = classifyGmailFailure(err);
+      if (kind !== "other") {
+        if (tenantId) await failureFn(tenantId, err, ctx).catch(() => {});
+        logger.warn(
+          kind === "quota"
+            ? "[GMAIL] rate limited — not retrying, cooling down instead"
+            : "[GMAIL] authentication failed — not retrying",
+          { label, tenantId, attempt: attempt + 1 },
+        );
         break;
       }
 

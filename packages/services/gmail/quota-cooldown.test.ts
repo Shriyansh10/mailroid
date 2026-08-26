@@ -17,12 +17,18 @@ import test from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  isQuotaError,
-  isGmailUnavailable,
-  extractRetryAfter,
   defaultCooldownUntil,
   escalatedCooldownUntil,
 } from "./quota-cooldown.ts";
+// Imported from the gate-free module directly: these are pure, and reaching
+// them through quota-cooldown.ts would drag in the database client for no
+// reason. quota-cooldown.ts re-exports them for production callers.
+import {
+  classifyGmailFailure,
+  extractRetryAfter,
+  isGmailUnavailable,
+  isQuotaError,
+} from "./gmail-errors.ts";
 
 /** The real corsair ApiError shape, copied from production logs. */
 function apiError(retryAfterIso?: string) {
@@ -202,4 +208,102 @@ test("a Google instant longer than the escalated floor still wins — never acci
 test("a Google instant in the past yields a zero-length base window rather than throwing", () => {
   const pastInstant = new Date(NOW.getTime() - 60_000);
   assert.equal(escalatedCooldownUntil(pastInstant, 0, NOW).toISOString(), NOW.toISOString());
+});
+
+// ----------------------------------------------------------- classification
+//
+// The 2026-08-25 incident in one sentence: a 401 was handed to the quota
+// ladder, producing a cooldown that blocked the token refresh which would have
+// cleared the 401. These tests pin the boundary that makes that impossible.
+
+/** The exact 401 body Google returned during the incident. */
+const AUTH_401 = {
+  status: 401,
+  body: {
+    error: {
+      code: 401,
+      message:
+        "Request had invalid authentication credentials. Expected OAuth 2 access token, login cookie or other valid authentication credential.",
+      status: "UNAUTHENTICATED",
+    },
+  },
+};
+
+test("a 429 is quota, not auth", () => {
+  assert.equal(classifyGmailFailure(apiError()), "quota");
+  assert.equal(classifyGmailFailure(apiError("2026-08-26T02:16:00.539Z")), "quota");
+});
+
+test("the production 401 is auth, never quota", () => {
+  // If this ever returns "quota" the deadlock is back.
+  assert.equal(classifyGmailFailure(AUTH_401), "auth");
+});
+
+test("a BARE 403 is other, not auth", () => {
+  // Google returns 403 for insufficient scopes, a disabled API and project
+  // policy. None are fixed by refreshing a token, and marking the mailbox
+  // auth-dead would take it offline for the wrong reason and hide the real
+  // misconfiguration.
+  assert.equal(classifyGmailFailure({ status: 403, message: "Forbidden" }), "other");
+  assert.equal(
+    classifyGmailFailure({
+      status: 403,
+      body: { error: { code: 403, message: "Gmail API has not been used in project 123" } },
+    }),
+    "other",
+  );
+});
+
+test("a 403 carrying an OAuth invalidity marker is auth", () => {
+  assert.equal(
+    classifyGmailFailure({
+      status: 403,
+      body: { error: { code: 403, message: "invalid_grant: Token has been expired or revoked." } },
+    }),
+    "auth",
+  );
+});
+
+test("corsair's own auth failures are auth despite carrying no 401 status", () => {
+  // A genuinely revoked refresh token never reaches us as an HTTP status: the
+  // Gmail keyBuilder throws before any request is issued. Classifying on
+  // status alone would drop the single case the auth-failed state exists for
+  // into "other", and the mailbox would go quiet with nothing recorded.
+  assert.equal(
+    classifyGmailFailure(
+      new Error(
+        "[corsair:gmail] Failed to obtain valid access token: Failed to refresh access token: invalid_grant",
+      ),
+    ),
+    "auth",
+  );
+  assert.equal(
+    classifyGmailFailure(
+      new Error("[auth-missing:gmail:client_credentials]: Gmail client credentials are missing"),
+    ),
+    "auth",
+  );
+  assert.equal(
+    classifyGmailFailure(Object.assign(new Error("gmail oauth_2"), { name: "AuthMissingError" })),
+    "auth",
+  );
+});
+
+test("ordinary failures are other, so nothing is written for them", () => {
+  assert.equal(classifyGmailFailure({ status: 500 }), "other");
+  assert.equal(classifyGmailFailure({ status: 404 }), "other");
+  assert.equal(classifyGmailFailure(new Error("socket hang up")), "other");
+  assert.equal(classifyGmailFailure(null), "other");
+});
+
+test("a 429 that also mentions credentials still classifies as quota", () => {
+  // Quota is checked first on purpose: a mailbox Google is refusing must back
+  // off, and marking it auth-dead instead would stop the backoff entirely.
+  assert.equal(
+    classifyGmailFailure({
+      status: 429,
+      body: { error: { code: 429, message: "User-rate limit exceeded. invalid credentials" } },
+    }),
+    "quota",
+  );
 });

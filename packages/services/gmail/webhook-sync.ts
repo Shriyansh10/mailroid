@@ -1,4 +1,3 @@
-import { corsair } from "@repo/corsair";
 import { db, eq, and, inArray } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { messageMetadata } from "@repo/database/models/message-metadata";
@@ -6,7 +5,8 @@ import { logger } from "@repo/logger";
 
 import { generateMissingEmbeddings, ingestMessage } from "./index.ts";
 import { triggerGmailSync } from "./sync-metadata.ts";
-import { assertSyncAllowed, isQuotaError, markGmailHealthy, recordQuotaError } from "./quota-cooldown.ts";
+import { assertSyncAllowed, handleGmailFailure, markGmailHealthy } from "./quota-cooldown.ts";
+import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 
 /**
  * Gmail historyIds are monotonically increasing uint64 values delivered as
@@ -143,7 +143,10 @@ export type SyncHistoryOutcome =
   | "no-mapping"
   | "bootstrapped"
   | "stale-skipped"
-  | "no-token"
+  // "no-token" was returned when keys.get_access_token() came back empty. That
+  // check now lives in gmail-request.ts, which throws GmailAuthError instead —
+  // a missing token is an auth failure worth recording, not a quiet outcome
+  // code that reads like a successful no-op.
   | "needs-resync"
   | "synced";
 
@@ -217,18 +220,11 @@ export async function syncHistoryForTenant(
     }
   }
 
-  const tenantClient = corsair.withTenant(tenantId);
-
-  // keys.get_access_token() decrypts the stored token with CORSAIR_KEK — it
-  // does NOT refresh (refresh only happens via the plugin's keyBuilder on an
-  // SDK api.* call), so a throw here is a decryption problem, not a network
-  // one. Left to propagate so Inngest retries and the distinction is visible
-  // in its error, rather than being swallowed into a generic "sync failed".
-  const accessToken = await tenantClient.gmail.keys.get_access_token();
-  if (!accessToken) {
-    logger.error("[WEBHOOK_SYNC] failed to get access token", { tenantId });
-    return { outcome: "no-token" };
-  }
+  const historyCtx = {
+    trigger: "webhook",
+    operation: "syncHistoryForTenant",
+    targetId: incomingHistoryId,
+  };
 
   // Split by *why* the message appeared in the diff. Both groups get stored,
   // but only genuinely-new mail is worth classifying: Gmail emits a history
@@ -248,7 +244,13 @@ export async function syncHistoryForTenant(
     let url = `https://gmail.googleapis.com/gmail/v1/users/me/history?startHistoryId=${lastHistoryId}`;
     if (nextPageToken) url += `&pageToken=${nextPageToken}`;
 
-    const response = await fetch(url, { headers: { Authorization: `Bearer ${accessToken}` } });
+    // gmailRequestWithAuthRecovery, NOT keys.get_access_token() + fetch().
+    // That pairing decrypts the stored token but never refreshes it, so this
+    // loop 401'd on any mailbox that had been quiet for an hour — the same
+    // latent fault that deadlocked the resume cron. See gmail-request.ts.
+    const response = await gmailRequestWithAuthRecovery(tenantId, url, {
+      ctx: historyCtx,
+    });
 
     if (response.status === 404) {
       // Gmail's history retention window has passed startHistoryId — the
@@ -286,14 +288,9 @@ export async function syncHistoryForTenant(
 
       // Record before throwing: the throw unwinds into a fire-and-forget
       // .catch() on the legacy path, so this is the last place that knows both
-      // the tenant and the window.
-      if (isQuotaError(err)) {
-        await recordQuotaError(tenantId, err, {
-          trigger: "webhook",
-          operation: "syncHistoryForTenant",
-          targetId: incomingHistoryId,
-        });
-      }
+      // the tenant and the window. handleGmailFailure classifies first — a 429
+      // cools down, a 401 records auth failure, anything else only logs.
+      await handleGmailFailure(tenantId, err, historyCtx);
       throw err;
     }
 

@@ -233,7 +233,11 @@ app.get("/api/_debug/watch-health", async (req, res) => {
       report.gmail.expired > 0 ||
       report.gmail.missing > 0 ||
       report.calendar.expired > 0 ||
-      report.calendar.missing > 0;
+      report.calendar.missing > 0 ||
+      // A mailbox whose credentials are dead is making zero Gmail calls and
+      // will not recover on its own — unlike a quota cooldown, which lapses.
+      // It has to raise the alarm, not merely appear in the report body.
+      report.gmailCooldowns.some((c) => c.gmailAuthFailedAt !== null);
     return res.status(degraded ? 503 : 200).json({ degraded, report });
   } catch (err) {
     return res.status(500).json({ error: "watch-health failed", detail: describeError(err) });
