@@ -70,6 +70,20 @@ export interface Report {
   levels: Record<string, number>;
   suspectedSplatLoss: number;
   mailboxAddresses: number;
+  /**
+   * Lines per `run` id, newest run last, and the reason this exists.
+   *
+   * The file outlives the process, so one file holds many runs and `tsx watch`
+   * mints a new one on every save. Without this, a five-minute idle baseline
+   * taken under `pnpm dev` silently mixes N restarts together — and each
+   * restart re-runs the watch bootstrap, which is itself Gmail traffic.
+   *
+   * Many runs is not an error; it is the H-B measurement. It only invalidates a
+   * baseline that assumed one.
+   */
+  runs: Array<{ run: string; lines: number; first?: string; last?: string }>;
+  /** Lines written before run ids existed, or by a process without the field. */
+  linesWithoutRun: number;
 }
 
 export function inspect(contents: string): Report {
@@ -84,7 +98,13 @@ export function inspect(contents: string): Report {
     levels: {},
     suspectedSplatLoss: 0,
     mailboxAddresses: 0,
+    runs: [],
+    linesWithoutRun: 0,
   };
+
+  // Insertion-ordered, so runs come out in the order they first appear in the
+  // file — which is chronological, because the transport only appends.
+  const runs = new Map<string, { run: string; lines: number; first?: string; last?: string }>();
 
   for (const line of lines) {
     if (ANSI_RAW.test(line)) report.ansiRawLines++;
@@ -116,7 +136,22 @@ export function inspect(contents: string): Report {
     if (typeof record.message === "string" && BARE_TAG.test(record.message)) {
       report.suspectedSplatLoss++;
     }
+
+    if (typeof record.run === "string") {
+      const entry = runs.get(record.run) ?? { run: record.run, lines: 0 };
+      entry.lines++;
+      const ts = typeof record.timestamp === "string" ? record.timestamp : undefined;
+      if (ts) {
+        entry.first ??= ts;
+        entry.last = ts;
+      }
+      runs.set(record.run, entry);
+    } else {
+      report.linesWithoutRun++;
+    }
   }
+
+  report.runs = [...runs.values()];
 
   return report;
 }
@@ -150,6 +185,23 @@ function main(): void {
 
   console.log("\n(the address check is a sanity check only — also read a sample by hand)");
   console.log(`\nlevels: ${JSON.stringify(r.levels)}`);
+
+  // Runs are reported, never graded. A file with 12 runs is not a broken file —
+  // it is a file that saw 12 restarts, which is a finding in its own right and
+  // the thing that makes a "5 minutes idle" claim checkable.
+  console.log(`\nruns:   ${r.runs.length}${r.linesWithoutRun ? `  (+${r.linesWithoutRun} lines with no run id)` : ""}`);
+  for (const run of r.runs.slice(-8)) {
+    const window = run.first && run.last ? `${run.first} → ${run.last}` : "";
+    console.log(`  ${run.run}  ${String(run.lines).padStart(5)} lines  ${window}`);
+  }
+  if (r.runs.length > 8) console.log(`  … ${r.runs.length - 8} earlier runs not shown`);
+  if (r.runs.length > 1) {
+    const last = r.runs[r.runs.length - 1]!;
+    console.log(
+      `\nA measurement must cover ONE run. To scope to the newest:\n` +
+        `  grep '"run":"${last.run}"' <file>`,
+    );
+  }
 
   const failed =
     r.ansiInLevel > 0 ||

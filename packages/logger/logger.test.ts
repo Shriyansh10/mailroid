@@ -19,7 +19,7 @@ import assert from "node:assert/strict";
 import path from "node:path";
 
 import { findLogRoot, isTestRun, resolveLogFile } from "./log-root.ts";
-import { logFilePath } from "./index.ts";
+import { logFilePath, runId } from "./index.ts";
 import { errorFields } from "./error-fields.ts";
 import { inspect } from "./check-log-file.ts";
 import { createRollup, formatDuration } from "./rollup.ts";
@@ -626,4 +626,59 @@ test("the live logger has no file transport while tests are running", () => {
     null,
     "the test runner must never inherit the ambient development log file",
   );
+});
+
+// ── run ids ──────────────────────────────────────────────────────────
+//
+// The file outlives the process, so one file holds many runs. Without a run id
+// a "5 minutes idle" baseline taken under `pnpm dev` silently mixes in every
+// tsx-watch restart, and each restart re-runs the watch bootstrap — which is
+// Gmail traffic. The id turns that from a rule you must remember into a filter.
+
+test("a run id is stamped on every line, and is per-process", () => {
+  assert.match(runId, /^[0-9a-f]{12}$/);
+});
+
+test("runs are counted separately and reported in file order", () => {
+  const r = inspect(
+    [
+      '{"level":"info","message":"a","run":"aaa","timestamp":"2026-08-26 10:00:00"}',
+      '{"level":"info","message":"b","run":"aaa","timestamp":"2026-08-26 10:00:05"}',
+      '{"level":"info","message":"c","run":"bbb","timestamp":"2026-08-26 10:01:00"}',
+    ].join("\n"),
+  );
+
+  assert.equal(r.runs.length, 2);
+  assert.deepEqual(
+    r.runs.map((x) => [x.run, x.lines]),
+    [["aaa", 2], ["bbb", 1]],
+    "file order is chronological, because the transport only appends",
+  );
+  assert.equal(r.runs[0]!.first, "2026-08-26 10:00:00");
+  assert.equal(r.runs[0]!.last, "2026-08-26 10:00:05");
+});
+
+test("lines predating run ids are counted, not silently dropped", () => {
+  const r = inspect(
+    [
+      '{"level":"info","message":"old"}',
+      '{"level":"info","message":"new","run":"aaa"}',
+    ].join("\n"),
+  );
+
+  assert.equal(r.linesWithoutRun, 1);
+  assert.equal(r.runs.length, 1);
+  assert.equal(r.lines, 2, "both still count as lines");
+});
+
+test("many runs is a finding, never a failure", () => {
+  const many = Array.from({ length: 12 }, (_, i) =>
+    `{"level":"info","message":"boot","run":"r${i}"}`,
+  ).join("\n");
+  const r = inspect(many);
+
+  assert.equal(r.runs.length, 12);
+  assert.equal(r.unparseableLines, 0);
+  assert.equal(r.missingLevel, 0);
+  assert.equal(r.ansiInLevel, 0, "restart count must not affect the pass/fail checks");
 });

@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import winston from "winston";
 import { env } from "./env.ts";
 import { isTestRun, resolveLogFile } from "./log-root.ts";
@@ -112,14 +113,48 @@ if (fileTarget) {
   );
 }
 
+/**
+ * A short id for THIS process, stamped onto every line.
+ *
+ * THE POINT IS TO MAKE `pnpm dev` MEASURABLE. The file survives restarts, which
+ * is the whole reason it exists — but that means one file holds many runs, and
+ * `tsx watch` restarts on every save. The runbook's answer was "take
+ * measurements only under a bare `node` command with no watcher", which is a
+ * rule that gets forgotten exactly once and silently voids the result.
+ *
+ * With a run id the file answers the question itself: every line says which
+ * process wrote it, so a five-minute idle baseline is a filter rather than a
+ * special way of starting the app. It also makes restart amplification legible
+ * — counting distinct run ids in a window IS the H-B measurement, rather than
+ * something inferred from repeated "http server is running" lines.
+ *
+ * Random per process, not a counter: two containers, or an api and a web
+ * process sharing a file, must never mint the same id. Six bytes is 2^48, and
+ * collisions only matter within one file.
+ */
+export const runId = randomBytes(6).toString("hex");
+
 export const logger = winston.createLogger({
   level,
   format: baseFormat,
+  // Stamped here rather than at 242 call sites, for the same reason the
+  // transports are: a field every line needs is the logger's business.
+  defaultMeta: { run: runId },
   transports,
 });
 
 /** Where the file transport is writing, or null. Diagnostics and tests. */
 export const logFilePath = fileTarget;
+
+// The first line of every run, so a run id can be tied to a wall-clock start
+// and a pid without correlating against anything else. Deliberately at import
+// time: a process that crashes during boot has still said it existed.
+logger.info("[LOGGER] run started", {
+  pid: process.pid,
+  level,
+  file: fileTarget ?? "(none)",
+  hashSecret: process.env.LOG_HASH_SECRET ? "set" : "MISSING — mailbox digests disabled",
+});
 
 export { errorFields } from "./error-fields.ts";
 export { hashMailbox, hashMailboxList, preview } from "./pii.ts";
