@@ -79,7 +79,10 @@ async function refreshTenantToken(
   });
 
   try {
-    await corsair.withTenant(tenantId).gmail.api.labels.list();
+    // `{}` is required, not decorative: labelsList's input schema is
+    // z.ZodObject<{ userId?: string }> — every field is optional but the
+    // argument itself is not, so `list()` is a type error.
+    await corsair.withTenant(tenantId).gmail.api.labels.list({});
   } catch (err) {
     // DO NOT SWALLOW INDISCRIMINATELY. Because the keyBuilder runs before the
     // HTTP request, the two cases are cleanly separable by *when* they can
