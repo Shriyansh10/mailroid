@@ -335,23 +335,36 @@ export function recordGmailCall(record: GmailCallRecord): void {
       waitedMs: record.waitedMs,
     });
 
+    // `quotaUnits` stays possibly-undefined ON PURPOSE, even though the limiter
+    // priced this call at the 50-unit fallback. Passing the fallback would
+    // increment `quotaUnits` and leave `quotaUnknown` at zero, which is the
+    // rollup's existing detector for unpriced operations — and the whole point
+    // is that an invented price stays visible.
+    const sample = {
+      attempts,
+      quotaUnits,
+      durationMs: record.durationMs,
+      waitedMs: record.waitedMs,
+    };
+
     if (record.ok) {
-      // `quotaUnits` stays possibly-undefined here ON PURPOSE, even though the
-      // limiter priced this call at the 50-unit fallback. Passing the fallback
-      // would increment `quotaUnits` and leave `quotaUnknown` at zero, which is
-      // the rollup's existing detector for unpriced operations — and the whole
-      // point is that an invented price stays visible.
-      rollup.success(key, {
-        attempts,
-        quotaUnits,
-        durationMs: record.durationMs,
-        waitedMs: record.waitedMs,
-      });
+      rollup.success(key, sample);
     } else {
-      // The complete error line belongs to the call site, which has the status,
-      // the retry instant and the attempt number. This only resets the rollup's
-      // escalation ladder and arms the "recovered" transition.
-      rollup.failure(key);
+      // THE SAME SAMPLE, NOT A BARE KEY. A failed call is still a call the
+      // caller made and still bytes that went to Google; passing only the key
+      // sent it to `errors` while leaving `calls` and `attempts` at zero, so a
+      // window of pure failure read `calls: 0 attempts: 0 errors: 1` — "no
+      // traffic", for a request that really was sent and really was refused.
+      //
+      // `attempts` vs `calls` is how the runbook proves or falsifies H-C, whose
+      // signature is many failing attempts per logical call. Dropping the
+      // sample here blinded that measurement in exactly the conditions it was
+      // built for, since a quota incident is mostly failures by definition.
+      //
+      // The complete error line still belongs to the call site, which has the
+      // status, the retry instant and the attempt number. This only adds the
+      // counts, resets the escalation ladder and arms "recovered".
+      rollup.failure(key, sample);
     }
   } catch {
     // A ledger that can fail a Gmail call has inverted its own purpose.

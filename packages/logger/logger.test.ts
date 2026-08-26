@@ -682,3 +682,108 @@ test("many runs is a finding, never a failure", () => {
   assert.equal(r.missingLevel, 0);
   assert.equal(r.ansiInLevel, 0, "restart count must not affect the pass/fail checks");
 });
+
+// ── a failing window must not call itself "ok" ───────────────────────
+//
+// Both defects below were found by reading a real line off a live incident:
+//
+//   [GMAIL_LEDGER] ok 0s  { errors: 1, calls: 0, attempts: 0,
+//                           trigger: "oauth-callback", operation: "getProfile" }
+//
+// A genuine 429 on an OAuth callback, reported as "ok" with no calls and no
+// attempts against it.
+
+test("a window holding a failure is labelled degraded, never ok", () => {
+  const h = harness();
+  h.rollup.failure(KEY);
+  h.advance(60_000);
+  h.rollup.tick();
+
+  assert.equal(h.emitted.length, 1);
+  const line = h.emitted[0]!;
+
+  assert.ok(!/\bok\b/.test(line.message), `"ok" must not appear: ${line.message}`);
+  assert.match(line.message, /degraded/);
+  assert.match(line.message, /1 error\b/, "singular, and countable from the message");
+  assert.equal(line.meta.errors, 1);
+  assert.equal(line.meta.healthyForMs, 0);
+  assert.equal(line.meta.degradedForMs, 60_000);
+});
+
+test("errors are pluralised, so the message reads as prose", () => {
+  const h = harness();
+  h.rollup.failure(KEY);
+  h.rollup.failure(KEY);
+  h.advance(60_000);
+  h.rollup.tick();
+
+  assert.match(h.emitted[0]!.message, /2 errors\b/);
+});
+
+test("a healthy window keeps saying ok, and omits degradedForMs", () => {
+  const h = harness();
+  h.rollup.success(KEY);
+  h.advance(60_000);
+  h.rollup.tick();
+
+  assert.match(h.emitted[0]!.message, /\bok\b/);
+  assert.equal(h.emitted[0]!.meta.degradedForMs, undefined);
+});
+
+// ── a failed call is still a call ────────────────────────────────────
+//
+// `attempts` vs `calls` is what proves or falsifies H-C, whose signature is
+// many failing attempts per logical call. The failure path used to drop the
+// sample, so that measurement was blind during exactly the failures it exists
+// to explain.
+
+test("a failed call counts toward calls and attempts, not only errors", () => {
+  const h = harness();
+  h.rollup.failure(KEY, { attempts: 1, quotaUnits: 2 });
+  h.advance(60_000);
+  h.rollup.tick();
+
+  const meta = h.emitted[0]!.meta;
+  assert.equal(meta.calls, 1, "a request really did go to Google");
+  assert.equal(meta.attempts, 1);
+  assert.equal(meta.errors, 1);
+  assert.equal(meta.quotaUnits, 2, "a refused call still spent its budget");
+});
+
+test("retry amplification on a failing call is visible — the H-C signature", () => {
+  const h = harness();
+  // One logical call that took five network attempts and still failed.
+  h.rollup.failure(KEY, { attempts: 5, quotaUnits: 10 });
+  h.advance(60_000);
+  h.rollup.tick();
+
+  const meta = h.emitted[0]!.meta;
+  assert.equal(meta.calls, 1);
+  assert.equal(meta.attempts, 5);
+  assert.equal(meta.retries, 4, "this is the number H-C is argued from");
+});
+
+test("an unpriced failing call reports quotaUnknown, never a guessed cost", () => {
+  const h = harness();
+  h.rollup.failure(KEY);
+  h.advance(60_000);
+  h.rollup.tick();
+
+  assert.equal(h.emitted[0]!.meta.quotaUnknown, 1);
+  assert.equal(h.emitted[0]!.meta.quotaUnits, 0);
+});
+
+test("failures and successes accumulate into one window consistently", () => {
+  const h = harness();
+  h.rollup.success(KEY, { attempts: 1, quotaUnits: 2 });
+  h.rollup.failure(KEY, { attempts: 3, quotaUnits: 6 });
+  h.advance(60_000);
+  h.rollup.tick();
+
+  const meta = h.emitted[0]!.meta;
+  assert.equal(meta.calls, 2);
+  assert.equal(meta.attempts, 4);
+  assert.equal(meta.errors, 1);
+  assert.equal(meta.quotaUnits, 8);
+  assert.match(h.emitted[0]!.message, /degraded/, "any error degrades the window");
+});
