@@ -2,6 +2,7 @@ import { db, and, eq, asc, isNotNull, ne } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { corsair } from "@repo/corsair";
 import { normalizeMessageId, hashMessageIdForCalendar } from "./message-id.ts";
+import { withGmailRetry } from "./retry.ts";
 
 // Deliberately NOT imported from ./index.ts: that file imports
 // clearThreadMeetingLookups from ../calendar/guest-links.ts, which imports
@@ -51,10 +52,11 @@ async function fetchThreadRootMessageIdLive(
 ): Promise<string | null> {
   try {
     const tenant = corsair.withTenant(userId);
-    const thread = (await tenant.gmail.api.threads.get({
-      id: threadId,
-      format: "metadata",
-    })) as unknown as {
+    const thread = (await withGmailRetry(
+      `threads.get ${threadId}`,
+      () => tenant.gmail.api.threads.get({ id: threadId, format: "metadata" }),
+      { tenantId: userId, trigger: "calendar" },
+    )) as unknown as {
       messages?: Array<{ payload?: { headers?: Array<{ name?: string; value?: string }> } }>;
     };
 

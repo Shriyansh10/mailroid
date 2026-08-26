@@ -203,7 +203,11 @@ export async function getEmailsByCategory(
   entityId: row.entityId,
 }));
 
-logger.info("[SERVICE]", "getEmailsByCategory completed", {
+// One argument, not two. `logger.info("[SERVICE]", "msg", { … })` passes the
+// message as splat, which winston's json format drops without splat() —
+// producing a line reading exactly `{"level":"info","message":"[SERVICE]"}`
+// with every field gone. Two of those are in the archived incident log.
+logger.info("[SERVICE] getEmailsByCategory completed", {
   requestId,
   category,
   requestedRows: rows.length,

@@ -10,10 +10,15 @@
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "typescript": "^5.9.3"
+    "typescript": "^5.9.3",
+    "tsx": "^4.21.0"
   },
   "dependencies": {
     "winston": "^3.19.0",
     "zod": "^4.3.5"
+  },
+  "scripts": {
+    "test": "node --import tsx --test *.test.ts",
+    "check:logs": "node --import tsx ./check-log-file.ts"
   }
 }

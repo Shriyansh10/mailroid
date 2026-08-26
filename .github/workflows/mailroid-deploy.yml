@@ -64,7 +64,16 @@ jobs:
             # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB and a matching
             # DATABASE_URL (host = mailroid-db) must be set in ~/mailroid/.env
             if ! docker inspect mailroid-db >/dev/null 2>&1; then
+              # --log-opt: Docker's default json-file driver has NO rotation,
+              # so a container's stdout grows without bound. That was survivable
+              # only because the app's production log level was "error" and
+              # discarded almost everything; it is now "info" by default, which
+              # raises volume by design. This box has no swap, and a full disk is
+              # a worse outage than whatever is being debugged.
+              # ~30 MB per container ceiling. Verify with:
+              #   docker inspect mailroid-db --format '{{.HostConfig.LogConfig}}'
               docker run -d --restart unless-stopped \
+                --log-opt max-size=10m --log-opt max-file=3 \
                 --network mailroid-net \
                 --env-file ~/mailroid/.env \
                 -v mailroid_pg_data:/var/lib/postgresql/data \
@@ -98,6 +107,7 @@ jobs:
             docker stop mailroid-api || true
             docker rm mailroid-api || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-api \
@@ -106,6 +116,7 @@ jobs:
             docker stop mailroid-web || true
             docker rm mailroid-web || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               --name mailroid-web \
@@ -114,6 +125,7 @@ jobs:
             docker stop mailroid-caddy || true
             docker rm mailroid-caddy || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               -p 80:80 -p 443:443 \
               -v ~/mailroid/Caddyfile:/etc/caddy/Caddyfile \

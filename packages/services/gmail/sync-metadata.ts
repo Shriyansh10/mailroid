@@ -264,12 +264,24 @@ export async function processMessages(
 }
 
 
-// Gmail's per-user quota is 250 units/sec and threads.get costs 5 units, so
-// firing all ~100 threads per page at once (500 units) reliably triggers 429s.
-// A single rejected call in Promise.all previously aborted the whole
-// syncAllEmails call (and therefore the rest of pagination) — this limiter
-// caps concurrency and isolates per-thread failures so one bad/rate-limited
-// thread just gets skipped (and logged) instead of truncating the sync.
+// Bounded worker pool. TWO JOBS, AND QUOTA PACING IS NO LONGER ONE OF THEM.
+//
+//   1. Bound how many requests are in flight — Gmail enforces a per-user
+//      CONCURRENT REQUEST limit separately from the quota-unit budget, and many
+//      parallel requests for one mailbox can 429 on that alone.
+//   2. Isolate per-item failures. A single rejection inside Promise.all used to
+//      abort the whole syncAllEmails call and the rest of pagination with it;
+//      here one bad thread is skipped and logged instead of truncating the sync.
+//
+// Rate is `quota-limiter.ts`'s job now, and the two do not substitute for each
+// other: the limiter controls units-over-time, this controls simultaneity.
+//
+// THE NUMBERS THAT USED TO BE IN THIS COMMENT WERE WRONG BY 8x, and they are
+// why a concurrency of 10 looked safe. It claimed threads.get costs 5 units and
+// a page therefore spends 500. Per notes/reference/gmail-quota-units.md,
+// verified against Google's published table: threads.get is **40** units, so one
+// 100-thread page spends 100 x 40 + 10 = **4,010 units** — roughly 40 seconds of
+// a mailbox's 6,000-units-per-minute budget, not two-thirds of a second.
 export async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
@@ -345,7 +357,20 @@ export async function syncCategoryPage(
 
   const detailed = await mapWithConcurrency(
     result.threads ?? [],
-    10,
+    // 4, DOWN FROM 10 — and the reason changed, not just the number.
+    //
+    // Throughput no longer needs concurrency: quota-limiter.ts admits ~1.9
+    // threads.get per second (75 units/sec / 40 units), which at ~300ms latency
+    // saturates at under two in flight. Ten workers would leave six of them
+    // permanently asleep inside acquireQuota for zero gain, which is misleading
+    // in a profile and in the logs.
+    //
+    // What concurrency controls now is RESERVATION DEPTH. Four in flight is
+    // 4 x 40 = 160 units of schedule booked ahead, ~2.1s — which fits inside the
+    // gap between the background and interactive tolerances, so a UI call
+    // arriving mid-sync is still admitted immediately. At ten the depth is 400
+    // units (~5.3s) and that same UI call lands squarely on its 2s cap.
+    4,
     (t: any) =>
       withGmailRetry(`threads.get ${t.id}`, () =>
         tenant.gmail.api.threads.get({

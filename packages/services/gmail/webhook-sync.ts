@@ -167,6 +167,9 @@ export interface SyncHistoryResult {
 export async function syncHistoryForTenant(
   tenantId: string,
   incomingHistoryId: string,
+  /** Threaded from the webhook delivery that caused this sync, so every Gmail
+   *  call it makes can be tied back to one Pub/Sub message. */
+  options: { correlationId?: string } = {},
 ): Promise<SyncHistoryResult> {
   const [mapping] = await db
     .select({
@@ -224,6 +227,7 @@ export async function syncHistoryForTenant(
     trigger: "webhook",
     operation: "syncHistoryForTenant",
     targetId: incomingHistoryId,
+    correlationId: options.correlationId,
   };
 
   // Split by *why* the message appeared in the diff. Both groups get stored,

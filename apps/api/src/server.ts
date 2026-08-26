@@ -29,6 +29,7 @@ import { hydrateBatch } from "@repo/services/gmail/hydration-batch.js";
 import { indexBatch } from "@repo/services/gmail/index-batch.js";
 import { reconciliationCron } from "@repo/services/gmail/reconciliation-cron.js";
 import { gmailCooldownResumeCron } from "@repo/services/gmail/cooldown-resume-cron.js";
+import { quotaLimiterSnapshot } from "@repo/services/gmail/quota-limiter.js";
 import { getGlobalMaintenance } from "@repo/services/gmail/pause.js";
 import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
@@ -218,6 +219,27 @@ app.get("/api/_debug/egress", async (req, res) => {
     return res.json({ failureCount: failures.length, report });
   } catch (err) {
     return res.status(500).json({ error: "probe failed", detail: describeError(err) });
+  }
+});
+
+// Gmail quota pacing, as it stands right now.
+//
+// THE FIRST THING TO CHECK IS `enabled`. Pacing is opt-in via
+// GMAIL_QUOTA_PACING=on, so a limiter that appears to be doing nothing is
+// usually a limiter that was never switched on. `buckets` counts mailboxes with
+// a live schedule, `pacedOut` counts calls refused for exceeding their trigger's
+// wait cap, and `fallbackPriced` counts calls paced at the invented 50-unit
+// fallback because the operation is missing from QUOTA_UNITS — any non-zero
+// value there is a prompt to read the published table and add the row.
+//
+// In-memory and per-process, so this describes THIS container only. Reads no
+// database and touches no credentials.
+app.get("/api/_debug/quota-pacing", async (req, res) => {
+  await requireAdminSession(req);
+  try {
+    return res.json(quotaLimiterSnapshot());
+  } catch (err) {
+    return res.status(500).json({ error: "snapshot failed", detail: describeError(err) });
   }
 });
 

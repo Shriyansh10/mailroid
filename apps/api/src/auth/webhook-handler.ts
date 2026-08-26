@@ -16,6 +16,7 @@ import {
 import { getPause } from "@repo/services/gmail/pause.js";
 import { withTenantSingleFlight } from "@repo/services/gmail/tenant-lock.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
+import { logger, errorFields, hashMailbox, preview } from "@repo/logger";
 import { describeError } from "../diagnostics/describe-error.js";
 
 // Stage 3 rollout flag (see docs/architecture-plan.md). false = the History
@@ -30,7 +31,9 @@ const WEBHOOK_VIA_INNGEST = process.env.WEBHOOK_VIA_INNGEST === "true";
 
 async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | undefined> {
   const targetEmailLower = targetEmail.toLowerCase();
-  console.log(`[webhook] Attempting to resolve tenantId for email: "${targetEmailLower}"`);
+  // The address IS the lookup key here and no tenantId exists yet, so this is
+  // the narrow case hashMailbox is for. It never reaches a log in the clear.
+  const mailbox = hashMailbox(targetEmailLower);
 
   try {
     const [mapping] = await db
@@ -39,13 +42,16 @@ async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | u
       .where(eq(gmailTenantMappings.emailAddress, targetEmailLower));
 
     if (mapping) {
-      console.log(`[webhook] Lookup succeeded: Resolved email "${targetEmailLower}" to tenantId "${mapping.tenantId}"`);
+      logger.debug("[WEBHOOK] tenant resolved", { mailbox, tenantId: mapping.tenantId });
       return mapping.tenantId;
     }
 
-    console.warn(`[webhook] Lookup failed: No tenant mapping found for email "${targetEmailLower}"`);
+    logger.warn("[WEBHOOK] no tenant mapping for mailbox", { mailbox });
   } catch (err) {
-    console.error(`[webhook] Error during tenant resolution lookup for "${targetEmailLower}":`, err);
+    logger.error("[WEBHOOK] tenant resolution lookup failed", {
+      mailbox,
+      ...errorFields(err),
+    });
   }
 
   return undefined;
@@ -81,21 +87,27 @@ export async function handleCorsairWebhook(req: {
         .limit(1);
       if (mapping) {
         calendarTenantId = mapping.tenantId;
-        console.log(`[webhook] Resolved calendar tenantId "${calendarTenantId}" for channelId "${channelId}"`);
+        logger.debug("[WEBHOOK] calendar tenant resolved", {
+          tenantId: calendarTenantId,
+          channelId,
+        });
       }
     } catch (err) {
-      console.error("[webhook] Error looking up calendar tenant mapping by channelId:", err);
+      logger.error("[WEBHOOK] calendar channel lookup failed", {
+        channelId,
+        ...errorFields(err),
+      });
     }
   }
 
   // ── Handle Direct Google Calendar Webhook Push Notifications ────────
   const resourceState = req.headers["x-goog-resource-state"];
   if (typeof channelId === "string") {
-    console.log(`[webhook] Received Google Calendar push notification: channelId=${channelId}, resourceState=${resourceState}`);
+    logger.debug("[WEBHOOK] calendar push received", { channelId, resourceState });
     
     if (calendarTenantId) {
       if (resourceState === "sync") {
-        console.log(`[webhook] Channel sync handshake for channelId "${channelId}". Returning 200.`);
+        logger.debug("[WEBHOOK] calendar channel sync handshake", { channelId });
         return {
           plugin: "googlecalendar",
           action: "sync",
@@ -107,13 +119,17 @@ export async function handleCorsairWebhook(req: {
         };
       }
 
-      console.log(`[webhook] Triggering syncCalendarEvents in the background for tenant "${calendarTenantId}"...`);
       void (async () => {
         try {
           await syncCalendarEvents(calendarTenantId);
-          console.log(`[webhook] Successfully completed background calendar sync for tenant "${calendarTenantId}"`);
+          logger.debug("[WEBHOOK] background calendar sync completed", {
+            tenantId: calendarTenantId,
+          });
         } catch (err) {
-          console.error(`[webhook] Background calendar sync failed for tenant "${calendarTenantId}":`, err);
+          logger.error("[WEBHOOK] background calendar sync failed", {
+            tenantId: calendarTenantId,
+            ...errorFields(err),
+          });
         }
       })();
 
@@ -134,7 +150,10 @@ export async function handleCorsairWebhook(req: {
       // Google the delivery succeeded so it won't retry. The real fix is
       // stopping old channels on re-register (see startCalendarWatch); these
       // pings stop once the orphan channel expires.
-      console.warn(`[webhook] Ignoring calendar push from unmapped/orphan channelId: "${channelId}" (acking 200)`);
+      logger.warn("[WEBHOOK] ignoring orphan calendar channel", {
+        channelId,
+        outcome: "ignoredOrphanChannel",
+      });
       return {
         plugin: "googlecalendar",
         action: "ignoredOrphanChannel",
@@ -149,9 +168,27 @@ export async function handleCorsairWebhook(req: {
 
   let incomingHistoryId: string | undefined = undefined;
 
+  /**
+   * Pub/Sub's own message id, used as the correlation id for everything this
+   * delivery causes.
+   *
+   * THIS IS A STRONGER SIGNAL THAN incomingHistoryId. A repeated historyId is
+   * only *evidence of* repeated delivery — two genuinely distinct notifications
+   * can carry the same history position. A repeated `messageId` is Pub/Sub
+   * redelivering the identical message, which is the thing H-A actually claims.
+   * Carrying it means the ledger can say "412 history.list calls under 3 message
+   * ids" — redelivery — as distinct from "412 under 412 ids" — real churn.
+   *
+   * Not PII: an opaque Pub/Sub identifier, no mailbox in it.
+   */
+  let deliveryId: string | undefined = undefined;
+
   // Resolve tenantId and extract historyId from Gmail Pub/Sub webhook body
   if (req.body && typeof req.body === "object") {
     const body = req.body as Record<string, any>;
+    if (body.message && typeof body.message.messageId === "string") {
+      deliveryId = body.message.messageId;
+    }
     if (body.message && typeof body.message.data === "string") {
       try {
         const decodedData = Buffer.from(body.message.data, "base64").toString("utf-8");
@@ -168,21 +205,41 @@ export async function handleCorsairWebhook(req: {
             const resolvedId = await resolveTenantIdFromEmail(email);
             if (resolvedId) {
               tenantId = resolvedId;
-              console.log(`[webhook] Resolved tenantId "${tenantId}" for email "${email}"`);
             } else {
-              console.warn(`[webhook] Could not resolve tenantId for email "${email}"`);
+              logger.warn("[WEBHOOK] unresolvable mailbox on gmail push", {
+                mailbox: hashMailbox(email),
+              });
             }
           }
         }
       } catch (e) {
-        console.error("[webhook] Failed to parse Pub/Sub message data:", e);
+        // preview(), never the body: a Pub/Sub payload decodes to a mailbox
+        // address, and an unparseable one is exactly when someone is tempted
+        // to dump the lot.
+        logger.error("[WEBHOOK] could not parse Pub/Sub message data", {
+          bodyPreview: preview(body.message.data),
+          ...errorFields(e),
+        });
       }
     }
   }
 
-  console.log("[webhook] incoming", {
+  // ONE STRUCTURED LINE PER DELIVERY, and incomingHistoryId is the field that
+  // matters. Repeated values are EVIDENCE OF repeated delivery of the same
+  // history position; distinct values indicate different positions. Neither on
+  // its own proves the source of churn — correlate with sync start/end and the
+  // call ledger before concluding.
+  //
+  // The previous line logged a 200-character preview of the raw body, which is
+  // a base64 Pub/Sub envelope wrapping the mailbox address. Dropped: nothing
+  // read it, and it was the only PII on the happy path.
+  logger.info("[WEBHOOK] delivery", {
     tenantId,
-    bodyPreview: req.body ? JSON.stringify(req.body).slice(0, 200) : "",
+    incomingHistoryId,
+    // Repeats here mean Pub/Sub redelivered the identical message. Repeats of
+    // incomingHistoryId alone do not carry that — see the deliveryId comment.
+    deliveryId,
+    hasCalendarChannel: typeof channelId === "string",
   });
 
   // Gmail Pub/Sub push for a mailbox we don't manage — a watch registered for a
@@ -194,7 +251,10 @@ export async function handleCorsairWebhook(req: {
   // stop once that account's watch expires. (Calendar pushes are handled
   // earlier via channelId, so this only catches the Gmail path.)
   if (!tenantId && incomingHistoryId) {
-    console.warn("[webhook] Ignoring gmail push for unmapped mailbox (acking 200)");
+    logger.warn("[WEBHOOK] ignoring gmail push for unmapped mailbox", {
+      incomingHistoryId,
+      outcome: "ignoredUnmappedMailbox",
+    });
     return {
       plugin: "gmail",
       action: "ignoredUnmappedMailbox",
@@ -230,11 +290,13 @@ export async function handleCorsairWebhook(req: {
     // days. The cursor has not moved, so the diff is re-fetched once resumed.
     const pause = await getPause(tenantId).catch(() => null);
     if (pause) {
-      console.warn(
-        `[webhook] Sync paused (${pause.mode}) for "${tenantId}"` +
-          (pause.expiresAt ? ` until ${pause.expiresAt.toISOString()}` : " until cleared") +
-          " — acking 200 without calling Gmail",
-      );
+      logger.warn("[WEBHOOK] sync paused, acking without calling Gmail", {
+        tenantId,
+        incomingHistoryId,
+        mode: pause.mode,
+        until: pause.expiresAt?.toISOString() ?? null,
+        outcome: "deferredPaused",
+      });
       return {
         plugin: "gmail",
         action: "deferredPaused",
@@ -248,10 +310,12 @@ export async function handleCorsairWebhook(req: {
 
     const cooldown = await getCooldown(tenantId).catch(() => null);
     if (cooldown) {
-      console.warn(
-        `[webhook] Gmail quota cooldown active for "${tenantId}" until ` +
-          `${cooldown.until.toISOString()} — acking 200 without calling Gmail`,
-      );
+      logger.warn("[WEBHOOK] quota cooldown active, acking without calling Gmail", {
+        tenantId,
+        incomingHistoryId,
+        retryAfter: cooldown.until.toISOString(),
+        outcome: "deferredRateLimited",
+      });
       return {
         plugin: "gmail",
         action: "deferredRateLimited",
@@ -319,12 +383,15 @@ export async function handleCorsairWebhook(req: {
     // itself.
     const retryAfter = quota && tenantId ? (await getCooldown(tenantId))?.until : undefined;
 
-    console.error("[webhook] processWebhook failed (acking 200 to stop redelivery)", {
+    logger.error("[WEBHOOK] processWebhook failed, acking 200 to stop redelivery", {
       tenantId: activeTenant,
+      incomingHistoryId,
+      deliveryId,
       kind,
       quota,
       retryAfter: retryAfter?.toISOString(),
-      error: JSON.stringify(describeError(err)),
+      outcome: quota ? "deferredRateLimited" : "deferredError",
+      ...errorFields(err),
     });
 
     return {
@@ -337,15 +404,14 @@ export async function handleCorsairWebhook(req: {
       },
     };
   }
-  console.log(
-    "[WEBHOOK FULL RESULT]",
-    JSON.stringify(result, null, 2)
-  );
-
-  if (result.plugin) {
-    console.log(`[webhook] ${result.plugin}.${result.action}`);
-    console.log("[webhook] result content:", JSON.stringify(result, null, 2));
-  }
+  // The whole result was previously dumped TWICE, pretty-printed, at info, on
+  // every delivery — mail metadata included. Plugin and action are what anyone
+  // actually reads; the payload stays available at debug when genuinely needed.
+  logger.debug("[WEBHOOK] processed", {
+    tenantId: activeTenant,
+    plugin: result.plugin,
+    action: result.action,
+  });
 
   // Unified realtime email ingestion path via Gmail History API
   if (
@@ -354,7 +420,11 @@ export async function handleCorsairWebhook(req: {
     tenantId &&
     incomingHistoryId
   ) {
-    console.log(`[webhook] [INGEST BLOCK REACHED] tenantId: ${tenantId}, incomingHistoryId: ${incomingHistoryId}`);
+    logger.info("[WEBHOOK] gmail history sync starting", {
+      tenantId,
+      incomingHistoryId,
+      via: WEBHOOK_VIA_INNGEST ? "inngest" : "in-process",
+    });
 
     // processWebhook got through, so whatever was wrong before is no longer
     // wrong. Clearing here (rather than after ingest) keeps the flag meaning
@@ -368,7 +438,7 @@ export async function handleCorsairWebhook(req: {
       // per-tenant. Returns to the Pub/Sub sender immediately either way.
       await inngest.send({
         name: "gmail/webhook.notification",
-        data: { tenantId, incomingHistoryId },
+        data: { tenantId, incomingHistoryId, correlationId: deliveryId },
       });
     } else {
       // Legacy path, kept for one release as the rollback for
@@ -385,24 +455,34 @@ export async function handleCorsairWebhook(req: {
         // pre-queue check would fire one more doomed call and push Google's
         // window further out — the exact loop we're removing.
         if (await getCooldown(tenantId)) {
-          console.warn(
-            `[webhook] cooldown opened while queued for "${tenantId}" — skipping sync`,
-          );
+          logger.warn("[WEBHOOK] cooldown opened while queued, skipping sync", {
+            tenantId,
+            incomingHistoryId,
+            deliveryId,
+            outcome: "skippedCooldownOnDequeue",
+          });
           return;
         }
-        return syncHistoryForTenant(tenantId, incomingHistoryId);
+        return syncHistoryForTenant(tenantId, incomingHistoryId, {
+          correlationId: deliveryId,
+        });
       }).catch((err) => {
-        console.error(
-          `[webhook] syncHistoryForTenant failed for tenant "${tenantId}":`,
-          JSON.stringify(describeError(err)),
-        );
+        logger.error("[WEBHOOK] syncHistoryForTenant failed", {
+          tenantId,
+          incomingHistoryId,
+          deliveryId,
+          ...errorFields(err),
+        });
       });
     }
   }
 
   // Google Calendar webhook sync logic
   if (result.plugin === "googlecalendar") {
-    console.log("[CALENDAR WEBHOOK]", JSON.stringify(result, null, 2));
+    logger.debug("[WEBHOOK] calendar result", {
+      tenantId: tenantId ?? calendarTenantId,
+      action: result.action,
+    });
 
     const activeTenantId = tenantId ?? calendarTenantId;
     const resultAny = result as any;
@@ -450,7 +530,10 @@ export async function handleCorsairWebhook(req: {
                       updatedAt: new Date(),
                     },
                   });
-                console.log(`[webhook] Synced calendar event "${event.id}" in DB for tenant "${activeTenantId}"`);
+                logger.debug("[WEBHOOK] calendar event upserted", {
+                  tenantId: activeTenantId,
+                  eventId: event.id,
+                });
               }
             } else if (data.type === "eventDeleted" && data.eventId) {
               // Scoped to this tenant: the same event id exists in every
@@ -464,14 +547,19 @@ export async function handleCorsairWebhook(req: {
                     eq(calendarEvents.eventId, data.eventId),
                   ),
                 );
-              console.log(`[webhook] Deleted calendar event "${data.eventId}" from DB for tenant "${activeTenantId}"`);
+              logger.debug("[WEBHOOK] calendar event deleted", {
+                tenantId: activeTenantId,
+                eventId: data.eventId,
+              });
             }
 
             // Recovery/fallback path to make sure no updates are missed
-            console.log(`[webhook] Triggering syncCalendarEvents fallback for tenant "${activeTenantId}"...`);
             await syncCalendarEvents(activeTenantId);
           } catch (err) {
-            console.error("[webhook] Error syncing calendar event webhook data:", err);
+            logger.error("[WEBHOOK] calendar event sync failed", {
+              tenantId: activeTenantId,
+              ...errorFields(err),
+            });
           }
         })();
       }

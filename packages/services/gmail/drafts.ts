@@ -18,7 +18,7 @@ import { logger } from "@repo/logger";
 
 import { buildRawEmail, extractBody, getHeader, resolveReplyTarget } from "./index.ts";
 import type { MessagePart, PayloadHeader } from "./index.ts";
-import { upsertMessageMetadataBatch } from "./sync-metadata.ts";
+import { mapWithConcurrency, upsertMessageMetadataBatch } from "./sync-metadata.ts";
 import type { MetadataInput } from "./sync-metadata.ts";
 import { withGmailRetry } from "./retry.ts";
 
@@ -119,11 +119,18 @@ export async function syncDraftsPage(
 ): Promise<{ processed: number; nextPageToken?: string }> {
   const tenant = corsair.withTenant(userId);
 
+  // tenantId and trigger were BOTH missing here. Without tenantId the pre-flight
+  // cooldown gate never ran, the ledger booked these as "unattributed", and —
+  // now that pacing hangs off the same argument — they would have been paced
+  // against a shared bucket instead of this mailbox's own. `userId` was in scope
+  // the whole time.
   const result = await withGmailRetry<{
     drafts?: Array<{ id?: string }>;
     nextPageToken?: string | null;
-  }>("drafts.list", () =>
-    tenant.gmail.api.drafts.list({ maxResults: 100, pageToken }),
+  }>(
+    "drafts.list",
+    () => tenant.gmail.api.drafts.list({ maxResults: 100, pageToken }),
+    { tenantId: userId, trigger: "sync" },
   );
 
   const stubs = (result.drafts ?? []).filter((d) => d.id);
@@ -133,17 +140,23 @@ export async function syncDraftsPage(
 
   // drafts.list returns ids only — the headers we display come from a per-draft
   // get, same shape as the thread sync's threads.get fan-out.
-  const detailed = await Promise.all(
-    stubs.map((d) =>
-      withGmailRetry<RawDraft>(`drafts.get ${d.id}`, () =>
-        tenant.gmail.api.drafts.get({ id: d.id!, format: "metadata" }),
-      ).catch((err) => {
-        logger.error("[SYNC] drafts.get failed, skipping", {
-          userId, draftId: d.id, error: String(err),
-        });
-        return null;
-      }),
-    ),
+  //
+  // BOUNDED, not Promise.all. drafts.get is 20 units, so a full 100-draft page
+  // fired at once reserves 2,000 units — the last of which lands ~26 seconds
+  // out and would be refused outright on any capped trigger. It is also the
+  // per-user CONCURRENT REQUEST limit, which is a separate Gmail control from
+  // the quota budget.
+  const detailed = await mapWithConcurrency(stubs, 4, (d) =>
+    withGmailRetry<RawDraft>(
+      `drafts.get ${d.id}`,
+      () => tenant.gmail.api.drafts.get({ id: d.id!, format: "metadata" }),
+      { tenantId: userId, trigger: "sync" },
+    ).catch((err) => {
+      logger.error("[SYNC] drafts.get failed, skipping", {
+        userId, draftId: d.id, error: String(err),
+      });
+      return null;
+    }),
   );
 
   const rows = detailed
@@ -159,10 +172,11 @@ export async function syncDraftsPage(
 /** Re-fetch a single draft from Gmail and mirror it locally. */
 async function ingestDraft(userId: string, draftId: string): Promise<void> {
   const tenant = corsair.withTenant(userId);
-  const draft = (await tenant.gmail.api.drafts.get({
-    id: draftId,
-    format: "metadata",
-  })) as RawDraft;
+  const draft = (await withGmailRetry<RawDraft>(
+    `drafts.get ${draftId}`,
+    () => tenant.gmail.api.drafts.get({ id: draftId, format: "metadata" }) as Promise<RawDraft>,
+    { tenantId: userId, trigger: "ui" },
+  )) as RawDraft;
 
   const row = buildDraftRow(userId, draft);
   if (row) await upsertMessageMetadataBatch([row]);
@@ -174,10 +188,11 @@ async function ingestDraft(userId: string, draftId: string): Promise<void> {
  */
 export async function getDraft(userId: string, draftId: string): Promise<DraftDetail> {
   const tenant = corsair.withTenant(userId);
-  const draft = (await tenant.gmail.api.drafts.get({
-    id: draftId,
-    format: "full",
-  })) as RawDraft;
+  const draft = (await withGmailRetry<RawDraft>(
+    `drafts.get ${draftId}`,
+    () => tenant.gmail.api.drafts.get({ id: draftId, format: "full" }) as Promise<RawDraft>,
+    { tenantId: userId, trigger: "ui" },
+  )) as RawDraft;
 
   const msg = draft.message;
   const headers = (msg?.payload?.headers ?? []) as PayloadHeader[];
@@ -217,9 +232,14 @@ export async function createDraft(
     bcc: input.bcc?.trim() || undefined,
   });
 
-  const draft = (await tenant.gmail.api.drafts.create({
-    draft: { message: { raw, threadId: input.threadId } },
-  })) as RawDraft;
+  const draft = (await withGmailRetry<RawDraft>(
+    "drafts.create",
+    () =>
+      tenant.gmail.api.drafts.create({
+        draft: { message: { raw, threadId: input.threadId } },
+      }) as Promise<RawDraft>,
+    { tenantId: userId, trigger: "ui" },
+  )) as RawDraft;
 
   if (!draft.id) throw new Error("Gmail did not return a draft id");
 
@@ -241,10 +261,15 @@ export async function updateDraft(
     bcc: input.bcc?.trim() || undefined,
   });
 
-  await tenant.gmail.api.drafts.update({
-    id: draftId,
-    draft: { message: { raw, threadId: input.threadId } },
-  });
+  await withGmailRetry(
+    `drafts.update ${draftId}`,
+    () =>
+      tenant.gmail.api.drafts.update({
+        id: draftId,
+        draft: { message: { raw, threadId: input.threadId } },
+      }),
+    { tenantId: userId, trigger: "ui" },
+  );
 
   await ingestDraft(userId, draftId);
   logger.info("[SERVICE] updateDraft completed", { userId, draftId });
@@ -261,10 +286,18 @@ export async function sendDraft(
   draftId: string,
 ): Promise<{ id: string; threadId: string }> {
   const tenant = corsair.withTenant(userId);
-  const sent = (await tenant.gmail.api.drafts.send({ id: draftId })) as {
-    id?: string;
-    threadId?: string;
-  };
+  // trigger "send", not "ui": a person pressed Send, so this gets the 10s send
+  // cap rather than the 2s interactive one. Failing a send outright because a
+  // background sync held the schedule would be worse than a short wait.
+  const sent = (await withGmailRetry<{ id?: string; threadId?: string }>(
+    "drafts.send",
+    () =>
+      tenant.gmail.api.drafts.send({ id: draftId }) as Promise<{
+        id?: string;
+        threadId?: string;
+      }>,
+    { tenantId: userId, trigger: "send" },
+  )) as { id?: string; threadId?: string };
 
   await deleteLocalDraft(userId, draftId);
   logger.info("[SERVICE] sendDraft completed", { userId, draftId, messageId: sent.id });
@@ -274,7 +307,11 @@ export async function sendDraft(
 /** Discard a draft in Gmail and locally. */
 export async function discardDraft(userId: string, draftId: string): Promise<void> {
   const tenant = corsair.withTenant(userId);
-  await tenant.gmail.api.drafts.delete({ id: draftId });
+  await withGmailRetry(
+    `drafts.delete ${draftId}`,
+    () => tenant.gmail.api.drafts.delete({ id: draftId }),
+    { tenantId: userId, trigger: "ui" },
+  );
   await deleteLocalDraft(userId, draftId);
   logger.info("[SERVICE] discardDraft completed", { userId, draftId });
 }

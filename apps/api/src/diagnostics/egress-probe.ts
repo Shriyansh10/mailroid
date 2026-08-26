@@ -21,7 +21,17 @@ import { describeError } from "./describe-error.js";
 
 /** Corsair's Gmail token-refresh endpoint. Unauthenticated POST => fast 400. */
 const OAUTH_TOKEN_URL = "https://oauth2.googleapis.com/token";
-/** The Gmail API host. Unauthenticated GET => fast 401. */
+/**
+ * The Gmail API host. Unauthenticated GET => fast 401.
+ *
+ * DELIBERATELY UNPACED AND DELIBERATELY UNAUTHENTICATED — do not "fix" this by
+ * routing it through gmailRequestWithAuthRecovery or the quota limiter during a
+ * coverage sweep. It carries no token, so Google cannot attribute it to any
+ * mailbox and it spends no per-user quota. Its entire job is to answer "can this
+ * box reach Google at all", which has to keep working when every mailbox is
+ * cooling down and the limiter is saturated. Pacing it would make the network
+ * diagnostic unavailable in exactly the incident it exists for.
+ */
 const GMAIL_PROFILE_URL = "https://gmail.googleapis.com/gmail/v1/users/me/profile";
 
 /** Matches undici's default connect timeout, so we observe the same deadline. */

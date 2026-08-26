@@ -1,6 +1,6 @@
 import { db, eq, isNull, lt, or } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
-import { logger } from "@repo/logger";
+import { errorFields, hashMailbox, logger } from "@repo/logger";
 
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 import { getPause, getPausedTenantIds, isTenantPaused } from "./pause.ts";
@@ -165,14 +165,22 @@ export async function bootstrapGmailWatches(): Promise<void> {
       } catch (err) {
         // One mailbox failing must not stop the rest — a revoked token on one
         // account would otherwise leave every other mailbox unregistered.
+        // An error is a document: errorFields keeps the class, status, cause
+        // and the top frames that String(err) throws away.
         logger.error("[gmail-watch-bootstrap] renewal failed", {
           tenantId: row.tenantId,
-          emailAddress: row.emailAddress,
-          error: String(err),
+          mailbox: hashMailbox(row.emailAddress),
+          operation: "watch",
+          trigger: "watch-bootstrap",
+          ...errorFields(err),
         });
       }
     }
   } catch (err) {
-    logger.error("[gmail-watch-bootstrap] bootstrap aborted", { error: String(err) });
+    logger.error("[gmail-watch-bootstrap] bootstrap aborted", {
+      operation: "watch",
+      trigger: "watch-bootstrap",
+      ...errorFields(err),
+    });
   }
 }

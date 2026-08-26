@@ -1,7 +1,7 @@
 import { db, eq, and, isNull, gte } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { classifyEmailPriority, withAiUsage } from "@repo/ai";
-import { logger } from "@repo/logger";
+import { errorFields, hashMailbox, logger } from "@repo/logger";
 
 export async function backfillPriorityEmails(opts?: {
   days?: number;
@@ -63,7 +63,16 @@ export async function backfillPriorityEmails(opts?: {
       }
       processedCount++;
       const { entityId, userId, sender, subject, snippet } = record;
-      logger.info(`[BACKFILL] Classifying email ${processedCount}: ${subject || "(No Subject)"} from ${sender || "Unknown"}`);
+      // Subject and sender used to be interpolated into this message string,
+      // where no attribute-level redaction could ever reach them. Structured
+      // and digested now; and debug, not info, because one line per email is a
+      // statistic, not a document — the batch summary below is the record.
+      logger.debug("[BACKFILL] classifying email", {
+        entityId,
+        index: processedCount,
+        senderHash: hashMailbox(sender),
+        subjectLength: subject?.length ?? 0,
+      });
 
       try {
         const classification = await withAiUsage({ userId }, () =>
@@ -92,10 +101,19 @@ export async function backfillPriorityEmails(opts?: {
           .where(eq(messageMetadata.entityId, entityId));
 
         successCount++;
-        logger.info(`[BACKFILL] Successfully updated classification to ${classification.priority} (Score: ${classification.priorityScore})`);
+        logger.debug("[BACKFILL] classification updated", {
+          entityId,
+          priority: classification.priority,
+          priorityScore: classification.priorityScore,
+        });
       } catch (err) {
         errorCount++;
-        logger.error(`[BACKFILL] Failed to process email ${entityId}:`, err);
+        // Was `logger.error(msg, err)` — winston treats the second argument as
+        // splat and drops it, so the error itself never reached the file.
+        logger.error("[BACKFILL] failed to process email", {
+          entityId,
+          ...errorFields(err),
+        });
       }
     }
 
