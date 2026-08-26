@@ -3,6 +3,25 @@ import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings
 import { logger } from "@repo/logger";
 
 import { assertNotPaused } from "./pause.ts";
+import {
+  GmailAuthError,
+  MAX_COOLDOWN_MS,
+  classifyGmailFailure,
+  extractRetryAfter,
+} from "./gmail-errors.ts";
+import type { GmailCallContext } from "./gmail-errors.ts";
+
+// Classification is pure and lives in gmail-errors.ts so that gmail-request.ts
+// can use it without importing this module's gates. Re-exported so existing
+// importers are unaffected by the move.
+export {
+  classifyGmailFailure,
+  extractRetryAfter,
+  isGmailUnavailable,
+  isQuotaError,
+} from "./gmail-errors.ts";
+export { GmailAuthError };
+export type { GmailCallContext, GmailFailureKind } from "./gmail-errors.ts";
 
 /**
  * Per-mailbox Gmail quota cooldown.
@@ -27,15 +46,20 @@ import { assertNotPaused } from "./pause.ts";
  * interval already proven insufficient. It resets to 0 the instant ANY Gmail
  * call succeeds (markGmailHealthy) — escalation is strictly per-incident and
  * must never carry into an unrelated future one.
+ *
+ * ONLY QUOTA FAILURES BELONG ON THAT LADDER. A 401 is an authentication
+ * problem, and escalating it produces a cooldown that blocks the very refresh
+ * which would fix it — a permanent outage dressed up as backoff. Not
+ * hypothetical: it ran in production from 2026-08-25, once an hour, until the
+ * ladder was made unreachable except through handleGmailFailure. Auth failures
+ * take recordAuthFailure instead and never touch quotaResumeFailures.
  */
 
-// Gmail hands back an absolute instant, so the window is normally exact. These
-// only bound the damage when it is absent or implausible.
+// Gmail hands back an absolute instant, so the window is normally exact. This
+// only bounds the damage when it is absent or implausible. MAX_COOLDOWN_MS
+// lives in gmail-errors.ts — the retry-after parser clamps to the same ceiling
+// and two copies would silently diverge.
 const DEFAULT_COOLDOWN_MS = 5 * 60_000;
-const MAX_COOLDOWN_MS = 60 * 60_000;
-// Our clock and Google's differ by some unknown amount; resuming a beat late
-// costs one delayed sync, resuming a beat early costs another pushed window.
-const CLOCK_SKEW_PAD_MS = 5_000;
 
 // getCooldown runs before *every* Gmail call, and the overwhelmingly common
 // answer is "no cooldown" — without this that becomes a DB round trip per API
@@ -54,20 +78,9 @@ export interface Cooldown {
   reason: string;
 }
 
-/**
- * Who's asking Gmail, and about what. Threaded down from every call site so
- * cooldown logs answer "which code path" without reading source — the
- * question that cost hours to answer by hand during the incident this exists
- * to prevent a repeat of.
- */
-export interface GmailCallContext {
-  /** What caused the call: "ui" | "webhook" | "resume-cron" | "sync" | ... */
-  trigger: string;
-  /** The Gmail operation: "threads.get" | "labels.get" | "users.getProfile" | ... */
-  operation?: string;
-  /** threadId / historyId / messageId / labelId — whichever applies. */
-  targetId?: string;
-}
+// GmailCallContext moved to gmail-errors.ts (gate-free) so gmail-request.ts can
+// use it without importing this module. Re-exported at the top of this file, so
+// every existing importer is unaffected.
 
 export type RecoveredBy = "probe-success" | "cursor-advanced" | "live-call-succeeded";
 
@@ -84,9 +97,19 @@ interface CachedRow {
   reason: string | null;
   resumeFailures: number;
   startedAt: Date | null;
+  authFailedAt: Date | null;
+  authFailureReason: string | null;
 }
 
 const memo = new Map<string, { value: CachedRow; expiresAt: number }>();
+
+/** Numeric status off a corsair ApiError or a plain fetch-derived error. */
+function errorStatusOf(err: unknown): number | undefined {
+  const status = (err as { status?: unknown } | null)?.status;
+  if (typeof status === "number") return status;
+  const code = (err as { code?: unknown } | null)?.code;
+  return typeof code === "number" ? code : undefined;
+}
 
 /** Thrown instead of calling Gmail while a mailbox is cooling down. */
 export class GmailQuotaCooldownError extends Error {
@@ -102,108 +125,6 @@ export class GmailQuotaCooldownError extends Error {
     this.name = "GmailQuotaCooldownError";
     this.retryAfter = until;
   }
-}
-
-function errorBodyMessage(err: unknown): string {
-  const body = (err as { body?: { error?: { message?: unknown } } } | null)?.body;
-  const message = body?.error?.message;
-  return typeof message === "string" ? message : "";
-}
-
-function errorStatus(err: unknown): number | undefined {
-  const status = (err as { status?: unknown } | null)?.status;
-  if (typeof status === "number") return status;
-  const code = (err as { code?: unknown } | null)?.code;
-  return typeof code === "number" ? code : undefined;
-}
-
-/**
- * Is this a Gmail rate-limit rejection?
- *
- * Structured fields first — `status` and `body.error.status` are contract,
- * message wording is not. The string fallback exists for one specific caller:
- * the raw `fetch` in webhook-sync.ts historically threw
- * `new Error("Gmail history fetch failed: 429 - …")`, flattening the status
- * into prose. That path now attaches `status` properly, but the fallback stays
- * cheap insurance — it is the exact path the production deadlock ran through,
- * and misclassifying it means not cooling down at all.
- */
-export function isQuotaError(err: unknown): boolean {
-  if (errorStatus(err) === 429) return true;
-
-  const bodyStatus = (err as { body?: { error?: { status?: unknown } } } | null)
-    ?.body?.error?.status;
-  if (bodyStatus === "RESOURCE_EXHAUSTED") return true;
-
-  const text = `${errorBodyMessage(err)} ${String(
-    (err as { message?: unknown } | null)?.message ?? err ?? "",
-  )}`;
-  return /\b429\b|rate ?limit ?exceeded|user-rate limit|RESOURCE_EXHAUSTED/i.test(text);
-}
-
-/**
- * Should a read fall back to the locally stored copy rather than fail?
- *
- * Quota, 5xx and transport failures mean "Gmail is unreachable right now" —
- * the cached copy is the best available answer. 401/403/404 deliberately do
- * NOT qualify: a revoked token or a deleted thread is a real, actionable error,
- * and papering over it with stale content would hide exactly the kind of drift
- * the user needs told about.
- */
-export function isGmailUnavailable(err: unknown): boolean {
-  if (isQuotaError(err)) return true;
-  const status = errorStatus(err);
-  if (typeof status === "number") return status >= 500;
-  // No status at all: transport/DNS/timeout, i.e. we never reached Google.
-  return true;
-}
-
-/**
- * Pull the retry instant out of a Gmail 429.
- *
- * THE ONE FRAGILE PIECE, deliberately quarantined here. Google puts the
- * timestamp in prose ("… Retry after 2026-08-04T03:58:23.313Z") and does not
- * reliably send a usable Retry-After header, so this has to pattern-match. If
- * the wording ever changes this returns null and callers fall back to
- * DEFAULT_COOLDOWN_MS — a parser break costs cooldown *precision*, never
- * *correctness*. Nothing about detection or safety depends on it.
- */
-export function extractRetryAfter(err: unknown, now = new Date()): Date | null {
-  const text = `${errorBodyMessage(err)} ${String(
-    (err as { message?: unknown } | null)?.message ?? "",
-  )}`;
-
-  const iso = text.match(
-    /\b(\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})?)/,
-  );
-  let until: Date | null = null;
-
-  if (iso?.[1]) {
-    const parsed = new Date(iso[1].replace(" ", "T"));
-    if (!Number.isNaN(parsed.getTime())) until = parsed;
-  }
-
-  // Some Google surfaces (and most HTTP intermediaries) use delta-seconds.
-  if (!until) {
-    const header = (err as { headers?: { get?: (n: string) => string | null } } | null)
-      ?.headers?.get?.("retry-after");
-    const seconds = header ? Number(header) : NaN;
-    if (Number.isFinite(seconds) && seconds > 0) {
-      until = new Date(now.getTime() + seconds * 1000);
-    }
-  }
-
-  if (!until) return null;
-
-  // A window already in the past tells us nothing — treat as unparseable and
-  // let the caller apply its default rather than "cooling down" until a moment
-  // that has already been and gone.
-  const padded = new Date(until.getTime() + CLOCK_SKEW_PAD_MS);
-  if (padded.getTime() <= now.getTime()) return null;
-
-  // Cap it: a malformed year-3000 timestamp must not park a mailbox forever.
-  const max = new Date(now.getTime() + MAX_COOLDOWN_MS);
-  return padded.getTime() > max.getTime() ? max : padded;
 }
 
 /** The window to use when Google didn't give us a usable one. */
@@ -286,6 +207,8 @@ async function getCachedRow(tenantId: string): Promise<CachedRow> {
       reason: gmailTenantMappings.quotaCooldownReason,
       resumeFailures: gmailTenantMappings.quotaResumeFailures,
       startedAt: gmailTenantMappings.quotaCooldownStartedAt,
+      authFailedAt: gmailTenantMappings.gmailAuthFailedAt,
+      authFailureReason: gmailTenantMappings.gmailAuthFailureReason,
     })
     .from(gmailTenantMappings)
     .where(eq(gmailTenantMappings.tenantId, tenantId))
@@ -296,6 +219,8 @@ async function getCachedRow(tenantId: string): Promise<CachedRow> {
     reason: row?.reason ?? null,
     resumeFailures: row?.resumeFailures ?? 0,
     startedAt: row?.startedAt ?? null,
+    authFailedAt: row?.authFailedAt ?? null,
+    authFailureReason: row?.authFailureReason ?? null,
   };
   memo.set(tenantId, { value, expiresAt: Date.now() + MEMO_TTL_MS });
   return value;
@@ -315,6 +240,18 @@ export async function getCooldown(tenantId: string): Promise<Cooldown | null> {
     return { until: row.until, reason: row.reason ?? "GMAIL_429" };
   }
   return null;
+}
+
+/**
+ * Auth-failed state for a mailbox, or null. The non-throwing counterpart to
+ * assertAuthHealthy, for callers that want to *filter* rather than fail — the
+ * resume cron sweeps many mailboxes and one dead mailbox must not abort the run.
+ */
+export async function getAuthFailure(
+  tenantId: string,
+): Promise<{ at: Date; reason: string | null } | null> {
+  const row = await getCachedRow(tenantId);
+  return row.authFailedAt ? { at: row.authFailedAt, reason: row.authFailureReason } : null;
 }
 
 /**
@@ -384,8 +321,18 @@ export async function setCooldown(
   return { resumeFailures: resumeFailuresAfter, incidentId };
 }
 
-/** Derive an escalated cooldown from a caught error and persist + log it. */
-export async function recordQuotaError(
+/**
+ * Derive an escalated cooldown from a caught error and persist + log it.
+ *
+ * DELIBERATELY NOT EXPORTED. This is the escalation ladder's only door, and
+ * every caller must arrive through handleGmailFailure so classification
+ * happens exactly once, in one place. The previous public export is what let
+ * cooldown-resume-cron.ts hand it a 401 — which escalated an authentication
+ * problem into a quota window that then blocked the refresh that would have
+ * fixed it. Making this private is the structural fix; the comment is only the
+ * reminder.
+ */
+async function recordQuotaError(
   tenantId: string,
   err: unknown,
   ctx: GmailCallContext,
@@ -397,12 +344,93 @@ export async function recordQuotaError(
 
   await setCooldown(tenantId, until, {
     ...ctx,
-    reason: isQuotaError(err) ? "GMAIL_429" : "GMAIL_ERROR",
-    status: errorStatus(err),
+    reason: "GMAIL_429",
+    status: errorStatusOf(err),
     decision,
   });
 
   return until;
+}
+
+/**
+ * Record that authentication is dead for this mailbox.
+ *
+ * Reached only after corsair has actually attempted a refresh and failed, so a
+ * written value means "the credentials cannot be recovered", never "we did not
+ * try". Note what this does NOT do: no cooldown window, no `quotaResumeFailures`
+ * increment, nothing on the escalation ladder. Retrying a revoked grant every
+ * hour does not un-revoke it; it just generates noise and hides the real state.
+ */
+export async function recordAuthFailure(
+  tenantId: string,
+  err: unknown,
+  ctx: GmailCallContext,
+): Promise<void> {
+  const now = new Date();
+  const row = await getCachedRow(tenantId);
+  const status = errorStatusOf(err);
+  const reason = String(
+    (err as { message?: unknown } | null)?.message ?? err ?? "unknown",
+  ).slice(0, 500);
+
+  await db
+    .update(gmailTenantMappings)
+    .set({ gmailAuthFailedAt: now, gmailAuthFailureReason: reason })
+    .where(eq(gmailTenantMappings.tenantId, tenantId));
+  memo.delete(tenantId);
+
+  logger.warn("[GMAIL] mailbox authentication failed", {
+    tenantId,
+    incidentId: deriveIncidentId(tenantId, row.authFailedAt ?? now),
+    policyVersion: COOLDOWN_POLICY_VERSION,
+    fromState: row.authFailedAt ? "AUTH_FAILED" : "ACTIVE",
+    toState: "AUTH_FAILED",
+    trigger: ctx.trigger,
+    operation: ctx.operation,
+    targetId: ctx.targetId,
+    status,
+    reason,
+    now: now.toISOString(),
+  });
+}
+
+/**
+ * THE ONLY PUBLIC ENTRY POINT for a failed Gmail call.
+ *
+ * Classification happens here and nowhere else. The three families are handled
+ * by three different mechanisms, and routing one into another's mechanism is
+ * the bug class this function exists to make unreachable:
+ *
+ *   quota (429) → escalating cooldown, Google's Retry-After respected
+ *   auth  (401) → auth-failed state; NO cooldown, NO escalation counter
+ *   other       → logged; no state written, because we do not know what to write
+ *
+ * "other" deliberately writes nothing. A 404, a 500 or a socket hang-up is not
+ * evidence about either quota or credentials, and inventing a state for it is
+ * how a transient blip becomes a parked mailbox.
+ */
+export async function handleGmailFailure(
+  tenantId: string,
+  err: unknown,
+  ctx: GmailCallContext,
+): Promise<void> {
+  switch (classifyGmailFailure(err)) {
+    case "quota":
+      await recordQuotaError(tenantId, err, ctx);
+      return;
+    case "auth":
+      await recordAuthFailure(tenantId, err, ctx);
+      return;
+    default:
+      logger.warn("[GMAIL] call failed, neither quota nor auth", {
+        tenantId,
+        trigger: ctx.trigger,
+        operation: ctx.operation,
+        targetId: ctx.targetId,
+        status: errorStatusOf(err),
+        error: String((err as { message?: unknown } | null)?.message ?? err),
+      });
+  }
 }
 
 /**
@@ -432,13 +460,24 @@ export async function markGmailHealthy(
   ctx: GmailCallContext & { recoveredBy: RecoveredBy },
 ): Promise<void> {
   const row = await getCachedRow(tenantId);
-  if (row.resumeFailures === 0 && !row.until && !row.startedAt) return;
+  // Auth state is cleared here too, so it has to be part of the "nothing to do"
+  // test — otherwise a mailbox that recovered its credentials would keep a
+  // stale gmail_auth_failed_at and stay gated forever.
+  if (
+    row.resumeFailures === 0 &&
+    !row.until &&
+    !row.startedAt &&
+    !row.authFailedAt
+  ) {
+    return;
+  }
 
   const now = new Date();
   const incidentId = deriveIncidentId(tenantId, row.startedAt ?? now);
   const blockedForMs = row.startedAt ? now.getTime() - row.startedAt.getTime() : null;
   const previousResumeFailures = row.resumeFailures;
   const previousUntil = row.until;
+  const previousAuthFailedAt = row.authFailedAt;
 
   try {
     await db
@@ -448,6 +487,11 @@ export async function markGmailHealthy(
         quotaCooldownReason: null,
         quotaResumeFailures: 0,
         quotaCooldownStartedAt: null,
+        // A successful Gmail call proves the credentials work, which is the
+        // only evidence that could clear this. Same "any success resets
+        // everything" contract as the quota fields.
+        gmailAuthFailedAt: null,
+        gmailAuthFailureReason: null,
       })
       .where(eq(gmailTenantMappings.tenantId, tenantId));
     memo.delete(tenantId);
@@ -473,6 +517,7 @@ export async function markGmailHealthy(
     recoveredBy: ctx.recoveredBy,
     resumeFailures: { before: previousResumeFailures, after: 0 },
     previousUntil: previousUntil?.toISOString() ?? null,
+    previousAuthFailedAt: previousAuthFailedAt?.toISOString() ?? null,
     blockedForMs,
   });
 }
@@ -541,8 +586,44 @@ export async function assertNotCoolingDown(
 }
 
 /**
- * The single pre-flight gate for any Gmail call: operator pause first, then
- * quota cooldown.
+ * Throw instead of calling Gmail with credentials already proven dead.
+ *
+ * Reaching this means corsair attempted a refresh and failed, so every call
+ * would 401. Skipping is not merely an optimisation: repeated failed auth on
+ * one mailbox is exactly the traffic that attracts a rate-limit penalty, which
+ * would then read as a quota problem on top of an auth one.
+ */
+export async function assertAuthHealthy(
+  tenantId: string,
+  ctx: GmailCallContext,
+): Promise<void> {
+  const row = await getCachedRow(tenantId);
+  if (!row.authFailedAt) return;
+
+  logger.info("[GMAIL] call skipped, mailbox authentication failed", {
+    tenantId,
+    incidentId: deriveIncidentId(tenantId, row.authFailedAt),
+    policyVersion: COOLDOWN_POLICY_VERSION,
+    fromState: "AUTH_FAILED",
+    toState: "AUTH_FAILED",
+    trigger: ctx.trigger,
+    operation: ctx.operation,
+    targetId: ctx.targetId,
+    authFailedAt: row.authFailedAt.toISOString(),
+    reason: row.authFailureReason,
+    blockedForMs: Date.now() - row.authFailedAt.getTime(),
+  });
+
+  throw new GmailAuthError(
+    tenantId,
+    `Gmail authentication failed for tenant ${tenantId}: ${row.authFailureReason ?? "unknown"}`,
+    401,
+  );
+}
+
+/**
+ * The single pre-flight gate for any Gmail call: operator pause, then dead
+ * credentials, then quota cooldown.
  *
  * Pause is checked FIRST and deliberately. A paused mailbox must make zero
  * calls regardless of its quota state — that is the whole point of the switch,
@@ -550,14 +631,25 @@ export async function assertNotCoolingDown(
  * is one where the mailbox is also cooling down. Checking cooldown first would
  * report the wrong reason for the skip.
  *
- * Both throw rather than returning a boolean, for the same reason: a caller
- * that forgets to check a return value silently makes the call.
+ * AUTH IS CHECKED BEFORE COOLDOWN, for the same "report the true reason"
+ * argument. A mailbox with dead credentials will usually also be carrying a
+ * cooldown; announcing "cooling down" for it describes a symptom and hides the
+ * cause, and the operator waits out a window that will never help.
+ *
+ * NOT GATED HERE: the authentication-recovery call in gmail-request.ts. That is
+ * the one operation which must run *during* a cooldown — gating it is precisely
+ * what deadlocked production on 2026-08-25 (cooldown → blocks refresh → token
+ * stays stale → 401 → cooldown). See the invariant comment in that file.
+ *
+ * All three throw rather than returning a boolean, for the same reason: a
+ * caller that forgets to check a return value silently makes the call.
  */
 export async function assertSyncAllowed(
   tenantId: string,
   ctx: GmailCallContext,
 ): Promise<void> {
   await assertNotPaused(tenantId, ctx);
+  await assertAuthHealthy(tenantId, ctx);
   await assertNotCoolingDown(tenantId, ctx);
 }
 

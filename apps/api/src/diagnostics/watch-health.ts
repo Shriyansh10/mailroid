@@ -24,6 +24,15 @@ export interface GmailCooldownStatus {
   blockedForMs: number | null;
   lastWebhookFailureAt: string | null;
   lastWebhookFailureReason: string | null;
+  /**
+   * Authentication is a separate failure mode from quota — see
+   * gmail-tenant-mappings.ts. A set value means corsair attempted a token
+   * refresh and it failed, so the mailbox is making no Gmail calls at all.
+   * Unlike a cooldown this does NOT lapse on its own: it clears only when a
+   * Gmail call succeeds, so it needs an operator, not patience.
+   */
+  gmailAuthFailedAt: string | null;
+  gmailAuthFailureReason: string | null;
 }
 
 export interface ActivePauseStatus {
@@ -108,6 +117,8 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
         quotaCooldownStartedAt: gmailTenantMappings.quotaCooldownStartedAt,
         lastWebhookFailureAt: gmailTenantMappings.lastWebhookFailureAt,
         lastWebhookFailureReason: gmailTenantMappings.lastWebhookFailureReason,
+        gmailAuthFailedAt: gmailTenantMappings.gmailAuthFailedAt,
+        gmailAuthFailureReason: gmailTenantMappings.gmailAuthFailureReason,
       })
       .from(gmailTenantMappings),
     db.select().from(syncPauses),
@@ -119,7 +130,11 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
       (r) =>
         r.quotaResumeFailures > 0 ||
         r.quotaCooldownUntil !== null ||
-        r.lastWebhookFailureAt !== null,
+        r.lastWebhookFailureAt !== null ||
+        // An auth-dead mailbox can have entirely clean quota columns — that is
+        // the whole point of the split — so it needs its own clause or it
+        // would be invisible here, which is how the incident stayed unexplained.
+        r.gmailAuthFailedAt !== null,
     )
     .map((r) => ({
       emailAddress: r.emailAddress,
@@ -131,6 +146,8 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
       blockedForMs: r.quotaCooldownStartedAt ? now - r.quotaCooldownStartedAt.getTime() : null,
       lastWebhookFailureAt: r.lastWebhookFailureAt?.toISOString() ?? null,
       lastWebhookFailureReason: r.lastWebhookFailureReason,
+      gmailAuthFailedAt: r.gmailAuthFailedAt?.toISOString() ?? null,
+      gmailAuthFailureReason: r.gmailAuthFailureReason,
     }));
 
   const watchExpiryByTenant = new Map(

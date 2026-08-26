@@ -31,6 +31,22 @@ export const gmailTenantMappings = pgTable(
     // as the seed for the derived per-episode incidentId in log lines.
     quotaCooldownStartedAt: timestamp("quota_cooldown_started_at", { withTimezone: true }),
 
+    // Authentication is a SEPARATE failure mode from quota, and conflating the
+    // two is what produced the 2026-08-25 outage: an expired access token came
+    // back as 401, was recorded on the quota ladder, and the resulting cooldown
+    // blocked the very SDK call that would have refreshed the token — once an
+    // hour, indefinitely. These columns exist so an auth failure has somewhere
+    // to live that is NOT quota_cooldown_until.
+    //
+    // Set only after corsair has actually attempted a refresh and failed
+    // (invalid_grant, revoked consent, missing client credentials), so a set
+    // value means "credentials are dead", never "we didn't try". Cleared by
+    // markGmailHealthy on any successful Gmail call. Surfaced by
+    // /api/_debug/watch-health as an operator signal — there is no user-facing
+    // reconnect flow to route it to.
+    gmailAuthFailedAt: timestamp("gmail_auth_failed_at", { withTimezone: true }),
+    gmailAuthFailureReason: text("gmail_auth_failure_reason"),
+
     // Durable webhook health. The /api/webhook route acks 200 even when
     // processing failed (a non-2xx makes Pub/Sub redeliver every ~15s for
     // 7 days, which amplifies a fault instead of fixing it — see

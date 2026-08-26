@@ -7,9 +7,9 @@ import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-ma
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { syncHistoryForTenant } from "@repo/services/gmail/webhook-sync.js";
 import {
+  classifyGmailFailure,
   getCooldown,
-  isQuotaError,
-  recordQuotaError,
+  handleGmailFailure,
   recordWebhookFailure,
   clearWebhookFailure,
 } from "@repo/services/gmail/quota-cooldown.js";
@@ -282,31 +282,46 @@ export async function handleCorsairWebhook(req: {
     // cannot repair a fault in our handler — it just replays it every ~15s for
     // 7 days, turning one bad request into a sustained load. Retrying is our
     // job, on our schedule, not Google's.
-    const quota = isQuotaError(err);
-    let retryAfter: Date | undefined;
+    // Classify once, here, and let handleGmailFailure decide what to write. It
+    // used to call recordQuotaError directly behind an isQuotaError check —
+    // correct, but the check was the caller's to remember, and the one caller
+    // that forgot (cooldown-resume-cron) deadlocked production for four days.
+    // recordQuotaError is now private precisely so this cannot drift again.
+    const kind = classifyGmailFailure(err);
+    const quota = kind === "quota";
 
     // Both writes target gmail_tenant_mappings, so they are keyed on the Gmail
     // tenant only. A calendar-only push has no row there and would silently
     // update nothing.
     if (tenantId) {
-      if (quota) {
-        retryAfter = await recordQuotaError(tenantId, err, {
-          trigger: "webhook",
-          operation: "processWebhook",
-          targetId: incomingHistoryId,
-        }).catch(() => undefined);
-      }
+      await handleGmailFailure(tenantId, err, {
+        trigger: "webhook",
+        operation: "processWebhook",
+        targetId: incomingHistoryId,
+      }).catch(() => {});
+
       // Durable health, because acking removed the 500 that used to announce a
       // broken mailbox and an error log is the only other trace — and logs
       // rotate. This is what /api/_debug/watch-health reads.
       await recordWebhookFailure(
         tenantId,
-        quota ? "GMAIL_429" : String(describeError(err)).slice(0, 300),
+        quota
+          ? "GMAIL_429"
+          : kind === "auth"
+            ? "GMAIL_AUTH_FAILED"
+            : String(describeError(err)).slice(0, 300),
       ).catch(() => {});
     }
 
+    // retryAfter is read back from the cooldown row rather than returned by the
+    // recorder: handleGmailFailure deliberately has no return value, because a
+    // caller that needs one is a caller tempted to branch on the failure kind
+    // itself.
+    const retryAfter = quota && tenantId ? (await getCooldown(tenantId))?.until : undefined;
+
     console.error("[webhook] processWebhook failed (acking 200 to stop redelivery)", {
       tenantId: activeTenant,
+      kind,
       quota,
       retryAfter: retryAfter?.toISOString(),
       error: JSON.stringify(describeError(err)),
