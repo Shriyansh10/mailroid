@@ -2,9 +2,9 @@ import { corsair } from "@repo/corsair";
 import { type EnsureTenantInputType, ensureTenantInput,type AuthorizePluginsInputType, type AuthorizePluginsOutputType, authorizePluginsInput, type GetGmailOAuthUrlOutput, type GetCalendarOAuthUrlOutput, type ConnectedPluginsOutput, type ConnectedAccountsOutput, type GetAccountsExistOutput } from "./model.ts";
 import { setupCorsair } from "corsair";
 import { generateOAuthUrl, processOAuthCallback } from "corsair/oauth";
-import { db, eq } from "@repo/database";
+import { and, db, eq, inArray } from "@repo/database";
 import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
-import { corsairAccounts, corsairIntegrations } from "@repo/database/models/corsair";
+import { corsairAccounts, corsairEntities, corsairEvents, corsairIntegrations } from "@repo/database/models/corsair";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { gmailRequestWithAuthRecovery } from "../gmail/gmail-request.ts";
@@ -164,9 +164,59 @@ export async function storeGmailConnectedEmail(userId: string): Promise<string |
     console.log("[storeGmailConnectedEmail] ✅ stored:", email);
     return email;
   } catch (err) {
+    // DO NOT SWALLOW. This used to `return null`, and the caller had no way to
+    // tell "no address in the profile" from "Google refused the call" — so a
+    // transient 429 here produced a tenant with a stored OAuth token, no
+    // gmail_tenant_mappings row, and a UI that said "Connected ✓" because
+    // getAccountsExist only ever looked at corsair_accounts.
+    //
+    // That state could not self-heal: both bootstrapGmailWatches and
+    // gmailWatchCron pick their candidates FROM gmail_tenant_mappings, so a
+    // mailbox with no row is invisible to every retry path in the system.
+    // It stayed broken until someone reconnected by hand.
     console.error("[storeGmailConnectedEmail] ❌ FAILED:", err);
-    return null;
+    throw err;
   }
+}
+
+/**
+ * Undo a partial Gmail connection.
+ *
+ * processOAuthCallbackForPlugin writes the corsair account (the encrypted
+ * token) before anything else runs, so a later failure leaves that row behind
+ * on its own. getAccountsExist reads exactly that row, which is what made a
+ * failed connect present as a successful one.
+ *
+ * Deletes children first: corsair_entities and corsair_events reference
+ * corsair_accounts with NO ACTION, not CASCADE, so the parent delete errors out
+ * if they are still present. On a fresh connect there are none — the sync has
+ * not run yet — but this is also reachable from a reconnect over an account
+ * that already synced.
+ */
+export async function rollbackGmailConnection(userId: string): Promise<void> {
+  const accounts = await db
+    .select({ id: corsairAccounts.id })
+    .from(corsairAccounts)
+    .innerJoin(corsairIntegrations, eq(corsairAccounts.integrationId, corsairIntegrations.id))
+    .where(and(eq(corsairAccounts.tenantId, userId), eq(corsairIntegrations.name, "gmail")));
+
+  if (accounts.length === 0) return;
+
+  const ids = accounts.map((a) => a.id);
+
+  await db.delete(corsairEvents).where(inArray(corsairEvents.accountId, ids));
+  await db.delete(corsairEntities).where(inArray(corsairEntities.accountId, ids));
+  await db.delete(corsairAccounts).where(inArray(corsairAccounts.id, ids));
+
+  // The mapping/email rows are only written on the success path, but a
+  // reconnect over an existing connection may have refreshed them already.
+  await db.delete(gmailTenantMappings).where(eq(gmailTenantMappings.tenantId, userId));
+  await db
+    .update(corsairConnectionEmails)
+    .set({ gmailEmail: null, updatedAt: new Date() })
+    .where(eq(corsairConnectionEmails.userId, userId));
+
+  console.log("[rollbackGmailConnection] rolled back partial Gmail connection for", userId);
 }
 
 /**
@@ -282,9 +332,31 @@ export async function getAccountsExist(userId: string): Promise<GetAccountsExist
 
   const names = new Set(rows.map((r) => r.name));
 
+  // A stored OAuth token is NOT a working connection. corsair_accounts is
+  // written first in the callback, so on its own it goes true the moment the
+  // token lands — before the mailbox is mapped and before the watch exists.
+  // Reporting that as "connected" is what put a green tick above a mailbox the
+  // rest of the system could not see: no gmail_tenant_mappings row means no
+  // webhook can resolve a tenant and no watch cron can find it to renew.
+  //
+  // The mapping row is the honest signal, so require both. This also repairs
+  // accounts already stranded in the half-connected state — they flip back to
+  // false and the UI offers Connect again, rather than insisting they are fine.
+  const [gmailMapping] = await db
+    .select({ tenantId: gmailTenantMappings.tenantId })
+    .from(gmailTenantMappings)
+    .where(eq(gmailTenantMappings.tenantId, userId))
+    .limit(1);
+
+  const [calendarMapping] = await db
+    .select({ tenantId: calendarTenantMappings.tenantId })
+    .from(calendarTenantMappings)
+    .where(eq(calendarTenantMappings.tenantId, userId))
+    .limit(1);
+
   return {
-    gmail: names.has("gmail"),
-    calendar: names.has("googlecalendar"),
+    gmail: names.has("gmail") && Boolean(gmailMapping),
+    calendar: names.has("googlecalendar") && Boolean(calendarMapping),
   };
 }
 

@@ -3,6 +3,7 @@ import { z, zodUndefinedModel } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
 import { corsair, getTenant } from "@repo/corsair";
+import { withGmailRetry } from "@repo/services/gmail/retry.js";
 
 import { authOutputSchema } from "@repo/shared";
 import { authorizePlugins, ensureTenant, getGmailOAuthUrl, getCalendarOAuthUrl, getConnectedPlugins, getConnectedAccounts, getAccountsExist } from "../../../services/index.js";
@@ -25,7 +26,11 @@ export const authRouter = router({
     .output(z.any())
     .query(async ({ ctx }) => {
         const tenant = corsair.withTenant(ctx.user.id);
-        const result = await tenant.gmail.api.messages.list({ maxResults: 10 });
+        const result = await withGmailRetry<unknown>(
+          "messages.list",
+          () => tenant.gmail.api.messages.list({ maxResults: 10 }),
+          { tenantId: ctx.user.id, trigger: "ui" },
+        );
         return result;
     }),
 
