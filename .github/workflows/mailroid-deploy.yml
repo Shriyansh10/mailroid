@@ -39,6 +39,20 @@ jobs:
           source: "Caddyfile"
           target: "~/mailroid"
 
+      # Same pattern as the Caddyfile: config that lives in the repo but is
+      # mounted into a container, so it has to exist on the box before the
+      # container starts. Without this the Alloy run below mounts a path that
+      # does not exist and the collector comes up with no pipeline at all.
+      - name: Copy Alloy config to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          source: "alloy/config.alloy"
+          target: "~/mailroid"
+
       - name: Deploy to VPS over SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -102,6 +116,43 @@ jobs:
               echo "Migrations complete."
             else
               echo "Skipping DB migrations (run_migrations=false)."
+            fi
+
+            # Telemetry collector, and the ONLY process holding Grafana Cloud
+            # credentials. Started BEFORE the app containers so their first log
+            # lines have somewhere to land — the app tolerates a dead collector,
+            # but there is no reason to hand it one on every deploy.
+            #
+            # Skipped entirely when GRAFANA_CLOUD_OTLP_ENDPOINT is unset, so a
+            # deploy to a box with no telemetry configured is unchanged. The app
+            # side is gated the same way on OTEL_EXPORTER_OTLP_ENDPOINT.
+            #
+            # --memory 160m matches docker-compose.yml. NO --memory-swap, in
+            # line with the rest of this workflow: adding swap to this box later
+            # then becomes a cushion rather than a silent no-op. The in-process
+            # memory_limiter sits BELOW this at 120MiB so Alloy sheds batches
+            # instead of being OOM-killed with a full queue.
+            #
+            # 160m is an INITIAL CAP, NOT A PROVEN SAFE VALUE. Verify under real
+            # load before trusting it:  docker stats mailroid-alloy
+            if grep -q '^GRAFANA_CLOUD_OTLP_ENDPOINT=.' ~/mailroid/.env; then
+              docker pull grafana/alloy:latest
+              docker stop mailroid-alloy || true
+              docker rm mailroid-alloy || true
+              docker run -d --restart unless-stopped \
+                --log-opt max-size=10m --log-opt max-file=3 \
+                --network mailroid-net \
+                --memory 160m \
+                --env-file ~/mailroid/.env \
+                -v ~/mailroid/alloy/config.alloy:/etc/alloy/config.alloy:ro \
+                -v mailroid_alloy_data:/var/lib/alloy/data \
+                --name mailroid-alloy \
+                grafana/alloy:latest \
+                  run --server.http.listen-addr=0.0.0.0:12345 \
+                      --storage.path=/var/lib/alloy/data \
+                      /etc/alloy/config.alloy
+            else
+              echo "GRAFANA_CLOUD_OTLP_ENDPOINT unset — skipping Alloy."
             fi
 
             docker stop mailroid-api || true

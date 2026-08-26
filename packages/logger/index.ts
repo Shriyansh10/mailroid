@@ -2,6 +2,7 @@ import { randomBytes } from "node:crypto";
 import winston from "winston";
 import { env } from "./env.ts";
 import { isTestRun, resolveLogFile } from "./log-root.ts";
+import { initTelemetry } from "./otel.ts";
 import { createRollup, formatDuration } from "./rollup.ts";
 import type {
   Rollup,
@@ -156,6 +157,19 @@ logger.info("[LOGGER] run started", {
   hashSecret: process.env.LOG_HASH_SECRET ? "set" : "MISSING — mailbox digests disabled",
 });
 
+/**
+ * Start shipping logs, if telemetry is configured. Safe to call more than once
+ * and safe to call when it is not configured, in which case it returns false
+ * and changes nothing.
+ *
+ * Call it from a boot path alongside the other config assertions — never at
+ * module scope, and never lazily on the first log line.
+ */
+export async function startTelemetry(): Promise<boolean> {
+  return initTelemetry(logger);
+}
+
+export { readTelemetryConfig, sanitiseValue, shutdownTelemetry } from "./otel.ts";
 export { errorFields } from "./error-fields.ts";
 export { hashMailbox, hashMailboxList, preview } from "./pii.ts";
 export { createRollup, formatDuration };

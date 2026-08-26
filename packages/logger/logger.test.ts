@@ -20,6 +20,7 @@ import path from "node:path";
 
 import { findLogRoot, isTestRun, resolveLogFile } from "./log-root.ts";
 import { logFilePath, runId } from "./index.ts";
+import { readTelemetryConfig, sanitiseValue, shutdownTelemetry } from "./otel.ts";
 import { errorFields } from "./error-fields.ts";
 import { inspect } from "./check-log-file.ts";
 import { createRollup, formatDuration } from "./rollup.ts";
@@ -786,4 +787,126 @@ test("failures and successes accumulate into one window consistently", () => {
   assert.equal(meta.errors, 1);
   assert.equal(meta.quotaUnits, 8);
   assert.match(h.emitted[0]!.message, /degraded/, "any error degrades the window");
+});
+
+// ── telemetry config: required when enabled, never defaulted ─────────
+
+test("telemetry is off, and silent, when no endpoint is set", () => {
+  assert.equal(readTelemetryConfig({}), null);
+  assert.equal(readTelemetryConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "   " }), null);
+});
+
+test("enabling telemetry without a service name or environment throws at boot", () => {
+  assert.throws(
+    () => readTelemetryConfig({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318" }),
+    /OTEL_SERVICE_NAME and DEPLOYMENT_ENVIRONMENT/,
+    "dev and prod in one Grafana stack with no distinguishing label is the bug this prevents",
+  );
+
+  assert.throws(
+    () =>
+      readTelemetryConfig({
+        OTEL_EXPORTER_OTLP_ENDPOINT: "http://alloy:4318",
+        OTEL_SERVICE_NAME: "mailroid-api",
+      }),
+    /DEPLOYMENT_ENVIRONMENT is not/,
+  );
+});
+
+test("a complete telemetry config is read as given", () => {
+  assert.deepEqual(
+    readTelemetryConfig({
+      OTEL_EXPORTER_OTLP_ENDPOINT: "http://mailroid-alloy:4318",
+      OTEL_SERVICE_NAME: "mailroid-api",
+      DEPLOYMENT_ENVIRONMENT: "prod",
+    }),
+    {
+      endpoint: "http://mailroid-alloy:4318",
+      serviceName: "mailroid-api",
+      environment: "prod",
+    },
+  );
+});
+
+// ── sanitisation, in the app, before anything leaves the process ─────
+//
+// Alloy gets its own attribute rule as a second layer. Neither is trusted
+// alone: this one exists so raw mail content never reaches the collector at
+// all, rather than being stripped after it has already left.
+
+test("recipient-shaped keys become digests, and keep no address", () => {
+  const out = sanitiseValue({ to: "someone@gmail.com", cc: "other@x.com" }) as Record<string, unknown>;
+
+  assert.equal(out.to, undefined, "the original key must not survive");
+  assert.ok(typeof out.toHash === "string");
+  assert.ok(!JSON.stringify(out).includes("@"), "no address anywhere in the output");
+  assert.ok(typeof out.ccHash === "string");
+});
+
+test("content-shaped keys become lengths, never content", () => {
+  const out = sanitiseValue({ subject: "Q3 numbers", snippet: "hello there" }) as Record<string, unknown>;
+
+  assert.equal(out.subject, undefined);
+  assert.equal(out.subjectLength, 10);
+  assert.equal(out.snippetLength, 11);
+  assert.ok(!JSON.stringify(out).includes("Q3 numbers"));
+});
+
+test("an address interpolated into a message string is caught too", () => {
+  // The backfill-priority.ts failure: no key-based rule can reach this.
+  const out = sanitiseValue("[BACKFILL] classifying mail from someone@gmail.com now") as string;
+
+  assert.ok(!out.includes("someone@gmail.com"));
+  assert.match(out, /^\[BACKFILL\] classifying mail from <.+> now$/);
+});
+
+test("ordinary diagnostic fields pass through untouched", () => {
+  const out = sanitiseValue({
+    tenantId: "abc123",
+    operation: "history.list",
+    trigger: "webhook",
+    attempts: 5,
+    ok: false,
+  });
+
+  assert.deepEqual(out, {
+    tenantId: "abc123",
+    operation: "history.list",
+    trigger: "webhook",
+    attempts: 5,
+    ok: false,
+  });
+});
+
+test("nested and arrayed meta is sanitised at depth", () => {
+  const out = sanitiseValue({
+    batch: [{ to: "a@x.com" }, { subject: "Q3-CONFIDENTIAL" }],
+    ctx: { inner: { sender: "b@y.com" } },
+  });
+
+  const json = JSON.stringify(out);
+  assert.ok(!json.includes("a@x.com"));
+  assert.ok(!json.includes("b@y.com"));
+  // NB: the no-secret marker is literally "<no-hash-secret>", so asserting on
+  // the word "secret" here would fail against correct output. Use a token that
+  // can only have come from the input.
+  assert.ok(!json.includes("Q3-CONFIDENTIAL"));
+  assert.ok(json.includes("subjectLength"), "dropped, but its shape is still reported");
+});
+
+test("pathological meta is depth-limited rather than allowed to recurse", () => {
+  // A cycle must not turn a log call into a stack overflow.
+  const cyclic: Record<string, unknown> = { tenantId: "t1" };
+  cyclic.self = cyclic;
+
+  const out = JSON.stringify(sanitiseValue(cyclic));
+  assert.ok(out.includes("depth-limited"));
+  assert.ok(out.includes("t1"));
+});
+
+test("shutting down telemetry that was never started is safe", async () => {
+  // Reachable on every shutdown path, including in dev where telemetry is off
+  // and on a boot that failed before startTelemetry ran.
+  await assert.doesNotReject(() => shutdownTelemetry());
+  await assert.doesNotReject(() => shutdownTelemetry());
 });
