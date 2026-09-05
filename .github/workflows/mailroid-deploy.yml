@@ -155,12 +155,20 @@ jobs:
               echo "GRAFANA_CLOUD_OTLP_ENDPOINT unset — skipping Alloy."
             fi
 
+            # OTEL_SERVICE_NAME is forced here with -e, which docker applies
+            # AFTER --env-file and so always wins on a duplicate key. Both
+            # containers share the one ~/mailroid/.env, so leaving this to the
+            # file would give api and web the same service name in Grafana —
+            # their logs would be inseparable by service_name, only by reading
+            # message text. Whatever OTEL_SERVICE_NAME is set to in .env is
+            # therefore irrelevant to these two containers by design.
             docker stop mailroid-api || true
             docker rm mailroid-api || true
             docker run -d --restart unless-stopped \
               --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
+              -e OTEL_SERVICE_NAME=mailroid-api \
               --name mailroid-api \
               ${REGISTRY}/mailroid-api:${TAG}
 
@@ -170,6 +178,7 @@ jobs:
               --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
+              -e OTEL_SERVICE_NAME=mailroid-web \
               --name mailroid-web \
               ${REGISTRY}/mailroid-web:${TAG}
 
