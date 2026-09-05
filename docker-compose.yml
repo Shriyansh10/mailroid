@@ -44,5 +44,46 @@ services:
       # the same compose file working on native Linux, where it doesn't exist.
       - "host.docker.internal:host-gateway"
 
+  # Telemetry collector. Runs in dev too, deliberately: a pipeline first
+  # exercised in production is a pipeline nobody has tested, and the redaction
+  # rules in particular are worth being wrong about locally rather than at a
+  # vendor.
+  #
+  # PUBLISHES 4318 TO THE HOST, unlike prod. `pnpm dev` runs the API on the host
+  # rather than in this network, so it dials http://localhost:4318 here, while
+  # on the VPS every container is on mailroid-net and dials
+  # http://mailroid-alloy:4318 instead.
+  #
+  # Entirely optional locally: with OTEL_EXPORTER_OTLP_ENDPOINT unset the app
+  # never opens a socket, so `docker compose up postgresdb inngest` remains a
+  # complete dev environment and this container can simply not be started.
+  alloy:
+    image: grafana/alloy:latest
+    container_name: mailroid-alloy
+    restart: unless-stopped
+    # Matches the prod cap so dev exercises the same ceiling. See config.alloy
+    # for why the in-process limiter sits below this number rather than at it.
+    mem_limit: 160m
+    command:
+      - run
+      - --server.http.listen-addr=0.0.0.0:12345
+      - --storage.path=/var/lib/alloy/data
+      - /etc/alloy/config.alloy
+    ports:
+      - "4318:4318"
+      # Alloy's own UI — the fastest way to see whether anything is arriving.
+      - "12345:12345"
+    volumes:
+      - ./alloy/config.alloy:/etc/alloy/config.alloy:ro
+      - alloy_data:/var/lib/alloy/data
+    environment:
+      # Alloy only. The application never reads these and must never be given
+      # them: the whole point of the collector is that one process holds the
+      # vendor credentials.
+      GRAFANA_CLOUD_OTLP_ENDPOINT: ${GRAFANA_CLOUD_OTLP_ENDPOINT}
+      GRAFANA_CLOUD_INSTANCE_ID: ${GRAFANA_CLOUD_INSTANCE_ID}
+      GRAFANA_CLOUD_API_TOKEN: ${GRAFANA_CLOUD_API_TOKEN}
+
 volumes:
   pg_data:
+  alloy_data:

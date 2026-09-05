@@ -2,6 +2,8 @@ import { db } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { syncPauses } from "@repo/database/models/sync-pauses";
+import { mailroidEnv } from "@repo/services/env.js";
+import { unmappedPushSnapshot, type UnmappedPushSnapshot } from "./unmapped-push-counter.js";
 
 const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h — matches the watch crons
 
@@ -33,6 +35,42 @@ export interface GmailCooldownStatus {
    */
   gmailAuthFailedAt: string | null;
   gmailAuthFailureReason: string | null;
+  /** P-2/P-9, docs/gmail-rate-limit-boundary.md §13 — see `orphans` below. */
+  watchTopic: string | null;
+  watchOwnerEnv: string | null;
+  /**
+   * P-3, docs/gmail-rate-limit-boundary.md §13. Set when a webhook diff hit a
+   * 404 (history retention window passed) instead of firing an automatic full
+   * sync. True here means this mailbox needs a DELIBERATE, budgeted resync —
+   * `pnpm admin gmail:resync <mailbox>` — not that anything is actively wrong
+   * right now; the mailbox keeps receiving new mail via its (correctly
+   * advanced) cursor in the meantime, it just missed whatever changed inside
+   * the unrecoverable window.
+   */
+  resyncRequired: boolean;
+  resyncRequiredAt: string | null;
+}
+
+/**
+ * A mapping this environment's own database holds, whose recorded
+ * `watchOwnerEnv` names a DIFFERENT environment than the one running this
+ * query — the detector of last resort for P-1's residual risk. Local and
+ * production run separate databases (that's the whole reason the allowlist
+ * has to be config, not a shared table), so neither side can see the other's
+ * claim directly; this is what "the mailbox got reconnected here after
+ * MAILROID_ENV or the allowlist changed underneath it" looks like from the
+ * inside — a stale ownership marker on a row THIS process still holds.
+ *
+ * A `null` watchOwnerEnv is NOT an orphan: it means no watch has been
+ * (re-)registered since P-2 shipped the column, which `missing` in the
+ * bucket above already surfaces.
+ */
+export interface WatchOrphan {
+  emailAddress: string;
+  tenantId: string;
+  watchTopic: string | null;
+  watchOwnerEnv: string;
+  thisEnvironment: string;
 }
 
 export interface ActivePauseStatus {
@@ -64,6 +102,12 @@ export interface WatchHealthReport {
   // Active operator pauses. A mailbox that is "not syncing" is far more often
   // paused on purpose than broken, and without this the two look identical.
   activePauses: ActivePauseStatus[];
+  // P-9: answers U-1 permanently, without a tunnel — see WatchOrphan above.
+  orphans: WatchOrphan[];
+  // P-2: the countable replacement for the unmapped-push `warn` that used to
+  // scroll past. Non-zero since boot means Gmail is pushing for a mailbox
+  // this process cannot resolve — the exact shape of §9.2's incident.
+  unmappedPushes: UnmappedPushSnapshot;
 }
 
 function bucket(expirations: Array<Date | null>): WatchHealthBucket {
@@ -119,6 +163,10 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
         lastWebhookFailureReason: gmailTenantMappings.lastWebhookFailureReason,
         gmailAuthFailedAt: gmailTenantMappings.gmailAuthFailedAt,
         gmailAuthFailureReason: gmailTenantMappings.gmailAuthFailureReason,
+        watchTopic: gmailTenantMappings.watchTopic,
+        watchOwnerEnv: gmailTenantMappings.watchOwnerEnv,
+        resyncRequired: gmailTenantMappings.resyncRequired,
+        resyncRequiredAt: gmailTenantMappings.resyncRequiredAt,
       })
       .from(gmailTenantMappings),
     db.select().from(syncPauses),
@@ -134,7 +182,10 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
         // An auth-dead mailbox can have entirely clean quota columns — that is
         // the whole point of the split — so it needs its own clause or it
         // would be invisible here, which is how the incident stayed unexplained.
-        r.gmailAuthFailedAt !== null,
+        r.gmailAuthFailedAt !== null ||
+        // P-3: a mailbox waiting on a deliberate resync is worth seeing here
+        // too, even though nothing about it is actively broken.
+        r.resyncRequired,
     )
     .map((r) => ({
       emailAddress: r.emailAddress,
@@ -148,6 +199,24 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
       lastWebhookFailureReason: r.lastWebhookFailureReason,
       gmailAuthFailedAt: r.gmailAuthFailedAt?.toISOString() ?? null,
       gmailAuthFailureReason: r.gmailAuthFailureReason,
+      watchTopic: r.watchTopic,
+      watchOwnerEnv: r.watchOwnerEnv,
+      resyncRequired: r.resyncRequired,
+      resyncRequiredAt: r.resyncRequiredAt?.toISOString() ?? null,
+    }));
+
+  // P-9 orphan detection — see WatchOrphan's doc comment. A null
+  // watchOwnerEnv (no watch registered since P-2) is excluded on purpose:
+  // that is "missing", not "wrong owner", and the bucket above already
+  // reports it.
+  const orphans: WatchOrphan[] = cooldownRows
+    .filter((r) => r.watchOwnerEnv !== null && r.watchOwnerEnv !== mailroidEnv.env)
+    .map((r) => ({
+      emailAddress: r.emailAddress,
+      tenantId: r.tenantId,
+      watchTopic: r.watchTopic,
+      watchOwnerEnv: r.watchOwnerEnv as string,
+      thisEnvironment: mailroidEnv.env,
     }));
 
   const watchExpiryByTenant = new Map(
@@ -182,5 +251,7 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
     calendar: bucket(calendarRows.map((r) => r.watchExpiration)),
     gmailCooldowns,
     activePauses,
+    orphans,
+    unmappedPushes: unmappedPushSnapshot(),
   };
 }

@@ -38,6 +38,12 @@ yarn-debug.log*
 yarn-error.log*
 dev.log
 
+# Winston's file transport. Historically landed in four different places,
+# because the path was CWD-relative and the log went wherever the process
+# started. The path is pinned now; the glob stays deliberately broad.
+logs/
+**/logs/
+
 # Scratch / ad-hoc scripts, not part of the product
 packages/services/scratch/
 
@@ -51,10 +57,16 @@ chatgpt*
 
 graphify*
 
-# Internal working notes, not part of the product
-PRODUCT-AUDIT.md*
-BUGS.md*
-FUTURE_IMPLEMENTATIONS.md*
-SECURITY*
-DESIGN*
+# Internal working notes, not part of the product.
+#
+# One folder rather than a growing list of root filenames — the old block
+# ignored PRODUCT-AUDIT.md, BUGS.md, FUTURE_IMPLEMENTATIONS.md, SECURITY* and
+# DESIGN* individually, which meant every new note either landed at the repo
+# root or got committed by accident. See notes/README.md for what belongs in
+# reference/ vs incidents/ vs followups/, and for the promotion rule.
+#
+# NOTE: notes/incidents/ can contain raw mailbox addresses and message
+# metadata. It is ignored on purpose and must stay that way.
+notes/
+
 CLAUDE*

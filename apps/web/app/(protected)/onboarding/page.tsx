@@ -121,23 +121,27 @@ export default function OnboardingPage() {
   const [proceeding, setProceeding] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Merge server-side account state (ground truth) into localStorage + UI state.
-  // Runs once when the accounts query resolves.
+  // The server REPLACES local state; it does not merge into it.
+  //
+  // This used to union the two (`new Set(local)` then `.add()`), which meant a
+  // plugin could only ever go from disconnected to connected. Once "gmail" was
+  // in localStorage nothing could take it out — not a failed reconnect, not a
+  // purged database, not the server explicitly answering `gmail: false`. A
+  // browser that had connected once showed "Connected ✓" forever.
+  //
+  // localStorage is a cache for the first paint, nothing more. Whenever the
+  // server has spoken, it wins in both directions.
   const serverMerged = useRef(false);
   useEffect(() => {
     if (serverMerged.current || accountsLoading || !serverAccounts) return;
     serverMerged.current = true;
 
-    const local = loadPersisted();
-    const merged = new Set(local);
-    if (serverAccounts.gmail) merged.add("gmail");
-    if (serverAccounts.calendar) merged.add("googlecalendar");
-    const mergedArr = Array.from(merged) as PluginName[];
+    const authoritative: PluginName[] = [];
+    if (serverAccounts.gmail) authoritative.push("gmail");
+    if (serverAccounts.calendar) authoritative.push("googlecalendar");
 
-    if (mergedArr.length !== local.length) {
-      persist(mergedArr);
-      setConnectedPlugins(mergedArr);
-    }
+    persist(authoritative);
+    setConnectedPlugins(authoritative);
   }, [serverAccounts, accountsLoading]);
 
   // On mount: handle OAuth callback params, then clean the URL.

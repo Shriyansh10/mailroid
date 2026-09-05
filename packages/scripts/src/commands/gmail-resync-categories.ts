@@ -79,7 +79,11 @@ export default defineCommand({
       // folder) doesn't abandon the categories after it — same reasoning as
       // syncMailbox's per-category try/catch.
       try {
-        const processed = await syncAllEmails(userId, category);
+        // force: true — same reasoning as gmail:resync (P-4,
+        // docs/gmail-rate-limit-boundary.md §13): an operator naming a
+        // category to refresh means refresh it, not "skip whatever Gmail's
+        // diff says is unchanged."
+        const processed = await syncAllEmails(userId, category, 0, undefined, true);
         results.push([category, processed]);
         out.success(`${category}: ${processed} message(s)`);
       } catch (err) {

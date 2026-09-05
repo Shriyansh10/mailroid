@@ -65,6 +65,9 @@ function harness(opts: {
         if (!r) throw new Error(`unexpected fetch #${calls.fetch}`);
         return r;
       }) as unknown as typeof fetch,
+      // P-5a: no database in this suite (see the file header) — undefined is
+      // also a legitimate resolver outcome (bucketKey falls back to tenantId).
+      resolveMailbox: async () => undefined,
     },
   };
 }
@@ -240,6 +243,52 @@ test("the module does not import any gate, structurally", async () => {
       `gmail-request.ts must not use ${gate}: gating authentication recovery is the deadlock`,
     );
   }
+});
+
+test("the refresh path charges quota and never acquires it", async () => {
+  // THE NEW WAY TO REBUILD THE DEADLOCK. The whole-file ban above cannot cover
+  // acquireQuota, because the ordinary request path legitimately needs it — so
+  // the guard has to be scoped to refreshTenantToken specifically. The tempting
+  // "make this consistent with the rest of the module" edit is exactly the bug:
+  // an auth warm-up queued behind a background sync is the old cycle in slower
+  // motion.
+  const source = await readFile(new URL("./gmail-request.ts", import.meta.url), "utf8");
+  const start = source.indexOf("async function refreshTenantToken(");
+  assert.ok(start > 0, "refreshTenantToken not found — was it renamed?");
+
+  // Slice to the next top-level declaration.
+  const rest = source.slice(start + 1);
+  const endRel = rest.search(/\n(?:export )?(?:async )?function |\nexport (?:const|interface) /);
+  const body = (endRel === -1 ? rest : rest.slice(0, endRel)).replace(
+    /\/\*[\s\S]*?\*\/|\/\/.*$/gm,
+    "",
+  );
+
+  assert.ok(body.includes("chargeFn("), "the warm-up must charge quota — it spends a real unit");
+  assert.ok(
+    !body.includes("acquireQuota") && !body.includes("acquireFn("),
+    "refreshTenantToken must never WAIT for quota: that is the deadlock, rebuilt",
+  );
+});
+
+test("the limiter cannot smuggle a gate in through its own imports", async () => {
+  // gmail-request.ts is only as ungated as the modules it imports. quota-limiter
+  // is now one of them, so its dependency budget is part of this module's
+  // invariant rather than a stylistic preference — a transitive import of
+  // quota-cooldown would reintroduce everything the scan above forbids.
+  const source = await readFile(new URL("./quota-limiter.ts", import.meta.url), "utf8");
+  const code = source.replace(/\/\*[\s\S]*?\*\/|\/\/.*$/gm, "");
+
+  const imports = [...code.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+  const allowed = new Set(["@repo/logger", "./gmail-errors.ts"]);
+
+  for (const specifier of imports) {
+    assert.ok(
+      allowed.has(specifier),
+      `quota-limiter.ts must not import ${specifier} — it is imported by the ungated auth path`,
+    );
+  }
+  assert.ok(imports.length > 0, "expected to find some imports; did the regex stop matching?");
 });
 
 test("non-401 error statuses are returned untouched for the caller to handle", async () => {

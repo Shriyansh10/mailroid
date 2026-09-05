@@ -5,7 +5,7 @@ import { db, eq, sql, and, or, ilike, gte, inArray, desc } from "@repo/database"
 import { emails } from "@repo/database/models/emails";
 import { user } from "@repo/database/models/auth";
 import { messageMetadata } from "@repo/database/models/message-metadata";
-import { logger } from "@repo/logger";
+import { hashMailboxList, logger } from "@repo/logger";
 import { getProtectedConfig } from "../profile/index.ts";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { partitionSearchResults } from "./model.ts";
@@ -13,6 +13,7 @@ import {
   CATEGORY_TAB_LABELS,
   deriveCategory,
   deriveFlags,
+  mapWithConcurrency,
   upsertMessageMetadata,
 } from "./sync-metadata.ts";
 import { normalizeMessageId } from "./message-id.ts";
@@ -304,7 +305,11 @@ export async function getThreads(
     `threads.list ${tenantId}`,
     () =>
       tenant.gmail.api.threads.list({
-        maxResults: opts?.maxResults ?? 20,
+        // Capped at 25. Each thread costs a 40-unit threads.get in the
+        // fan-out below, so an uncapped 100-result search would spend
+        // 4,000 units — two-thirds of a mailbox's per-minute budget on a
+        // single keystroke's worth of search.
+        maxResults: Math.min(opts?.maxResults ?? 20, 25),
         pageToken: opts?.pageToken,
         labelIds: ["INBOX"],
       }),
@@ -322,28 +327,32 @@ export async function getThreads(
 
   // Step 2: Fetch metadata for each thread in parallel
   const threadGetStart = Date.now();
-  const detailed = await Promise.all(
-    threadStubs.map((t: { id?: string }) =>
-      withGmailRetry<Record<string, unknown>>(
-        `threads.get ${t.id}`,
-        () =>
-          tenant.gmail.api.threads.get({
-            id: t.id!,
-            format: "metadata",
-          }),
-        { tenantId, trigger: "ui" },
-      )
-    )
+  // BOUNDED, not Promise.all. threads.get is 40 quota units, so 20 threads is
+  // 800 units in one breath and 100 would be 4,000 — the last reservation of
+  // which lands ~53s out and would be refused outright on the 2s "ui" cap.
+  // Unbounded fan-out turns the interactive cap into a partial-failure machine.
+  //
+  // mapWithConcurrency swallows per-item errors, which is exactly right here:
+  // a paced-out thread renders unenriched instead of failing the whole page.
+  const detailed = await mapWithConcurrency(threadStubs, 4, (t: { id?: string }) =>
+    withGmailRetry<Record<string, unknown>>(
+      `threads.get ${t.id}`,
+      () => tenant.gmail.api.threads.get({ id: t.id!, format: "metadata" }),
+      { tenantId, trigger: "ui" },
+    ),
   );
   logger.info("[GMAIL] threads.get batch (getThreads)", {
     tenantId, threadCount: detailed.length, durationMs: Date.now() - threadGetStart,
   });
 
   // Step 3: Transform to ThreadSummary[]
-  const threads = detailed.map((t: Record<string, unknown>) =>{
-      return extractThreadSummary(t as Record<string, unknown>)
-    }
-  );
+  // A thread that failed or was paced out arrives here as undefined —
+  // mapWithConcurrency isolates per-item failures rather than rejecting the
+  // whole page. Dropping it degrades the list by one row instead of failing
+  // the request, which is the entire reason for the bounded pool.
+  const threads = detailed
+    .filter((t): t is Record<string, unknown> => t !== undefined)
+    .map((t) => extractThreadSummary(t));
 
   logger.info("[SERVICE] getThreads completed", {
     tenantId, threadCount: threads.length,
@@ -488,8 +497,12 @@ export async function sendEmail(
   input: SendEmailInput
 ): Promise<SendEmailResult> {
   const startMs = Date.now();
+  // `toHash`, not `to`, and a subject LENGTH rather than the subject: this line
+  // lands on disk and, later, at a vendor. The digest still answers "did we
+  // send to this recipient twice?"; the address itself answers nothing extra.
   logger.info("[SERVICE] sendEmail start", {
-    tenantId, to: input.to, subject: input.subject, hasThreadId: !!input.threadId,
+    tenantId, toHash: hashMailboxList(input.to), subjectLength: input.subject?.length ?? 0,
+    hasThreadId: !!input.threadId,
     hasCc: !!input.cc?.trim(), hasBcc: !!input.bcc?.trim(),
   });
   const tenant = corsair.withTenant(tenantId);
@@ -499,10 +512,11 @@ export async function sendEmail(
     bcc: input.bcc?.trim() || undefined,
   });
 
-  const result = await tenant.gmail.api.messages.send({
-    raw,
-    threadId: input.threadId,
-  });
+  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
+    "messages.send",
+    () => tenant.gmail.api.messages.send({ raw, threadId: input.threadId }),
+    { tenantId, trigger: "send" },
+  );
 
   logger.info("[SERVICE] sendEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId,
@@ -535,12 +549,19 @@ export async function resolveReplyTarget(
   tenantId: string,
   entityId: string,
   replyAll?: boolean,
+  // THREADED, NOT HARDCODED. This runs for a real send AND for the approval
+  // preview, and those want opposite pacing: a preview should fail fast on a
+  // 2s cap so the card renders, while a send the user just authorised should
+  // be allowed the longer send cap rather than be dropped. One shared default
+  // would have to be wrong for one of them.
+  trigger: string = "ui",
 ): Promise<ResolvedReplyTarget> {
   const tenant = corsair.withTenant(tenantId);
-  const original = (await tenant.gmail.api.messages.get({
-    id: entityId,
-    format: "full",
-  })) as Record<string, unknown>;
+  const original = (await withGmailRetry(
+    `messages.get ${entityId}`,
+    () => tenant.gmail.api.messages.get({ id: entityId, format: "full" }),
+    { tenantId, trigger },
+  )) as Record<string, unknown>;
 
   const headers = ((original.payload as MessagePart)?.headers ?? []) as PayloadHeader[];
   const from = getHeader(headers, "From");
@@ -634,7 +655,7 @@ export async function replyToEmail(
   const startMs = Date.now();
   logger.info("[SERVICE] replyToEmail start", { tenantId, entityId: input.entityId, replyAll: input.replyAll });
 
-  const target = await resolveReplyTarget(tenantId, input.entityId, input.replyAll);
+  const target = await resolveReplyTarget(tenantId, input.entityId, input.replyAll, "send");
 
   const to = input.to !== undefined ? input.to.trim() : target.recipient;
   if (!to) {
@@ -649,10 +670,11 @@ export async function replyToEmail(
   });
 
   const tenant = corsair.withTenant(tenantId);
-  const result = await tenant.gmail.api.messages.send({
-    raw,
-    threadId: target.threadId || undefined,
-  });
+  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
+    "messages.send",
+    () => tenant.gmail.api.messages.send({ raw, threadId: target.threadId || undefined }),
+    { tenantId, trigger: "send" },
+  );
 
   logger.info("[SERVICE] replyToEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
@@ -680,12 +702,18 @@ interface ResolvedForwardTarget {
   attachmentCount: number;
 }
 
-async function resolveForwardTarget(tenantId: string, entityId: string): Promise<ResolvedForwardTarget> {
+async function resolveForwardTarget(
+  tenantId: string,
+  entityId: string,
+  // See resolveReplyTarget — preview and send need different pacing policies.
+  trigger: string = "ui",
+): Promise<ResolvedForwardTarget> {
   const tenant = corsair.withTenant(tenantId);
-  const original = (await tenant.gmail.api.messages.get({
-    id: entityId,
-    format: "full",
-  })) as Record<string, unknown>;
+  const original = (await withGmailRetry(
+    `messages.get ${entityId}`,
+    () => tenant.gmail.api.messages.get({ id: entityId, format: "full" }),
+    { tenantId, trigger },
+  )) as Record<string, unknown>;
 
   const payload = original.payload as MessagePart | undefined;
   const headers = (payload?.headers ?? []) as PayloadHeader[];
@@ -724,9 +752,11 @@ export async function forwardEmail(
   input: ForwardEmailInput,
 ): Promise<SendEmailResult> {
   const startMs = Date.now();
-  logger.info("[SERVICE] forwardEmail start", { tenantId, entityId: input.entityId, to: input.to });
+  logger.info("[SERVICE] forwardEmail start", {
+    tenantId, entityId: input.entityId, toHash: hashMailboxList(input.to),
+  });
 
-  const target = await resolveForwardTarget(tenantId, input.entityId);
+  const target = await resolveForwardTarget(tenantId, input.entityId, "send");
   // buildRawEmail is text/plain only — attachments are never carried over.
   // Say so in the sent message itself, not just the approval preview, since
   // the forward's recipient has no other way to know something was dropped.
@@ -741,7 +771,11 @@ export async function forwardEmail(
   });
 
   const tenant = corsair.withTenant(tenantId);
-  const result = await tenant.gmail.api.messages.send({ raw });
+  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
+    "messages.send",
+    () => tenant.gmail.api.messages.send({ raw }),
+    { tenantId, trigger: "send" },
+  );
 
   logger.info("[SERVICE] forwardEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
@@ -781,7 +815,11 @@ export async function trashThread(tenantId: string, threadId: string): Promise<v
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.trash({ id: threadId });
+  await withGmailRetry(
+    `threads.trash ${threadId}`,
+    () => tenant.gmail.api.threads.trash({ id: threadId }),
+    { tenantId, trigger: "ui" },
+  );
 
   await db
     .update(messageMetadata)
@@ -804,12 +842,17 @@ export async function untrashThread(tenantId: string, threadId: string): Promise
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.untrash({ id: threadId });
+  await withGmailRetry(
+    `threads.untrash ${threadId}`,
+    () => tenant.gmail.api.threads.untrash({ id: threadId }),
+    { tenantId, trigger: "ui" },
+  );
 
-  const thread = (await tenant.gmail.api.threads.get({
-    id: threadId,
-    format: "metadata",
-  })) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
+  const thread = (await withGmailRetry(
+    `threads.get ${threadId}`,
+    () => tenant.gmail.api.threads.get({ id: threadId, format: "metadata" }),
+    { tenantId, trigger: "ui" },
+  )) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
 
   for (const msg of thread.messages ?? []) {
     if (!msg.id) continue;
@@ -843,10 +886,15 @@ export async function setThreadStarred(
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.modify({
-    id: threadId,
-    ...(starred ? { addLabelIds: ["STARRED"] } : { removeLabelIds: ["STARRED"] }),
-  });
+  await withGmailRetry(
+    `threads.modify ${threadId}`,
+    () =>
+      tenant.gmail.api.threads.modify({
+        id: threadId,
+        ...(starred ? { addLabelIds: ["STARRED"] } : { removeLabelIds: ["STARRED"] }),
+      }),
+    { tenantId, trigger: "ui" },
+  );
 
   await db
     .update(messageMetadata)
@@ -876,10 +924,15 @@ export async function setThreadRead(
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.modify({
-    id: threadId,
-    ...(read ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] }),
-  });
+  await withGmailRetry(
+    `threads.modify ${threadId}`,
+    () =>
+      tenant.gmail.api.threads.modify({
+        id: threadId,
+        ...(read ? { removeLabelIds: ["UNREAD"] } : { addLabelIds: ["UNREAD"] }),
+      }),
+    { tenantId, trigger: "ui" },
+  );
 
   await db
     .update(messageMetadata)
@@ -902,10 +955,17 @@ export async function setThreadImportant(
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.modify({
-    id: threadId,
-    ...(important ? { addLabelIds: ["IMPORTANT"] } : { removeLabelIds: ["IMPORTANT"] }),
-  });
+  await withGmailRetry(
+    `threads.modify ${threadId}`,
+    () =>
+      tenant.gmail.api.threads.modify({
+        id: threadId,
+        ...(important
+          ? { addLabelIds: ["IMPORTANT"] }
+          : { removeLabelIds: ["IMPORTANT"] }),
+      }),
+    { tenantId, trigger: "ui" },
+  );
 
   await db
     .update(messageMetadata)
@@ -937,12 +997,17 @@ export async function setThreadSpam(
   const startMs = Date.now();
   const tenant = corsair.withTenant(tenantId);
 
-  await tenant.gmail.api.threads.modify({
-    id: threadId,
-    ...(spam
-      ? { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] }
-      : { removeLabelIds: ["SPAM"] }),
-  });
+  await withGmailRetry(
+    `threads.modify ${threadId}`,
+    () =>
+      tenant.gmail.api.threads.modify({
+        id: threadId,
+        ...(spam
+          ? { addLabelIds: ["SPAM"], removeLabelIds: ["INBOX"] }
+          : { removeLabelIds: ["SPAM"] }),
+      }),
+    { tenantId, trigger: "ui" },
+  );
 
   if (spam) {
     await db
@@ -952,10 +1017,11 @@ export async function setThreadSpam(
         and(eq(messageMetadata.userId, tenantId), eq(messageMetadata.threadId, threadId)),
       );
   } else {
-    const thread = (await tenant.gmail.api.threads.get({
-      id: threadId,
-      format: "metadata",
-    })) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
+    const thread = (await withGmailRetry(
+      `threads.get ${threadId}`,
+      () => tenant.gmail.api.threads.get({ id: threadId, format: "metadata" }),
+      { tenantId, trigger: "ui" },
+    )) as { messages?: Array<{ id?: string; labelIds?: string[] }> };
 
     for (const msg of thread.messages ?? []) {
       if (!msg.id) continue;
@@ -1006,11 +1072,16 @@ export async function setThreadCategory(
   const tenant = corsair.withTenant(tenantId);
   const others = Object.values(CATEGORY_TAB_LABELS).filter((l) => l !== targetLabel);
 
-  await tenant.gmail.api.threads.modify({
-    id: threadId,
-    addLabelIds: [targetLabel],
-    removeLabelIds: others,
-  });
+  await withGmailRetry(
+    `threads.modify ${threadId}`,
+    () =>
+      tenant.gmail.api.threads.modify({
+        id: threadId,
+        addLabelIds: [targetLabel],
+        removeLabelIds: others,
+      }),
+    { tenantId, trigger: "ui" },
+  );
 
   await db
     .update(messageMetadata)
@@ -1238,27 +1309,32 @@ export async function searchEmails(
     return { threads: [], nextPageToken: null };
   }
 
-  const detailed = await Promise.all(
-    threadStubs.map((t: { id?: string }) =>
-      withGmailRetry<Record<string, unknown>>(
-        `threads.get ${t.id}`,
-        () =>
-          tenant.gmail.api.threads.get({
-            id: t.id!,
-            format: "metadata",
-          }),
-        { tenantId, trigger: "ui" },
-      )
-    )
+  // BOUNDED, not Promise.all. threads.get is 40 quota units, so 20 threads is
+  // 800 units in one breath and 100 would be 4,000 — the last reservation of
+  // which lands ~53s out and would be refused outright on the 2s "ui" cap.
+  // Unbounded fan-out turns the interactive cap into a partial-failure machine.
+  //
+  // mapWithConcurrency swallows per-item errors, which is exactly right here:
+  // a paced-out thread renders unenriched instead of failing the whole page.
+  const detailed = await mapWithConcurrency(threadStubs, 4, (t: { id?: string }) =>
+    withGmailRetry<Record<string, unknown>>(
+      `threads.get ${t.id}`,
+      () => tenant.gmail.api.threads.get({ id: t.id!, format: "metadata" }),
+      { tenantId, trigger: "ui" },
+    ),
   );
   logger.info("[GMAIL] threads.get batch (searchEmails)", {
     tenantId, query, threadCount: detailed.length,
     durationMs: Date.now() - gmailStart,
   });
 
-  const threads = detailed.map((t: Record<string, unknown>) =>
-    extractThreadSummary(t as Record<string, unknown>)
-  );
+  // A thread that failed or was paced out arrives here as undefined —
+  // mapWithConcurrency isolates per-item failures rather than rejecting the
+  // whole page. Dropping it degrades the list by one row instead of failing
+  // the request, which is the entire reason for the bounded pool.
+  const threads = detailed
+    .filter((t): t is Record<string, unknown> => t !== undefined)
+    .map((t) => extractThreadSummary(t));
 
   logger.info("[SERVICE] searchEmails completed", {
     tenantId, query, threadCount: threads.length,
@@ -1572,7 +1648,11 @@ export async function syncEmails(tenantId: string, userId: string): Promise<Sync
 
   // Step 1: list message IDs
   const gmailStart = Date.now();
-  const result = await tenant.gmail.api.messages.list({ maxResults: 100 });
+  const result = await withGmailRetry<{ messages?: Array<{ id?: string; threadId?: string }> }>(
+    "messages.list",
+    () => tenant.gmail.api.messages.list({ maxResults: 100 }),
+    { tenantId, trigger: "sync" },
+  );
   const stubs = (result.messages ?? []) as Array<{ id?: string; threadId?: string }>;
   const valid = stubs.filter((s) => s.id);
   logger.info("[GMAIL] messages.list (syncEmails)", {

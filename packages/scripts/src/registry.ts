@@ -15,6 +15,9 @@ import gmailResyncCategories from "./commands/gmail-resync-categories.ts";
 import gmailResync from "./commands/gmail-resync.ts";
 import gmailBackfillMessageIds from "./commands/gmail-backfill-message-ids.ts";
 import gmailBackfillPriority from "./commands/gmail-backfill-priority.ts";
+import gmailRenewWatch from "./commands/gmail-renew-watch.ts";
+import gmailReleaseWatch from "./commands/gmail-release-watch.ts";
+import gmailDisconnect from "./commands/gmail-disconnect.ts";
 import calendarProbeSharedProps from "./commands/calendar-probe-shared-props.ts";
 import calendarInspectEvent from "./commands/calendar-inspect-event.ts";
 import calendarListEvents from "./commands/calendar-list-events.ts";
@@ -32,6 +35,11 @@ export const commands: Command[] = [
   gmailResync,
   gmailBackfillMessageIds,
   gmailBackfillPriority,
+  // Read-only status above; these act on a live mailbox (P-2/P-9) and are
+  // ordered last within this group so the safe commands are always seen first.
+  gmailRenewWatch,
+  gmailReleaseWatch,
+  gmailDisconnect,
   calendarProbeSharedProps,
   calendarListEvents,
   calendarTestGuestLookup,

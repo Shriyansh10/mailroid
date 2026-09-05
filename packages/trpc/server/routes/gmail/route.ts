@@ -1,7 +1,7 @@
 import { z } from "../../schema.js";
 import { protectedProcedure, router } from "../../trpc.js";
 import { generatePath } from "../../utils/path-generator.js";
-import { logger } from "@repo/logger";
+import { hashMailboxList, logger } from "@repo/logger";
 
 import { getThreads, getThread, sendEmail, searchEmails, syncEmails, getStoredEmailCount, searchLocalEmails, generateMissingEmbeddings, getPendingEmbeddingsCount } from "../../../services/index.js";
 import {
@@ -142,7 +142,10 @@ export const gmailRouter = router({
     .output(sendEmailOutputModel)
     .mutation(async ({ ctx, input }) => {
       const startMs = Date.now();
-      logger.info("[TRPC] gmail.send called", { userId: ctx.user!.id, to: input.to, subject: input.subject });
+      logger.info("[TRPC] gmail.send called", {
+        userId: ctx.user!.id, toHash: hashMailboxList(input.to),
+        subjectLength: input.subject?.length ?? 0,
+      });
       const result = await sendEmail(ctx.user!.id, input);
       logger.info("[TRPC] gmail.send result", {
         userId: ctx.user!.id, messageId: result.id, threadId: result.threadId,
@@ -201,7 +204,7 @@ export const gmailRouter = router({
     .output(sendEmailOutputModel)
     .mutation(async ({ ctx, input }) => {
       logger.info("[TRPC] gmail.forwardEmail called", {
-        userId: ctx.user!.id, entityId: input.entityId, to: input.to,
+        userId: ctx.user!.id, entityId: input.entityId, toHash: hashMailboxList(input.to),
       });
       return await forwardEmail(ctx.user!.id, input);
     }),
@@ -392,7 +395,8 @@ export const gmailRouter = router({
     .mutation(async ({ ctx, input }) => {
       const { draftId, ...draft } = input;
       logger.info("[TRPC] gmail.saveDraft called", {
-        userId: ctx.user!.id, draftId: draftId ?? null, subject: draft.subject,
+        userId: ctx.user!.id, draftId: draftId ?? null,
+        subjectLength: draft.subject?.length ?? 0,
       });
       return draftId
         ? await updateDraft(ctx.user!.id, draftId, draft)

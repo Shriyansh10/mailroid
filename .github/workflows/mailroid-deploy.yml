@@ -39,6 +39,20 @@ jobs:
           source: "Caddyfile"
           target: "~/mailroid"
 
+      # Same pattern as the Caddyfile: config that lives in the repo but is
+      # mounted into a container, so it has to exist on the box before the
+      # container starts. Without this the Alloy run below mounts a path that
+      # does not exist and the collector comes up with no pipeline at all.
+      - name: Copy Alloy config to VPS
+        uses: appleboy/scp-action@v0.1.7
+        with:
+          host: ${{ secrets.VPS_HOST }}
+          username: ${{ secrets.VPS_USER }}
+          key: ${{ secrets.VPS_SSH_KEY }}
+          port: ${{ secrets.VPS_SSH_PORT }}
+          source: "alloy/config.alloy"
+          target: "~/mailroid"
+
       - name: Deploy to VPS over SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -64,7 +78,16 @@ jobs:
             # POSTGRES_USER / POSTGRES_PASSWORD / POSTGRES_DB and a matching
             # DATABASE_URL (host = mailroid-db) must be set in ~/mailroid/.env
             if ! docker inspect mailroid-db >/dev/null 2>&1; then
+              # --log-opt: Docker's default json-file driver has NO rotation,
+              # so a container's stdout grows without bound. That was survivable
+              # only because the app's production log level was "error" and
+              # discarded almost everything; it is now "info" by default, which
+              # raises volume by design. This box has no swap, and a full disk is
+              # a worse outage than whatever is being debugged.
+              # ~30 MB per container ceiling. Verify with:
+              #   docker inspect mailroid-db --format '{{.HostConfig.LogConfig}}'
               docker run -d --restart unless-stopped \
+                --log-opt max-size=10m --log-opt max-file=3 \
                 --network mailroid-net \
                 --env-file ~/mailroid/.env \
                 -v mailroid_pg_data:/var/lib/postgresql/data \
@@ -95,25 +118,74 @@ jobs:
               echo "Skipping DB migrations (run_migrations=false)."
             fi
 
+            # Telemetry collector, and the ONLY process holding Grafana Cloud
+            # credentials. Started BEFORE the app containers so their first log
+            # lines have somewhere to land — the app tolerates a dead collector,
+            # but there is no reason to hand it one on every deploy.
+            #
+            # Skipped entirely when GRAFANA_CLOUD_OTLP_ENDPOINT is unset, so a
+            # deploy to a box with no telemetry configured is unchanged. The app
+            # side is gated the same way on OTEL_EXPORTER_OTLP_ENDPOINT.
+            #
+            # --memory 160m matches docker-compose.yml. NO --memory-swap, in
+            # line with the rest of this workflow: adding swap to this box later
+            # then becomes a cushion rather than a silent no-op. The in-process
+            # memory_limiter sits BELOW this at 120MiB so Alloy sheds batches
+            # instead of being OOM-killed with a full queue.
+            #
+            # 160m is an INITIAL CAP, NOT A PROVEN SAFE VALUE. Verify under real
+            # load before trusting it:  docker stats mailroid-alloy
+            if grep -q '^GRAFANA_CLOUD_OTLP_ENDPOINT=.' ~/mailroid/.env; then
+              docker pull grafana/alloy:latest
+              docker stop mailroid-alloy || true
+              docker rm mailroid-alloy || true
+              docker run -d --restart unless-stopped \
+                --log-opt max-size=10m --log-opt max-file=3 \
+                --network mailroid-net \
+                --memory 160m \
+                --env-file ~/mailroid/.env \
+                -v ~/mailroid/alloy/config.alloy:/etc/alloy/config.alloy:ro \
+                -v mailroid_alloy_data:/var/lib/alloy/data \
+                --name mailroid-alloy \
+                grafana/alloy:latest \
+                  run --server.http.listen-addr=0.0.0.0:12345 \
+                      --storage.path=/var/lib/alloy/data \
+                      /etc/alloy/config.alloy
+            else
+              echo "GRAFANA_CLOUD_OTLP_ENDPOINT unset — skipping Alloy."
+            fi
+
+            # OTEL_SERVICE_NAME is forced here with -e, which docker applies
+            # AFTER --env-file and so always wins on a duplicate key. Both
+            # containers share the one ~/mailroid/.env, so leaving this to the
+            # file would give api and web the same service name in Grafana —
+            # their logs would be inseparable by service_name, only by reading
+            # message text. Whatever OTEL_SERVICE_NAME is set to in .env is
+            # therefore irrelevant to these two containers by design.
             docker stop mailroid-api || true
             docker rm mailroid-api || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
+              -e OTEL_SERVICE_NAME=mailroid-api \
               --name mailroid-api \
               ${REGISTRY}/mailroid-api:${TAG}
 
             docker stop mailroid-web || true
             docker rm mailroid-web || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               --env-file ~/mailroid/.env \
+              -e OTEL_SERVICE_NAME=mailroid-web \
               --name mailroid-web \
               ${REGISTRY}/mailroid-web:${TAG}
 
             docker stop mailroid-caddy || true
             docker rm mailroid-caddy || true
             docker run -d --restart unless-stopped \
+              --log-opt max-size=10m --log-opt max-file=3 \
               --network mailroid-net \
               -p 80:80 -p 443:443 \
               -v ~/mailroid/Caddyfile:/etc/caddy/Caddyfile \

@@ -14,8 +14,19 @@
  * re-running picks up exactly where it stopped, and a partial run is never
  * wasted. Safe to run repeatedly.
  *
- * Read-only against Gmail (`messages.get`, 5 quota units each, requesting a
- * single header rather than the whole message).
+ * Read-only against Gmail (`messages.get`, requesting a single header rather
+ * than the whole message).
+ *
+ * COST: `messages.get` is **20** quota units, not the 5 this comment used to
+ * claim. Asking for one header rather than the full body saves bandwidth, not
+ * quota — Gmail prices the method, not the payload. A 10,000-row backfill is
+ * therefore ~200,000 units against a 6,000-units-per-minute mailbox budget:
+ * over half an hour of that mailbox's entire allowance, at best.
+ *
+ * RUN IT WITH A REDUCED RATE. This is a separate process from mailroid-api, and
+ * the pacing limiter's state is per-process — so this command and the running
+ * server each believe they have the full budget. Set
+ * GMAIL_QUOTA_UNITS_PER_SEC=25 when running it against a live mailbox.
  */
 
 import { corsair } from "@repo/corsair";
@@ -23,6 +34,7 @@ import { db, and, eq, isNull, sql } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { emails } from "@repo/database/models/emails";
 import { normalizeMessageId } from "@repo/services/gmail/message-id";
+import { withGmailRetry } from "@repo/services/gmail/retry.js";
 
 import { defineCommand, UsageError } from "../types.ts";
 import { resolveUserId } from "../lib/resolve-user.ts";
@@ -109,13 +121,18 @@ export default defineCommand({
         while (cursor < batch.length) {
           const { entityId } = batch[cursor++]!;
           try {
-            const msg = (await tenant.gmail.api.messages.get({
-              id: entityId,
-              format: "metadata",
-              // Only the one header — far less payload than format:"full" for
-              // the same quota cost.
-              metadataHeaders: ["Message-ID"],
-            } as Parameters<typeof tenant.gmail.api.messages.get>[0])) as unknown as {
+            const msg = (await withGmailRetry(
+              `messages.get ${entityId}`,
+              () =>
+                tenant.gmail.api.messages.get({
+                  id: entityId,
+                  format: "metadata",
+                  // Only the one header — far less payload than format:"full"
+                  // for the same quota cost.
+                  metadataHeaders: ["Message-ID"],
+                } as Parameters<typeof tenant.gmail.api.messages.get>[0]),
+              { tenantId: userId, trigger: "sync" },
+            )) as unknown as {
               payload?: { headers?: Array<{ name?: string; value?: string }> };
             };
 

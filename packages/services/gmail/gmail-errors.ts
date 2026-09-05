@@ -37,6 +37,52 @@ export class GmailAuthError extends Error {
   }
 }
 
+/**
+ * Thrown when OUR OWN client-side limiter declined to schedule a call, because
+ * the wait would have exceeded the caller's tolerance. Google was never asked.
+ *
+ * READ THE WORDING BEFORE CHANGING IT. This message must never contain "429",
+ * "rate limit", "user-rate limit" or "RESOURCE_EXHAUSTED". `isQuotaError` falls
+ * back to matching those strings against the message text, so a limiter error
+ * phrased like Google's would classify as `quota`, and `handleGmailFailure`
+ * would then open a real 15→30→60-minute cooldown on a mailbox that is
+ * perfectly healthy — a self-inflicted outage indistinguishable from the
+ * 2026-08-25 incident. "Pacing" is the chosen vocabulary for that reason.
+ *
+ * `classifyGmailFailure` also checks for this type explicitly, so the wording is
+ * belt and braces rather than the only defence — but both are load-bearing, and
+ * there is a test asserting a PLAIN Error carrying this message still classifies
+ * as `other`.
+ */
+export class GmailPacedOutError extends Error {
+  readonly tenantId: string | undefined;
+  readonly operation: string;
+  readonly trigger: string;
+  /** How long the call would have had to wait. */
+  readonly waitMs: number;
+  /** The cap for this trigger class that the wait exceeded. */
+  readonly capMs: number;
+
+  constructor(args: {
+    tenantId?: string;
+    operation: string;
+    trigger: string;
+    waitMs: number;
+    capMs: number;
+  }) {
+    super(
+      `Gmail pacing: ${args.operation} for tenant ${args.tenantId ?? "unattributed"} ` +
+        `would wait ${args.waitMs}ms, over the ${args.capMs}ms cap for trigger ${args.trigger}`,
+    );
+    this.name = "GmailPacedOutError";
+    this.tenantId = args.tenantId;
+    this.operation = args.operation;
+    this.trigger = args.trigger;
+    this.waitMs = args.waitMs;
+    this.capMs = args.capMs;
+  }
+}
+
 export type GmailFailureKind = "quota" | "auth" | "other";
 
 /**
@@ -55,6 +101,13 @@ export interface GmailCallContext {
   operation?: string;
   /** threadId / historyId / messageId / labelId — whichever applies. */
   targetId?: string;
+  /**
+   * One user action or one background job, threaded from the entry point so a
+   * burst of calls can be tied back to the single thing that caused it. Reuses
+   * the `requestId` several service paths already generate rather than
+   * introducing a second identifier for the same concept.
+   */
+  correlationId?: string;
 }
 
 function errorBodyMessage(err: unknown): string {
@@ -133,6 +186,12 @@ const CORSAIR_AUTH_FAILURE =
  * wording must still back off rather than be marked auth-dead.
  */
 export function classifyGmailFailure(err: unknown): GmailFailureKind {
+  // FIRST, BEFORE THE QUOTA CHECK. Our own backpressure is not a Gmail failure
+  // of any kind — Google was never called. Letting it reach isQuotaError's
+  // string fallback would open a cooldown on a healthy mailbox because of a
+  // limiter we wrote. "other" means no cooldown, no auth-dead marking.
+  if (err instanceof GmailPacedOutError) return "other";
+
   if (isQuotaError(err)) return "quota";
 
   const text = errorText(err);
@@ -156,6 +215,12 @@ export function classifyGmailFailure(err: unknown): GmailFailureKind {
  * the user needs told about.
  */
 export function isGmailUnavailable(err: unknown): boolean {
+  // Paced out by our own limiter reads exactly like "Gmail is unreachable right
+  // now": the live copy cannot be fetched this instant, and the stored one is
+  // the best available answer. Treating it this way is what lets every existing
+  // cache-fallback read degrade gracefully with no call-site changes.
+  if (err instanceof GmailPacedOutError) return true;
+
   if (isQuotaError(err)) return true;
   const status = errorStatus(err);
   if (typeof status === "number") return status >= 500;

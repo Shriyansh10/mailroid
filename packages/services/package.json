@@ -4,10 +4,16 @@
   "private": true,
   "type": "module",
   "exports": {
+    "./env": "./env.ts",
+    "./env.js": "./env.ts",
     "./usage-limits": "./usage-limits.ts",
     "./usage-limits.js": "./usage-limits.ts",
     "./gmail/index": "./gmail/index.ts",
     "./gmail/index.js": "./gmail/index.ts",
+    "./gmail/quota-limiter": "./gmail/quota-limiter.ts",
+    "./gmail/quota-limiter.js": "./gmail/quota-limiter.ts",
+    "./gmail/retry": "./gmail/retry.ts",
+    "./gmail/retry.js": "./gmail/retry.ts",
     "./gmail/quota-cooldown": "./gmail/quota-cooldown.ts",
     "./gmail/quota-cooldown.js": "./gmail/quota-cooldown.ts",
     "./gmail/pause": "./gmail/pause.ts",
@@ -103,6 +109,7 @@
     "dotenv-cli": "^11.0.0",
     "typescript": "^5.9.3",
     "@types/node": "^22.15.3",
+    "@types/pg": "^8.16.0",
     "tsx": "^4.21.0"
   },
   "dependencies": {
@@ -115,9 +122,10 @@
     "corsair": "0.1.74",
     "google-auth-library": "^10.5.0",
     "openai": "^6.42.0",
+    "pg": "^8.16.3",
     "zod": "^4.3.5"
   },
   "scripts": {
-    "test": "node --import tsx --test calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts"
+    "test": "node --import tsx --test *.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts"
   }
 }

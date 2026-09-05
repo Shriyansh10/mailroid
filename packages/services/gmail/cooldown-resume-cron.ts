@@ -1,7 +1,7 @@
 import { inngest } from "@repo/inngest";
 import { db, lt } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
-import { logger } from "@repo/logger";
+import { errorFields, hashMailbox, logger } from "@repo/logger";
 
 import { getAuthFailure, handleGmailFailure, markGmailHealthy } from "./quota-cooldown.ts";
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
@@ -83,10 +83,13 @@ export const gmailCooldownResumeCron = inngest.createFunction(
         // version of the traffic spike that caused the outage. Spread them.
         await new Promise((r) => setTimeout(r, Math.random() * 60_000));
 
+        // targetId is LOGGED — quota-cooldown.ts and pause.ts both write it out
+        // — so it must not be the raw address. Every other caller passes a
+        // tenantId or a historyId; this one is the mailbox, digested.
         const ctx = {
           trigger: "resume-cron",
           operation: "users.getProfile",
-          targetId: row.emailAddress,
+          targetId: hashMailbox(row.emailAddress),
         };
 
         // A mailbox whose credentials are already proven dead cannot be
@@ -123,7 +126,7 @@ export const gmailCooldownResumeCron = inngest.createFunction(
           // rethrowing keeps one dead mailbox from aborting the whole sweep.
           await handleGmailFailure(row.tenantId, err, ctx).catch((e) => {
             logger.error("[RESUME] failed to record auth failure", {
-              tenantId: row.tenantId, error: String(e),
+              tenantId: row.tenantId, ...errorFields(e),
             });
           });
           return { resumed: false, reason: "auth-unrecoverable" };
@@ -160,7 +163,7 @@ export const gmailCooldownResumeCron = inngest.createFunction(
             ctx,
           ).catch((err) => {
             logger.error("[RESUME] failed to record probe failure", {
-              tenantId: row.tenantId, error: String(err),
+              tenantId: row.tenantId, ...errorFields(err),
             });
           });
           return { resumed: false };
@@ -182,7 +185,7 @@ export const gmailCooldownResumeCron = inngest.createFunction(
 
         logger.info("[RESUME] resumed mailbox after quota cooldown", {
           tenantId: row.tenantId,
-          emailAddress: row.emailAddress,
+          mailbox: hashMailbox(row.emailAddress),
           historyId: profile.historyId,
         });
         return { resumed: true };

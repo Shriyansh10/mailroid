@@ -1,9 +1,11 @@
 import { db, eq, isNull, lt, or } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
-import { logger } from "@repo/logger";
+import { errorFields, hashMailbox, logger } from "@repo/logger";
 
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 import { getPause, getPausedTenantIds, isTenantPaused } from "./pause.ts";
+import { getAuthFailure, getCooldown } from "./quota-cooldown.ts";
+import { mailroidEnv } from "../env.ts";
 
 const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC;
 if (!TOPIC_NAME) {
@@ -64,6 +66,14 @@ export async function startGmailWatch(
       updateFields.watchExpiration = new Date(parseInt(data.expiration));
     }
 
+    // Ownership (P-2, docs/gmail-rate-limit-boundary.md §13). Written on
+    // EVERY successful registration, renewal included — a renewal is still
+    // this environment (re-)taking the slot, and re-stamping it is what
+    // makes a stale value impossible rather than merely unlikely. Cleared
+    // only by a confirmed stopGmailWatch success, below.
+    updateFields.watchTopic = TOPIC_NAME;
+    updateFields.watchOwnerEnv = mailroidEnv.env;
+
     // A RENEWAL MUST NEVER MOVE THE CURSOR. users.watch answers with the
     // mailbox's CURRENT historyId, so writing it unconditionally silently skips
     // every message between the stored cursor and now — the diff for that gap is
@@ -107,6 +117,77 @@ export async function startGmailWatch(
   }
 }
 
+/**
+ * Release this mailbox's watch slot (P-2, docs/gmail-rate-limit-boundary.md
+ * §13). users/me/stop costs 50 quota units and Google keeps exactly one live
+ * watch per mailbox — issuing it during an active quota incident is the
+ * behaviour the cooldown ladder exists to prevent, so this is gated on a
+ * healthy mailbox and NEVER called from a 429 path.
+ *
+ * BEST-EFFORT, and the return value says which: `stopped: true` only after
+ * Gmail confirms the call succeeded. On any failure — including "gated,
+ * never attempted" — the caller must NOT clear watchTopic/watchOwnerEnv.
+ * Google may still be holding the watch open; if our own ownership columns
+ * went blank anyway, the orphan-detecting surface (P-9) built to end silent
+ * mail loss would itself be lying about what it holds. See the invariant
+ * comment on the schema columns in gmail-tenant-mappings.ts.
+ */
+export async function stopGmailWatch(
+  tenantId: string,
+): Promise<{ stopped: boolean; reason?: string }> {
+  const [pause, cooldown, authFailure] = await Promise.all([
+    getPause(tenantId).catch(() => null),
+    getCooldown(tenantId).catch(() => null),
+    getAuthFailure(tenantId).catch(() => null),
+  ]);
+
+  if (pause || cooldown || authFailure) {
+    const reason = pause ? `paused (${pause.mode})` : cooldown ? "quota cooldown active" : "auth failed";
+    logger.warn("[gmail-watch] skipping users.stop: mailbox not healthy", { tenantId, reason });
+    return { stopped: false, reason };
+  }
+
+  try {
+    const response = await gmailRequestWithAuthRecovery(
+      tenantId,
+      "https://gmail.googleapis.com/gmail/v1/users/me/stop",
+      {
+        method: "POST",
+        ctx: { trigger: "watch-stop", operation: "users.stop", targetId: tenantId },
+      },
+    );
+
+    // users.stop answers 204 with an empty body on success. Anything else —
+    // including a 404 (already stopped, or never registered) — is treated as
+    // NOT confirmed: the honest failure mode here is "retained ownership
+    // state for a watch that may already be gone," which is releasable by an
+    // operator, never "cleared ownership state for a watch Gmail still holds."
+    if (!response.ok) {
+      const body = await response.text().catch(() => "");
+      logger.error("[gmail-watch] users.stop failed, retaining recorded ownership", {
+        tenantId,
+        status: response.status,
+        body,
+      });
+      return { stopped: false, reason: `HTTP ${response.status}` };
+    }
+
+    await db
+      .update(gmailTenantMappings)
+      .set({ watchTopic: null, watchOwnerEnv: null })
+      .where(eq(gmailTenantMappings.tenantId, tenantId));
+
+    logger.info("[gmail-watch] users.stop confirmed, ownership released", { tenantId });
+    return { stopped: true };
+  } catch (err) {
+    logger.error("[gmail-watch] users.stop threw, retaining recorded ownership", {
+      tenantId,
+      ...errorFields(err),
+    });
+    return { stopped: false, reason: "threw" };
+  }
+}
+
 // Same threshold gmailWatchCron uses. Keeping the two identical is the point —
 // see the invariant on bootstrapGmailWatches below.
 const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h
@@ -128,8 +209,23 @@ const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h
  * Never throws: called fire-and-forget from the server's listen callback, where
  * a rejection would be an unhandled promise and a failed watch renewal must
  * never stop the API from serving.
+ *
+ * GATED ON MAILROID_ENV === "production" (P-11,
+ * docs/gmail-rate-limit-boundary.md §13). This sweep runs on every server
+ * boot, and `tsx watch` restarts constantly during local development — each
+ * restart used to re-register every due watch, which is exactly the
+ * watch-slot theft the 2026-08-25 incident was. Production's renewal path
+ * stays the 00:00 UTC `gmailWatchCron`; this function only ever supplements
+ * it for a box that was down across that boundary, and only in production.
  */
 export async function bootstrapGmailWatches(): Promise<void> {
+  if (mailroidEnv.env !== "production") {
+    logger.info("[gmail-watch-bootstrap] skipped: not the production environment", {
+      mailroidEnv: mailroidEnv.env,
+    });
+    return;
+  }
+
   try {
     const targetTime = new Date(Date.now() + RENEW_THRESHOLD_MS);
     const due = await db
@@ -165,14 +261,22 @@ export async function bootstrapGmailWatches(): Promise<void> {
       } catch (err) {
         // One mailbox failing must not stop the rest — a revoked token on one
         // account would otherwise leave every other mailbox unregistered.
+        // An error is a document: errorFields keeps the class, status, cause
+        // and the top frames that String(err) throws away.
         logger.error("[gmail-watch-bootstrap] renewal failed", {
           tenantId: row.tenantId,
-          emailAddress: row.emailAddress,
-          error: String(err),
+          mailbox: hashMailbox(row.emailAddress),
+          operation: "watch",
+          trigger: "watch-bootstrap",
+          ...errorFields(err),
         });
       }
     }
   } catch (err) {
-    logger.error("[gmail-watch-bootstrap] bootstrap aborted", { error: String(err) });
+    logger.error("[gmail-watch-bootstrap] bootstrap aborted", {
+      operation: "watch",
+      trigger: "watch-bootstrap",
+      ...errorFields(err),
+    });
   }
 }

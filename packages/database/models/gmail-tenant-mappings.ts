@@ -1,4 +1,4 @@
-import { index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { boolean, index, integer, pgTable, text, timestamp } from "drizzle-orm/pg-core";
 
 export const gmailTenantMappings = pgTable(
   "gmail_tenant_mappings",
@@ -7,6 +7,30 @@ export const gmailTenantMappings = pgTable(
     tenantId: text("tenant_id").notNull(),
     lastHistoryId: text("last_history_id"),
     watchExpiration: timestamp("watch_expiration", { withTimezone: true }),
+
+    // Watch ownership (P-2, docs/gmail-rate-limit-boundary.md §13). Google
+    // keeps one live watch per mailbox, shared across every client that
+    // registers one — recording what WE think we hold turns "did someone
+    // else take this mailbox's watch" from an archaeology exercise (reading
+    // Pub/Sub logs, per §9.2) into a query: compare this column against the
+    // topic/env this process would register.
+    //
+    // Written by startGmailWatch on every successful users.watch. Cleared
+    // ONLY on a confirmed users.stop success (stopGmailWatch) — never
+    // speculatively, because a best-effort stop that fails must leave Gmail's
+    // real state (still watching) matching what this column claims, or the
+    // orphan-detecting surface built on it (P-9) would be the thing lying.
+    watchTopic: text("watch_topic"),
+    watchOwnerEnv: text("watch_owner_env"), // "local" | "production" — MAILROID_ENV at registration time
+
+    // Never-silently-full-sync (P-3, docs/gmail-rate-limit-boundary.md §13).
+    // Set when history.list 404s — Gmail's retention window has passed the
+    // stored cursor and the diff can no longer be reconstructed — instead of
+    // firing an unbounded triggerGmailSync() inline. An operator resyncs
+    // deliberately, budgeted and confirmed, via the admin CLI; this pair of
+    // columns is what they see and what they clear.
+    resyncRequired: boolean("resync_required").notNull().default(false),
+    resyncRequiredAt: timestamp("resync_required_at", { withTimezone: true }),
 
     // Google answers a per-user 429 with an absolute "Retry after <ISO>", and
     // retrying inside that window pushes the window FORWARD rather than

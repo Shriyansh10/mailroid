@@ -28,7 +28,13 @@ export const gmailWebhookSync = inngest.createFunction(
   async ({ event, step }) => {
     const tenantId: string = event.data.tenantId;
     const incomingHistoryId: string = event.data.incomingHistoryId;
+    // Carried through the event so a Gmail call made inside a durable step
+    // still names the Pub/Sub delivery that caused it. Without this the
+    // correlation breaks exactly where the work crosses a process boundary.
+    const correlationId: string | undefined = event.data.correlationId;
 
-    return step.run("sync-history", () => syncHistoryForTenant(tenantId, incomingHistoryId));
+    return step.run("sync-history", () =>
+      syncHistoryForTenant(tenantId, incomingHistoryId, { correlationId }),
+    );
   },
 );

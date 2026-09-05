@@ -1,0 +1,154 @@
+// Grafana Alloy — the only process that holds Grafana Cloud credentials.
+//
+// WHY A COLLECTOR AND NOT DIRECT OTLP. The application knows one thing: "send
+// to my local collector". Alloy owns the vendor credentials, the batching, the
+// retry and the second redaction pass. That boundary is what lets the vendor
+// change without touching application code, and what makes a defence-in-depth
+// PII rule possible at all — one rule here covers every call site, including
+// ones written after this file.
+//
+// THE APP SANITISES FIRST. `packages/logger/otel.ts` digests recipients, drops
+// content and rewrites addresses found inside message strings BEFORE anything
+// leaves the process. The rules below are the SECOND layer, not the first.
+// Neither is trusted alone: the app-side pass means raw mail never reaches this
+// container, and this pass means a missed call site never reaches the vendor.
+
+// ── receive ─────────────────────────────────────────────────────────
+//
+// http only. Nothing here speaks gRPC, and an unused listener is surface.
+
+otelcol.receiver.otlp "default" {
+	http {
+		endpoint = "0.0.0.0:4318"
+	}
+
+	// Grafana's own guidance: a production pipeline must never export straight
+	// from a receiver. Everything goes through the limiter first.
+	output {
+		logs = [otelcol.processor.memory_limiter.default.input]
+	}
+}
+
+// ── bound memory BEFORE anything else ───────────────────────────────
+//
+// The container cap is 160m (see docker-compose.yml and the deploy workflow).
+// This sits BELOW it deliberately: if the limiter is at or above the container
+// limit, the kernel OOM-kills the container before the limiter ever refuses a
+// batch, and a hard kill loses everything queued instead of shedding the
+// newest. 120MiB leaves the runtime room to do the shedding.
+//
+// The box is a 1967 MB droplet with NO SWAP. Measured idle is ~869 MB and peak
+// ~1405 MB, so 160m fits — but 160 is an INITIAL CAP, not a proven safe value.
+// "The box is not at 90–95%" is a gating condition, not a measurement. Verify
+// with `docker stats mailroid-alloy` under real load before trusting it.
+
+otelcol.processor.memory_limiter "default" {
+	check_interval = "1s"
+	limit          = "120MiB"
+
+	output {
+		logs = [otelcol.processor.attributes.redact.input]
+	}
+}
+
+// ── redact — the second layer ───────────────────────────────────────
+//
+// `delete` rather than `hash`: a hashed subject is not useful for anything, and
+// the app already emits a keyed digest where correlation is genuinely wanted.
+// Deleting an absent key is a no-op, so listing more keys than any call site
+// currently emits costs nothing and covers the ones added later.
+//
+// tenantId / userId are deliberately KEPT. They are the join key that makes
+// attribution work and are meaningless outside our own database.
+
+otelcol.processor.attributes "redact" {
+	action {
+		key    = "to"
+		action = "delete"
+	}
+	action {
+		key    = "cc"
+		action = "delete"
+	}
+	action {
+		key    = "bcc"
+		action = "delete"
+	}
+	action {
+		key    = "from"
+		action = "delete"
+	}
+	action {
+		key    = "subject"
+		action = "delete"
+	}
+	action {
+		key    = "sender"
+		action = "delete"
+	}
+	action {
+		key    = "recipient"
+		action = "delete"
+	}
+	action {
+		key    = "emailAddress"
+		action = "delete"
+	}
+	action {
+		key    = "snippet"
+		action = "delete"
+	}
+	action {
+		key    = "body"
+		action = "delete"
+	}
+
+	output {
+		logs = [otelcol.processor.batch.default.input]
+	}
+}
+
+// ── batch ───────────────────────────────────────────────────────────
+//
+// Fewer requests and better compression. Also the thing that keeps an incident
+// spike affordable: 50 GB/month is a CEILING, not a capacity target, and the
+// ~3.5 GB/month estimate assumes normal operation. The real defence against a
+// debug-level incident spike is the rollup summarisation in
+// packages/logger/rollup.ts — an hour of healthy traffic is ~10 lines, not
+// 56,000.
+
+otelcol.processor.batch "default" {
+	timeout             = "5s"
+	send_batch_size     = 512
+	send_batch_max_size = 1024
+
+	output {
+		logs = [otelcol.exporter.otlphttp.grafana.input]
+	}
+}
+
+// ── export ──────────────────────────────────────────────────────────
+//
+// Credentials come from the environment and are never written to this file,
+// which is committed. `retry_on_failure` plus the queue is what makes a Grafana
+// outage a non-event for the application: Alloy absorbs it, and the app has
+// already returned.
+
+otelcol.exporter.otlphttp "grafana" {
+	client {
+		endpoint = sys.env("GRAFANA_CLOUD_OTLP_ENDPOINT")
+		auth     = otelcol.auth.basic.grafana.handler
+	}
+
+	retry_on_failure {
+		enabled          = true
+		initial_interval = "5s"
+		max_interval     = "30s"
+		max_elapsed_time = "5m"
+	}
+}
+
+otelcol.auth.basic "grafana" {
+	username = sys.env("GRAFANA_CLOUD_INSTANCE_ID")
+	password = sys.env("GRAFANA_CLOUD_API_TOKEN")
+}
