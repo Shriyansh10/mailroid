@@ -40,12 +40,16 @@ export default defineCommand({
         emailAddress: gmailTenantMappings.emailAddress,
         watchTopic: gmailTenantMappings.watchTopic,
         watchOwnerEnv: gmailTenantMappings.watchOwnerEnv,
+        watchExpiration: gmailTenantMappings.watchExpiration,
       })
       .from(gmailTenantMappings)
       .where(eq(gmailTenantMappings.tenantId, userId))
       .limit(1);
 
     if (!mapping) throw new UsageError(`No gmail_tenant_mappings row for tenant ${userId}.`);
+
+    const watchLive =
+      mapping.watchExpiration !== null && mapping.watchExpiration.getTime() > Date.now();
 
     out.section("Release Gmail watch");
     out.keyValues([
@@ -54,12 +58,29 @@ export default defineCommand({
       ["mailbox", mapping.emailAddress],
       ["recorded watch topic", mapping.watchTopic],
       ["recorded owner env", mapping.watchOwnerEnv],
+      ["watch expiration", mapping.watchExpiration?.toISOString() ?? null],
     ]);
 
-    if (!mapping.watchTopic && !mapping.watchOwnerEnv) {
+    // WATCH EXPIRATION IS THE SIGNAL, NOT THE OWNERSHIP COLUMNS.
+    //
+    // watchTopic and watchOwnerEnv arrived in migration 0045 and are stamped
+    // only when THIS code registers a watch, so every watch registered before
+    // that migration has both null while Gmail is still very much pushing for
+    // it. Bailing on those two alone made this command refuse to release
+    // exactly the watches an operator most needs to release — the pre-existing
+    // ones — and report "nothing to release" about a live subscription.
+    if (!watchLive && !mapping.watchTopic && !mapping.watchOwnerEnv) {
       out.line();
-      out.line(out.dim("No watch ownership recorded for this mailbox — nothing to release."));
+      out.line(out.dim("No live watch and no recorded ownership — nothing to release."));
       return;
+    }
+
+    if (watchLive && !mapping.watchTopic && !mapping.watchOwnerEnv) {
+      out.line();
+      out.warn(
+        "Live watch with no recorded ownership — registered before ownership tracking. " +
+          "users.stop will still be called.",
+      );
     }
 
     out.line();

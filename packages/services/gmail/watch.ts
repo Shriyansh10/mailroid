@@ -5,7 +5,7 @@ import { errorFields, hashMailbox, logger } from "@repo/logger";
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 import { getPause, getPausedTenantIds, isTenantPaused } from "./pause.ts";
 import { getAuthFailure, getCooldown } from "./quota-cooldown.ts";
-import { mailroidEnv } from "../env.ts";
+import { isMailboxAllowedInThisEnvironment, mailroidEnv } from "../env.ts";
 
 const TOPIC_NAME = process.env.GMAIL_PUBSUB_TOPIC;
 if (!TOPIC_NAME) {
@@ -16,6 +16,41 @@ if (!TOPIC_NAME) {
 export async function startGmailWatch(
   tenantId: string,
 ): Promise<void> {
+  // OWNERSHIP FIRST, BEFORE EVERY OTHER CHECK (P-1 + P-11).
+  //
+  // users.watch does not add a subscription — Gmail keeps exactly ONE watch per
+  // mailbox and this REPLACES whatever is there, repointing the mailbox's push
+  // notifications at this environment's topic. So registering a watch for a
+  // mailbox this environment does not own silently takes it away from the
+  // environment that does: the other side keeps its database row and its
+  // cursor, and simply stops being told anything ever happened.
+  //
+  // That is the watch-slot theft of the 2026-08-25 incident, and until this
+  // guard existed the boundary did not actually prevent it — the connect path
+  // and the webhook path were gated, but the RENEWAL path (watch-cron and the
+  // startup bootstrap) selected purely on watchExpiration and would happily
+  // re-register a denied mailbox at the next 48h threshold. A release performed
+  // by an operator would silently undo itself two days later.
+  //
+  // Here rather than only in the callers because this is the single funnel every
+  // registration goes through; the callers filter too, but only to avoid the
+  // wasted work, exactly as they do for pauses.
+  const [{ emailAddress } = { emailAddress: null }] = await db
+    .select({ emailAddress: gmailTenantMappings.emailAddress })
+    .from(gmailTenantMappings)
+    .where(eq(gmailTenantMappings.tenantId, tenantId))
+    .limit(1);
+
+  if (emailAddress && !isMailboxAllowedInThisEnvironment(emailAddress)) {
+    logger.warn("[gmail-watch] refusing to register a watch for a mailbox this environment does not own", {
+      tenantId,
+      mailbox: hashMailbox(emailAddress),
+      mailroidEnv: mailroidEnv.env,
+      policy: mailroidEnv.mailboxPolicy.mode,
+    });
+    return;
+  }
+
   // Gated on blockWatchRenewal, not on any pause: users.watch keeps the Pub/Sub
   // SUBSCRIPTION alive and reads no mailbox content, so an ordinary pause lets
   // renewal proceed — blocking it would let the subscription lapse for no
@@ -172,9 +207,16 @@ export async function stopGmailWatch(
       return { stopped: false, reason: `HTTP ${response.status}` };
     }
 
+    // watchExpiration is cleared alongside the ownership columns because after a
+    // confirmed users.stop Gmail holds no watch at all. Leaving the old
+    // expiration behind would say the opposite twice over: watch-health would
+    // report a live watch, and — worse — the renewal cron selects on exactly
+    // this column, so the mailbox would be skipped as "not due" until a date
+    // that no longer means anything, leaving it with no watch and nothing
+    // scheduled to give it one.
     await db
       .update(gmailTenantMappings)
-      .set({ watchTopic: null, watchOwnerEnv: null })
+      .set({ watchTopic: null, watchOwnerEnv: null, watchExpiration: null })
       .where(eq(gmailTenantMappings.tenantId, tenantId));
 
     logger.info("[gmail-watch] users.stop confirmed, ownership released", { tenantId });
@@ -247,12 +289,18 @@ export async function bootstrapGmailWatches(): Promise<void> {
       return;
     }
 
+    // Same ownership filter as gmailWatchCron, and for the same reason: a
+    // renewal replaces Gmail's single watch for that mailbox, so sweeping one
+    // this environment does not own would steal it on every boot.
+    const owned = due.filter((row) => isMailboxAllowedInThisEnvironment(row.emailAddress));
+
     const pausedForWatch = await getPausedTenantIds({ forWatchRenewal: true });
-    const targets = due.filter((row) => !isTenantPaused(pausedForWatch, row.tenantId));
+    const targets = owned.filter((row) => !isTenantPaused(pausedForWatch, row.tenantId));
 
     logger.info("[gmail-watch-bootstrap] renewing watches at startup", {
       due: due.length,
-      skippedPaused: due.length - targets.length,
+      skippedNotOwned: due.length - owned.length,
+      skippedPaused: owned.length - targets.length,
     });
 
     for (const row of targets) {

@@ -1,8 +1,10 @@
 import { inngest } from "@repo/inngest";
 import { db, eq, or, isNull, lt } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
+import { logger } from "@repo/logger";
 import { startGmailWatch } from "./watch.ts";
 import { getPausedTenantIds, isTenantPaused } from "./pause.ts";
+import { isMailboxAllowedInThisEnvironment, mailroidEnv } from "../env.ts";
 
 export const gmailWatchCron = inngest.createFunction(
   { id: "gmail-watch-cron" },
@@ -33,6 +35,24 @@ export const gmailWatchCron = inngest.createFunction(
       return { message: "No watches require renewal at this time." };
     }
 
+    // Mailboxes this environment does not own are dropped before anything else
+    // (P-1 + P-11). A renewal REPLACES the single watch Gmail holds per mailbox,
+    // so renewing one that belongs to another environment silently repoints its
+    // notifications here and leaves the real owner deaf. startGmailWatch refuses
+    // these too; filtering here just avoids the wasted calls, same as pauses.
+    const owned = tenants.filter((t) => isMailboxAllowedInThisEnvironment(t.emailAddress));
+
+    if (owned.length < tenants.length) {
+      logger.info("[gmail-watch-cron] skipping mailboxes owned by another environment", {
+        skipped: tenants.length - owned.length,
+        mailroidEnv: mailroidEnv.env,
+      });
+    }
+
+    if (owned.length === 0) {
+      return { message: "All due watches belong to another environment.", skippedNotOwned: tenants.length };
+    }
+
     // Only pauses that explicitly block renewal are honoured here. users.watch
     // keeps the SUBSCRIPTION alive and reads no mailbox content, so an ordinary
     // pause deliberately lets it through — dropping the channel would cost a
@@ -42,10 +62,10 @@ export const gmailWatchCron = inngest.createFunction(
       ...(await getPausedTenantIds({ forWatchRenewal: true })),
     ]);
     const pausedSet = new Set(pausedForWatch);
-    const renewable = tenants.filter((t) => !isTenantPaused(pausedSet, t.tenantId));
+    const renewable = owned.filter((t) => !isTenantPaused(pausedSet, t.tenantId));
 
     if (renewable.length === 0) {
-      return { message: "All due watches belong to paused mailboxes.", skippedPaused: tenants.length };
+      return { message: "All due watches belong to paused mailboxes.", skippedPaused: owned.length };
     }
 
     const results = [];
