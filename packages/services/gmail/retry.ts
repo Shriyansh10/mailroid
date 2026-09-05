@@ -8,6 +8,12 @@ import {
 import { GmailPacedOutError, classifyGmailFailure } from "./gmail-errors.ts";
 import { quotaUnitsFor, quotaUnitsForPacing, recordGmailCall } from "./call-ledger.ts";
 import { acquireQuota } from "./quota-limiter.ts";
+// P-5a (docs/gmail-rate-limit-boundary.md §13) — see gmail-request.ts's
+// identical import for why this belongs here and not inside quota-limiter.ts.
+import { resolveMailboxForTenant } from "./mailbox-resolver.ts";
+// P-5b + P-12 — see gmail-request.ts's identical import for why this is
+// structurally safe against the "no gate" reasoning in this file's own header.
+import { acquireMailboxSlot } from "./mailbox-semaphore.ts";
 
 /**
  * Retries a Gmail API call on transient failures with exponential backoff.
@@ -91,6 +97,10 @@ export async function withGmailRetry<T>(
       markGmailHealthy?: typeof markGmailHealthy;
       acquireQuota?: typeof acquireQuota;
       recordGmailCall?: typeof recordGmailCall;
+      /** P-5a test seam — real tests use this to avoid touching the database. */
+      resolveMailbox?: typeof resolveMailboxForTenant;
+      /** P-5b + P-12 test seam. */
+      acquireMailboxSlot?: typeof acquireMailboxSlot;
       now?: () => number;
     };
   } = {},
@@ -100,6 +110,8 @@ export async function withGmailRetry<T>(
   const healthyFn = hooks?.markGmailHealthy ?? markGmailHealthy;
   const acquireFn = hooks?.acquireQuota ?? acquireQuota;
   const recordFn = hooks?.recordGmailCall ?? recordGmailCall;
+  const resolveMailboxFn = hooks?.resolveMailbox ?? resolveMailboxForTenant;
+  const acquireSlotFn = hooks?.acquireMailboxSlot ?? acquireMailboxSlot;
   const nowFn = hooks?.now ?? Date.now;
   const { operation, targetId } = parseLabel(label);
   const ctx = { trigger, operation, targetId };
@@ -121,9 +133,15 @@ export async function withGmailRetry<T>(
   let nonNetworkMs = 0;
   let pacedWaitMs = 0;
 
+  // P-5a. Resolved once per call, not once per reserve() — reserve() runs
+  // again on every retry, and re-resolving each time would spend a cache-hit
+  // lookup for no reason (a bucket key cannot change mid-call).
+  const mailbox = tenantId ? await resolveMailboxFn(tenantId) : undefined;
+
   async function reserve(): Promise<number> {
     const { waitedMs } = await acquireFn({
       tenantId,
+      mailbox,
       operation,
       trigger,
       correlationId,
@@ -163,7 +181,18 @@ export async function withGmailRetry<T>(
   for (let attempt = 0; attempt <= retries; attempt++) {
     try {
       networkAttempts++;
-      const result = await fn();
+
+      // P-5b + P-12 (docs/gmail-rate-limit-boundary.md §13). Held only
+      // around `fn()` itself — the one real corsair `api.*` call for this
+      // attempt — same reasoning as gmail-request.ts's identical wrapping of
+      // its own network call.
+      const release = await acquireSlotFn({ tenantId, mailbox });
+      let result: T;
+      try {
+        result = await fn();
+      } finally {
+        release();
+      }
 
       recordFn({
         tenantId,

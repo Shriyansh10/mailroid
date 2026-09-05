@@ -63,6 +63,11 @@ function harness(opts: { waitedMsPerAcquire?: number; gateThrows?: Error } = {})
         clock.ms += waitedMs;
         return { waitedMs, units: req.units };
       },
+      // P-5a: no database in this suite (see the file header) — a real
+      // resolver call would hit gmail_tenant_mappings and fail/warn on every
+      // test. undefined is a legitimate resolver outcome (bucketKey falls
+      // back to tenantId), so it's also the right stub value.
+      resolveMailbox: async () => undefined,
     },
   };
 }

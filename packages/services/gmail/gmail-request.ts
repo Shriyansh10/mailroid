@@ -38,6 +38,19 @@ import {
 // module imports only @repo/logger and the pure ./gmail-errors, so no gate can
 // arrive through it. There is a test asserting that import list.
 import { acquireQuota, chargeQuota } from "./quota-limiter.ts";
+// P-5a (docs/gmail-rate-limit-boundary.md §13). Safe against the "no gate
+// through quota-limiter.ts" invariant above: this resolves a mailbox address
+// via a cached DB read, never a cooldown/pause check, and never throws — see
+// mailbox-resolver.ts's own header for why the DB read belongs here and not
+// inside quota-limiter.ts itself.
+import { resolveMailboxForTenant } from "./mailbox-resolver.ts";
+// P-5b + P-12. Structurally safe against the same deadlock this module's
+// header forbids gating against: the semaphore can make a caller WAIT, but
+// only for OTHER IN-FLIGHT REQUESTS TO FINISH, which happens on wall-clock
+// time and does not depend on any Gmail call succeeding — unlike a quota
+// cooldown, nothing here can be stuck open by a chain of failures. It never
+// throws and never consults cooldown/pause state, so it cannot become a gate.
+import { acquireMailboxSlot } from "./mailbox-semaphore.ts";
 
 /**
  * Test seam. Mirrors the `hooks` option on withGmailRetry (retry.ts) so this
@@ -55,6 +68,10 @@ export interface GmailRequestHooks {
     acquire?: typeof acquireQuota;
     charge?: typeof chargeQuota;
   };
+  /** P-5a test seam — real tests use this to avoid touching the database. */
+  resolveMailbox?: typeof resolveMailboxForTenant;
+  /** P-5b + P-12 test seam. */
+  acquireMailboxSlot?: typeof acquireMailboxSlot;
 }
 
 /**
@@ -89,6 +106,7 @@ async function refreshTenantToken(
   tenantId: string,
   ctx: GmailCallContext,
   chargeFn: typeof chargeQuota = chargeQuota,
+  mailbox?: string,
 ): Promise<void> {
   logger.info("[GMAIL_AUTH] refresh attempted", {
     tenantId,
@@ -112,7 +130,7 @@ async function refreshTenantToken(
   // `chargeQuota` is the whole reason the limiter has two verbs. There is a test
   // asserting this function's source contains `chargeQuota` and NOT
   // `acquireQuota`, because the tempting "consistency" edit here is a real bug.
-  chargeFn({ tenantId, operation: "labels.list", trigger: ctx.trigger, units: 1 });
+  chargeFn({ tenantId, mailbox, operation: "labels.list", trigger: ctx.trigger, units: 1 });
 
   try {
     // `{}` is required, not decorative: labelsList's input schema is
@@ -187,9 +205,20 @@ export async function gmailRequestWithAuthRecovery(
   const getToken = hooks?.getAccessToken ?? defaultGetAccessToken;
   const acquireFn = hooks?.quota?.acquire ?? acquireQuota;
   const chargeFn = hooks?.quota?.charge ?? chargeQuota;
-  const refresh =
-    hooks?.refreshToken ?? ((id: string, c: GmailCallContext) => refreshTenantToken(id, c, chargeFn));
+  const resolveMailboxFn = hooks?.resolveMailbox ?? resolveMailboxForTenant;
+  const acquireSlotFn = hooks?.acquireMailboxSlot ?? acquireMailboxSlot;
   const doFetch = hooks?.fetchImpl ?? fetch;
+
+  // P-5a. Resolved once, up front, and reused for every quota call this
+  // invocation makes (admission, the auth-recovery warm-up, the post-refresh
+  // charge) — one lookup per call, not three. Cached inside the resolver
+  // itself, so this is a Map hit on every call but the first per tenant per
+  // TTL window; see mailbox-resolver.ts for why it can never throw or block.
+  const mailbox = await resolveMailboxFn(tenantId);
+
+  const refresh =
+    hooks?.refreshToken ??
+    ((id: string, c: GmailCallContext) => refreshTenantToken(id, c, chargeFn, mailbox));
 
   // What went to Google, derived from the URL rather than from ctx.operation:
   // the raw-fetch sites label themselves by the work they are doing, not by the
@@ -215,6 +244,7 @@ export async function gmailRequestWithAuthRecovery(
   // refreshTenantToken), so no cap can ever apply to it.
   const { waitedMs } = await acquireFn({
     tenantId,
+    mailbox,
     operation,
     trigger: ctx.trigger,
     correlationId: ctx.correlationId,
@@ -235,10 +265,38 @@ export async function gmailRequestWithAuthRecovery(
       );
     }
     networkAttempts++;
-    return doFetch(url, {
-      ...requestInit,
-      headers: { ...requestInit.headers, Authorization: `Bearer ${token}` },
-    });
+
+    // P-5b + P-12. Held only around the network call itself, not the token
+    // read above — getAccessToken is a local decrypt, never a Gmail request,
+    // and holding a concurrency slot for it would count something that never
+    // touches Gmail's own per-user concurrent-request limit.
+    const release = await acquireSlotFn({ tenantId, mailbox });
+    try {
+      return await doFetch(url, {
+        ...requestInit,
+        headers: { ...requestInit.headers, Authorization: `Bearer ${token}` },
+      });
+    } finally {
+      release();
+    }
+  };
+
+  /**
+   * P-5c byte meter (docs/gmail-rate-limit-boundary.md §13). `Content-Length`
+   * only — never a body read. Cloning the response to measure an actual byte
+   * count would be exact, but every caller of this function still has to
+   * consume the ORIGINAL response (`.json()`/`.text()`), and a meter has no
+   * business adding a clone + buffer read to every Gmail response just to
+   * count it. Gmail sets this header on every response observed in practice;
+   * a response without it is simply not counted (`undefined`, not `0` — an
+   * absent header is "not measured," not "measured as zero"), consistent
+   * with this being a meter, not an enforced budget.
+   */
+  const responseBytes = (response: Response): number | undefined => {
+    const header = response.headers.get("content-length");
+    if (!header) return undefined;
+    const parsed = Number(header);
+    return Number.isFinite(parsed) ? parsed : undefined;
   };
 
   /**
@@ -248,7 +306,7 @@ export async function gmailRequestWithAuthRecovery(
    * outcome with a real handler, but it is still a refused request as far as
    * Gmail is concerned, and the rollup's escalation should treat it as one.
    */
-  const record = (ok: boolean) => {
+  const record = (ok: boolean, response: Response) => {
     recordGmailCall({
       tenantId,
       operation,
@@ -258,12 +316,13 @@ export async function gmailRequestWithAuthRecovery(
       attempts: networkAttempts,
       durationMs: Date.now() - startedAt - nonNetworkMs,
       waitedMs: pacedWaitMs || undefined,
+      bytes: responseBytes(response),
     });
   };
 
   const first = await send();
   if (first.status !== 401) {
-    record(first.ok);
+    record(first.ok, first);
     return first;
   }
 
@@ -279,6 +338,7 @@ export async function gmailRequestWithAuthRecovery(
   // charge would understate what recovery actually costs.
   chargeFn({
     tenantId,
+    mailbox,
     operation,
     trigger: ctx.trigger,
     correlationId: ctx.correlationId,
@@ -288,7 +348,7 @@ export async function gmailRequestWithAuthRecovery(
   const retried = await send();
 
   if (retried.status === 401) {
-    record(false);
+    record(false, retried);
     const body = await retried.clone().text();
     logger.warn("[GMAIL_AUTH] refresh failed", {
       tenantId,
@@ -304,7 +364,7 @@ export async function gmailRequestWithAuthRecovery(
     );
   }
 
-  record(retried.ok);
+  record(retried.ok, retried);
 
   logger.info("[GMAIL_AUTH] refresh succeeded", {
     tenantId,

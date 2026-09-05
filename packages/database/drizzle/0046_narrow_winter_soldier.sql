@@ -1,0 +1,1 @@
+ALTER TABLE "message_metadata" ADD COLUMN "thread_history_id" text;

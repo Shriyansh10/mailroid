@@ -113,6 +113,14 @@ export interface RollupSample {
    * is to raise the rate limit, which is exactly backwards.
    */
   waitedMs?: number;
+  /**
+   * Response bytes for this call, where measurable. Optional and additive:
+   * a caller that never reports it (every consumer before P-5c,
+   * docs/gmail-rate-limit-boundary.md §13) gets a summary line shaped exactly
+   * as before — `bytes` is omitted from the emitted line when the window's
+   * total is zero, same convention as `waitedMs`.
+   */
+  bytes?: number;
 }
 
 export interface Rollup {
@@ -178,6 +186,10 @@ interface Bucket {
    *  any one call stall badly", and a mean would hide both. */
   waitedTotalMs: number;
   waitedMaxMs: number;
+  /** P-5c byte meter. Summed only — no per-call max; a byte count has no
+   *  equivalent of "did one call stall badly", so there is nothing a max
+   *  would tell a reader that the total doesn't already. */
+  bytes: number;
   /** Wall-clock start of the window now accumulating. */
   windowStartedAt: number;
   /** Rung of LADDER_MS this key is on. */
@@ -276,6 +288,7 @@ export function createRollup(options: RollupOptions): Rollup {
       durationMax: 0,
       waitedTotalMs: 0,
       waitedMaxMs: 0,
+      bytes: 0,
       windowStartedAt: at,
       rung: 0,
       healthySince: at,
@@ -297,6 +310,7 @@ export function createRollup(options: RollupOptions): Rollup {
     bucket.durationMax = 0;
     bucket.waitedTotalMs = 0;
     bucket.waitedMaxMs = 0;
+    bucket.bytes = 0;
     bucket.windowStartedAt = at;
   }
 
@@ -347,6 +361,10 @@ export function createRollup(options: RollupOptions): Rollup {
         bucket.waitedMaxMs = sample.waitedMs;
       }
     }
+
+    if (typeof sample?.bytes === "number") {
+      bucket.bytes += sample.bytes;
+    }
   }
 
   function emitSummary(bucket: Bucket, at: number): void {
@@ -390,6 +408,10 @@ export function createRollup(options: RollupOptions): Rollup {
       // look exactly as they did before this field existed.
       waitedTotalMs: bucket.waitedTotalMs || undefined,
       waitedMaxMs: bucket.waitedMaxMs || undefined,
+      // P-5c: omitted when zero, same convention as waitedMs above — a
+      // window with no bytes reported (i.e. every consumer before the meter
+      // existed) keeps the exact line shape it always had.
+      bytes: bucket.bytes || undefined,
       healthyForMs: healthyFor,
       // Mirrors healthyForMs so a degraded window is filterable structurally,
       // not only by reading the message. Omitted when healthy, so a healthy

@@ -296,6 +296,22 @@ export interface GmailCallRecord {
    * that would be to raise the rate — exactly backwards.
    */
   waitedMs?: number;
+  /**
+   * P-5c byte METER (docs/gmail-rate-limit-boundary.md §13) — deliberately not
+   * a budget; there is no ceiling and none is planned until the meter itself
+   * has told us what a real ceiling should be. Response bytes on the
+   * Gmail -> Mailroid leg for THIS call, where measurable.
+   *
+   * RAW FETCHES ONLY. Only `gmail-request.ts`'s `record()` ever sets this —
+   * corsair's `api.*` wrapper (retry.ts) returns already-parsed objects, so
+   * response size is not observable there at all. Because raw-fetch and
+   * corsair operations never share an `operation` value (`users.*` vs
+   * `threads.*`/`messages.*`/`drafts.*`/`labels.*`), a bucket that has any
+   * `bytes` is, structurally, always a raw-fetch bucket — a `threads.get`
+   * summary showing no bytes means "not measurable here," never "zero
+   * bytes moved."
+   */
+  bytes?: number;
 }
 
 /**
@@ -333,6 +349,7 @@ export function recordGmailCall(record: GmailCallRecord): void {
       pricing,
       durationMs: record.durationMs,
       waitedMs: record.waitedMs,
+      bytes: record.bytes,
     });
 
     // `quotaUnits` stays possibly-undefined ON PURPOSE, even though the limiter
@@ -345,6 +362,7 @@ export function recordGmailCall(record: GmailCallRecord): void {
       quotaUnits,
       durationMs: record.durationMs,
       waitedMs: record.waitedMs,
+      bytes: record.bytes,
     };
 
     if (record.ok) {

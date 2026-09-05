@@ -65,6 +65,9 @@ function harness(opts: {
         if (!r) throw new Error(`unexpected fetch #${calls.fetch}`);
         return r;
       }) as unknown as typeof fetch,
+      // P-5a: no database in this suite (see the file header) — undefined is
+      // also a legitimate resolver outcome (bucketKey falls back to tenantId).
+      resolveMailbox: async () => undefined,
     },
   };
 }

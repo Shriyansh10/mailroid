@@ -4,7 +4,6 @@ import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
 import { generateMissingEmbeddings, ingestMessage } from "./index.ts";
-import { triggerGmailSync } from "./sync-metadata.ts";
 import { assertSyncAllowed, handleGmailFailure, markGmailHealthy } from "./quota-cooldown.ts";
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 
@@ -260,14 +259,28 @@ export async function syncHistoryForTenant(
       // Gmail's history retention window has passed startHistoryId — the
       // diff can no longer be reconstructed at all. The old behavior reset
       // the cursor and moved on, silently losing whatever changed in the
-      // unrecoverable window. The only correct recovery is a full re-sync.
-      logger.warn("[WEBHOOK_SYNC] historyId outside retention window, triggering full re-sync", {
+      // unrecoverable window.
+      //
+      // P-3 (docs/gmail-rate-limit-boundary.md §13): this used to call
+      // triggerGmailSync(tenantId) right here — an unbounded full walk of the
+      // whole mailbox, fired inline, with no operator and no budget. A 404 is
+      // not rare enough for that to be safe: it is exactly what a quota
+      // cooldown or a paused mailbox produces once the retention window
+      // passes underneath it. Setting the flag instead makes a resync a
+      // DELIBERATE, budgeted, confirmed action — pnpm admin gmail:resync* —
+      // never an automatic side effect of a stale cursor. The cursor write
+      // below is unchanged: it still has to move forward so the NEXT webhook
+      // diff starts from a fetchable point instead of repeating this 404.
+      logger.warn("[WEBHOOK_SYNC] historyId outside retention window, flagging for resync", {
         tenantId, lastHistoryId, incomingHistoryId,
       });
-      await triggerGmailSync(tenantId);
       await db
         .update(gmailTenantMappings)
-        .set({ lastHistoryId: incomingHistoryId })
+        .set({
+          lastHistoryId: incomingHistoryId,
+          resyncRequired: true,
+          resyncRequiredAt: new Date(),
+        })
         .where(eq(gmailTenantMappings.emailAddress, mapping.emailAddress));
       return { outcome: "needs-resync" };
     }

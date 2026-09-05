@@ -1,6 +1,9 @@
 # Gmail rate limits: what is actually scoped to what
 
 **Investigated:** 2026-08-27
+**Decided:** 2026-08-29 (§13) · **Revised:** 2026-09-03 (attachment architecture:
+§12.5, P-13, U-5, §13.15; amendments to P-5c, P-6, P-7) · **U-1 answered
+2026-09-03: local and production share mailboxes — P-1 and P-2 are urgent**
 **Branch:** `feat/gmail-call-logging` @ `2de3e07`
 **Scope:** evidence only. No production change was made, no OAuth grant revoked,
 no `users.stop` issued, no limiter or sync behaviour altered.
@@ -13,7 +16,14 @@ that is false is the half attachments will land on.
 
 Every claim below carries one of:
 `CONFIRMED BY GOOGLE API DEFINITION` · `CONFIRMED BY GOOGLE DOCUMENTATION` ·
-`CONFIRMED BY TELEMETRY` · `CONFIRMED BY CODE` · `INFERENCE` · `UNKNOWN`.
+`CONFIRMED BY TELEMETRY` · `CONFIRMED BY CODE` · `CONFIRMED BY OPERATOR` ·
+`INFERENCE` · `UNKNOWN`.
+
+`CONFIRMED BY OPERATOR` was added 2026-09-03 for facts about the deployment that
+only the person running it can supply — account connections, configuration
+chosen outside the repo. It ranks below telemetry deliberately: it is reliable
+about *what is true*, and carries no detail, so a claim in this class usually
+implies a measurement still owed.
 
 ---
 
@@ -438,8 +448,21 @@ inspection is conclusive on the structure; the bound is `INFERENCE`.
 
 ### 8.4 Unknowns requiring further testing
 
-- **U-1** — **Which mailboxes are connected in production?** Local holds three
-  (digests only; see the probe output, not reproduced here). Reading the prod set needs
+- **U-1** — **Which mailboxes are connected in production?** `CONFIRMED BY
+  OPERATOR (2026-09-03)`: **local and production do currently share mailboxes.**
+  The overlap is not hypothetical and is no longer an open architectural
+  question — it is a live misconfiguration to be removed.
+
+  **This supersedes the earlier framing of U-1**, which read *"whether local and
+  production currently share a mailbox is UNKNOWN — and it is the one fact that
+  decides how urgent §13's proposal 1 is."* That question is answered. P-1 and
+  P-2 are **urgent, not conditional**, and no reader should now weigh them
+  against the possibility that the environments are already cleanly separated.
+  They are not.
+
+  What remains unknown is narrower and is an **inventory task, not a
+  prerequisite**: *which* mailboxes overlap, and whether either of §9.2's two
+  orphaned watches (`0cfe66a5…`, `107f9f96…`) is among them. That still needs
   the SSH tunnel, which is yours to run:
 
   ```
@@ -447,11 +470,21 @@ inspection is conclusive on the structure; the bound is `INFERENCE`.
   pnpm --filter @repo/database db:studio:prod
   ```
 
-  Until then, **whether local and production currently share a mailbox is
-  UNKNOWN** — and it is the one fact that decides how urgent §13's proposal 1 is.
+  It matters for **remediation** — you cannot disconnect the right mailbox
+  without naming it, and §9.2 shows mail may be going nowhere right now — but it
+  no longer gates any decision in §13. See §13.13 for the query and the
+  `LOG_HASH_SECRET` correction that makes the comparison non-obvious.
 - **U-2** — Whether `GMAIL_QUOTA_PACING` is on in production (C-1).
 - **U-3** — The true per-method unit cost of the `*.get` family (§11.2).
 - **U-4** — Consumer-account bandwidth limits (§3.5).
+- **U-5** — **Which object store backs the attachment cache** (§12.5, P-13).
+  There is none in the tracked tree today. The candidates are an S3-compatible
+  bucket (R2, B2, Spaces) or a MinIO container on the VPS; the VPS has 1 GB of
+  RAM and its AI pipeline is already deliberately scope-limited, which argues
+  against self-hosting. P-13 is specified against the storage *contract* — put,
+  get, head, delete, keyed by string — so the backend can be chosen late, but it
+  must be chosen **before** the attachment branch is unparked, because "no store
+  configured" must be a boot failure, not a silent fallthrough to Gmail.
 
 ---
 
@@ -506,6 +539,12 @@ Mailroid handles this correctly and cheaply: the push is dropped before any
 Gmail call, so the cost is a webhook delivery, not quota. **But the mail those
 mailboxes receive is going nowhere.** If either is a production mailbox, that is
 silent production mail loss right now — which is exactly what U-1 resolves.
+
+**Updated 2026-09-03.** `CONFIRMED BY OPERATOR`, local and production do share
+mailboxes (§8.4). That does not prove either of these two is one of them — the
+digests cannot be compared across environments (§13.13) — but it removes the
+benign reading in which the orphans are certainly local test accounts. The
+inventory is now the priority item in §16.
 
 ---
 
@@ -720,11 +759,127 @@ a cleared suspect. This does not change the incident's root cause (§2.1: one
 project, local traffic on production mailboxes); it changes what we may assume
 when the branch is unparked.
 
+### 12.5 The missing architecture: what "cached" has to mean
+
+Everything above describes controls that make attachment traffic *survivable*.
+None of them removes the reason the traffic exists. That reason is architectural,
+and until 2026-09-03 this document did not state it:
+
+> **Gmail is the source of an attachment. It is not the place we read it from
+> twice.**
+
+`CONFIRMED BY CODE` (by absence): there is **no object store anywhere in the
+tracked tree** — no S3/R2/MinIO client, no bucket configuration, no storage key
+column, and no attachment table in `packages/database` at all. The whole
+attachment surface lives in `stash@{1}`. So the cache §12.2 calls "cold" and
+"unbounded" is not a cache that needs tuning; it is a cache that does not exist
+in any durable form yet.
+
+That absence is what §12.4 actually caught. `AUDIT.md` read
+`last_accessed_at = 2` and concluded attachments were quiet, while the meter
+showed hundreds to thousands of `messages.attachments.get` calls in the same
+window. A database row was being treated as proof that bytes were held. It was
+not — and it cannot be, because a row records *where* an object is, never *that*
+it is there.
+
+So the term is defined here, once, and the rest of this document uses it in
+exactly this sense:
+
+```
+cached  ≡  the attachment bytes exist in object storage,
+           at the key the database row names,
+           and were verified to be there
+
+NOT     ≡  a database row exists
+NOT     ≡  a manifest entry exists
+NOT     ≡  metadata was fetched
+NOT     ≡  an HTTP response was once served
+```
+
+The intended shape, stated as a requirement rather than an optimisation:
+
+```
+        attachment requested
+                 │
+                 ▼
+        is it in object storage?
+                 │
+           ┌─────┴─────┐
+          YES          NO
+           │            │
+           │            ▼
+           │          Gmail        ← bandwidth, concurrency, quota units
+           │            │            all charged HERE, once
+           │            ▼
+           │      object storage   ← write bytes, then mark cached
+           │            │
+           └─────┬──────┘
+                 ▼
+                user
+```
+
+The first read of an attachment is expensive and is charged to Gmail. Every read
+after it is charged to our own storage, which has no per-mailbox daily ceiling,
+no shared concurrency slot, and no relationship to §3.5's bandwidth family at
+all. That asymmetry is the entire point:
+
+```
+first fetch   Gmail → Mailroid   20 MB     ← the only line §3.5 cares about
+              Mailroid → store   20 MB
+
+later reads   store → Mailroid   20 MB
+              Gmail → Mailroid    0 MB     ← and this is what P-5c must report
+```
+
+`INFERENCE`, but a direct one: the controls in P-5 bound how fast we can spend a
+mailbox's daily download allowance. Only a real cache bounds **how many times we
+spend it on the same bytes.** A limiter without a cache paces the repetition; it
+does not remove it.
+
+The backend is not chosen yet — see **U-5** — and P-13 is deliberately written
+against the *contract* rather than a vendor.
+
 ---
 
 ## 13. Proposed changes
 
-Ordered by evidence strength. Nothing here has been implemented.
+Ordered by evidence strength. **Nothing here has been implemented yet, but every
+item below has now been decided** — reviewed item by item on 2026-08-29, with the
+chosen option recorded in a `**Decision (2026-08-29)**` block at the end of each
+proposal, together with what was rejected and why. Where a decision departs from
+the proposal as originally written, the departure is stated explicitly rather
+than silently folded in.
+
+Four items in §8.2 and §8.3 had no proposal attached to them at all (W-1, W-3,
+C-2, and the admin surface that B-2 grew into). They now do: P-9 through P-12,
+below.
+
+**P-13 is later and different in kind.** Added 2026-09-03, it does not answer a
+numbered defect in §8 — it answers the absence identified in §12.5, which no
+audit item had raised because nothing in the tracked tree was there to audit.
+Every other proposal here constrains traffic; P-13 removes it.
+
+### 13.0 Decision ledger
+
+| item | problem | decision |
+|---|---|---|
+| **B-1** | no environment boundary | **P-1** — `MAILROID_ENV` + allowlist, checked in the OAuth callback |
+| **B-2** | `users.stop` never called | **P-2** in full, **plus P-9** — an admin developer-tools surface |
+| **B-3** | limiter keyed on `tenantId` | **P-5a + P-5b together** — mailbox key *and* in-flight semaphore in one change |
+| **B-4** | attachment retry ≈25 calls | **P-6 + a hard attempt cap** |
+| **W-1** | limiter is process-global | **P-10** — stay in-process, make a second replica *visible* |
+| **W-2** | concurrency is per call site | **P-5b** — one per-mailbox semaphore, all call sites acquire from it |
+| **W-3** | bootstrap sweep every boot | **P-11** — gate the sweep on `MAILROID_ENV` |
+| **W-4** | nothing measures bytes | **P-5c, revised** — meter first, enforce later |
+| **C-1 / U-2** | pacing may be off in prod | **P-8, revised** — invert the flag to opt-**out** |
+| **C-2** | `INITIAL_SYNC_CONCURRENCY` | **P-12** — keep the value, fix the *meaning* |
+| **P-3** | silent full sync on 404 | flag and **wait for a human** — no automatic full sync |
+| **P-4** | resync refetches known threads | filter page ids against stored, keep `force` |
+| **P-7 / U-4** | thumbnails are full downloads | all three changes: intent-load, cache header, demote |
+| **U-1** | ~~do local and prod share a mailbox?~~ **they do** (operator, 09-03) | **P-1 + P-2 are urgent, unconditionally.** The tunnel now answers *which* — inventory for remediation, not a gate — see §13.13 |
+| **U-3** | `*.get` cost discrepancy | probe designed now, **mailbox left blank** — see §13.14 |
+| **§12.5** | no durable attachment cache exists | **P-13** — object storage *is* the cache; Gmail is read once |
+| **U-5** | which object store | chosen late, but **before** unparking — see §8.4, P-13 |
 
 ### P-1 · Hard environment boundary on mailbox connect
 
@@ -742,6 +897,40 @@ Ordered by evidence strength. Nothing here has been implemented.
   an explicit, logged override and a clear error.
 - **Verification** — attempt to connect a prod mailbox locally: refused, with
   **zero** Gmail calls in `mailroid-local`'s meter for that mailbox.
+- **Decision (2026-08-29)** — **adopted exactly as written.** A required
+  `MAILROID_ENV`, plus an allow/deny list of mailbox addresses consulted in the
+  OAuth callback *before* `storeGmailConnectedEmail` is reached, so a refusal
+  costs zero Gmail calls and cannot steal a watch on its way to failing. The
+  refusal message names the environment that owns the mailbox, because "refused"
+  without an owner sends a developer looking in the wrong place.
+
+  **Correction (2026-09-04) — checked "before `storeGmailConnectedEmail`" is not
+  implementable, and the verification criterion above is wrong.**
+  `storeGmailConnectedEmail` is *where the mailbox address is first learned* — it
+  calls `users.getProfile` to get it. There is no earlier point at which the
+  callback knows which mailbox this is, so the allowlist check cannot run before
+  that function; it runs **inside** it, between the profile fetch and the
+  persistence writes (the function is split in two for exactly this seam). The
+  honest cost of a refusal is **one `users.getProfile` (1 quota unit)**, not
+  zero — what it buys is zero `users.watch` (100 units, and the watch-slot theft
+  that caused the incident) and zero `triggerGmailSync` (thousands). Verification
+  is therefore: refused, naming the owning environment, with **one**
+  `users.getProfile` and **zero** `users.watch` / `threads.get`.
+
+  Two alternatives were considered and rejected. A `mailbox_environment` column
+  on `gmail_tenant_mappings` looks stronger — it is queryable and survives
+  redeploys — but local and production run **separate databases**, so neither
+  side can see the other's claim; it would record an intention, not enforce a
+  boundary. A local-side deny list only (production left unguarded) is cheap and
+  addresses the failure direction we actually observed on 25 August, but it
+  encodes the assumption that mistakes only ever travel one way, and B-1 is
+  precisely a bug about an assumption like that.
+
+  The env-var list ships first; it is promoted to a table only when it has
+  earned it by becoming unwieldy, per the original proposal.
+
+  This item also supplies the `MAILROID_ENV` variable that **P-11** depends on,
+  so the two are implemented together as one change.
 
 ### P-2 · Watch ownership and lifecycle
 
@@ -759,6 +948,27 @@ Ordered by evidence strength. Nothing here has been implemented.
   the behaviour the cooldown exists to prevent. Gate it on a healthy mailbox;
   never on a 429 path.
 - **Verification** — disconnect locally, confirm pushes stop within minutes.
+- **Decision (2026-08-29)** — **adopted in full — all three parts (a), (b) and
+  (c) — and then extended.** Best-effort `users.stop` on disconnect and on
+  `rollbackGmailConnection` when a credential still works, silent otherwise;
+  `watch_topic` and `watch_owner_env` recorded on the mapping so a takeover is a
+  query rather than an archaeology exercise; and the unmapped-push `warn`
+  promoted to a loud, countable line instead of one that scrolls past. The
+  original risk note stands unchanged: `stop` costs 50 units, so it is gated on
+  a healthy mailbox and never issued on a 429 path.
+
+  Doing only the `stop` call was rejected: it plugs the leak but leaves takeover
+  undetectable, which means the *next* occurrence is diagnosed the same
+  expensive way this one was. Doing only the recording and logging was also
+  rejected: it makes the problem visible while leaving orphaned watches running
+  for their full seven days, and §9.2 shows two of them running right now.
+
+  **The extension.** Recording ownership is only useful if someone can see it and
+  act on it, which is the product philosophy in CLAUDE.md applied to our own
+  operational tooling — a `watch_owner_env` column that nothing renders scores
+  *Implemented* and nothing else. So this work now also carries an admin-facing
+  developer-tools surface: list the orphans, release one, and act on a mailbox by
+  id. That surface is large enough to be specified separately — see **P-9**.
 
 ### P-3 · Never full-sync silently
 
@@ -774,6 +984,26 @@ Ordered by evidence strength. Nothing here has been implemented.
   visible and cheap, a surprise 9,800-thread sync is neither.
 - **Verification** — force a stale cursor on a test mailbox; expect a flag and
   zero `threads.get`.
+- **Decision (2026-08-29)** — **adopted in its strictest form: flag it and wait
+  for a human. No automatic full sync at all**, not even a budgeted one.
+
+  On a 404, `webhook-sync.ts` writes a `resync_required` flag on the mapping and
+  surfaces it; nothing syncs until a person triggers it. The middle option — an
+  automatic resync capped by an explicit thread or byte ceiling — was considered
+  and rejected. It is genuinely attractive, because small mailboxes would
+  self-heal and never trouble anyone. But it reintroduces the exact shape the
+  incident had: an outward-facing, expensive action taken on drift with nobody
+  watching, differing from today's behaviour only in the size of the number. A
+  budget makes the failure cheaper; it does not make it *visible*, and visibility
+  is the property CLAUDE.md's "no silent fallbacks on drift" is asking for.
+
+  The accepted cost is stated plainly: a mailbox whose watch was stolen will sit
+  stale until someone acts on the flag. That is the correct trade — staleness is
+  visible and cheap, a surprise 9,800-thread sync is neither.
+
+  The flag is surfaced on the **P-9** admin surface, which is where it is
+  acknowledged and triggered. P-3 therefore depends on P-9 for its user-facing
+  half; the flag itself can land first.
 
 ### P-4 · Skip what we already have during resync
 
@@ -788,8 +1018,32 @@ Ordered by evidence strength. Nothing here has been implemented.
   comparing `historyId`, and keep `force` for a true rebuild.
 - **Verification** — resync a fully-synced mailbox; `threads.get` count should
   fall by ≥90% versus today's baseline of ~1 per thread.
+- **Decision (2026-08-29)** — **adopted as written, including the `historyId`
+  bound and the `force` escape hatch.** Each `threads.list` page is diffed
+  against stored thread ids before any thread is expanded; a thread we already
+  hold is skipped unless its `historyId` says it moved; an explicit `force`
+  still performs a true rebuild.
 
-### P-5 · Re-key the limiter to the mailbox, and add a byte budget
+  Skipping on **id alone**, without the `historyId` comparison, was rejected
+  despite being simpler and cheaper. It would silently never refresh a thread
+  that changed while we were not listening — and a resync exists *precisely*
+  because we were not listening. That is a silent staleness introduced by the
+  very code path meant to repair staleness, which is the failure mode this
+  document is largely about.
+
+  Deferring P-4 until P-3 lands was also considered, on the reasoning that a
+  human-gated full sync is a rare deliberate act where cost matters less. It was
+  rejected because the two changes are independent and P-4 is small: when a
+  human *does* press the button, it should cost what changed, not what exists.
+
+### P-5 · Re-key the limiter to the mailbox, and add a byte meter
+
+**Naming correction (2026-09-04).** Everywhere below that still reads "byte
+budget," read "byte **meter**." (c) ships with no ceiling and no rejection
+path — "budget" implies a threshold that gets enforced, and there is
+deliberately none yet (see the 2026-08-29 decision below). Call it a meter in
+code and in logs too, so someone reading this in six months does not go
+looking for enforcement that was never built.
 
 - **Problem** — B-3 (wrong key) and W-4 (wrong quantity).
 - **Evidence** — §3.1 Google's "shared by all Gmail API clients for a user";
@@ -806,6 +1060,71 @@ Ordered by evidence strength. Nothing here has been implemented.
 - **Verification** — drive a synthetic attachment load; confirm bytes are
   counted, the budget binds, and in-flight never exceeds the semaphore.
 - **Note** — do **not** also retune the 75 units/sec figure here. U-3 first.
+- **Decision (2026-08-29)** — **adopted, but split into two shipments, and (c)
+  is revised.**
+
+  **(a) and (b) ship together as one change.** The mailbox-keyed bucket and the
+  per-mailbox in-flight semaphore are not two features; they are one idea —
+  *make the limiter's key match Gmail's key* — applied to the two dimensions the
+  limiter can reach today. Keying the bucket on the mailbox address while
+  leaving concurrency at `mapWithConcurrency(4)` and `ingestAllOrThrow(2)` would
+  fix the meter and leave the actual protected dimension (§3.1, W-2) untouched.
+  The semaphore is a single ceiling per mailbox that **every** call site
+  acquires from, replacing the per-call-site numbers rather than sitting beside
+  them.
+
+  Two narrower options were rejected. Re-keying alone (deferring the semaphore)
+  leaves W-2 open indefinitely. Leaving B-3 entirely on the grounds that P-1
+  makes it moot — one mailbox in one environment means `tenantId` and mailbox
+  are 1:1 — was rejected because it makes a *correctness* property depend on a
+  *policy* holding perfectly, forever, including through the one-at-a-time
+  shared-test-mailbox handover §5 permits.
+
+  A variant that added priority classes to the semaphore (interactive work
+  preempting background for a slot) was rejected for now: §12.2 shows the
+  existing interactive classification is itself wrong — `thumbnail` should never
+  have been interactive — so building preemption on top of it would formalise a
+  mistake **P-7** is about to fix.
+
+  **(c) is revised: meter first, enforce later.** The byte counter ships without
+  a ceiling. Actual response sizes are charged per mailbox per day and logged as
+  a rollup (consistent with the standing "errors full, successes summarised"
+  rule); nothing is refused yet. The reason is U-4: consumer-account bandwidth
+  limits are `UNKNOWN`, the published 2,500 MB/day is a Workspace figure and
+  explicitly an **upper** bound, and a hard ceiling chosen today would be a
+  guess wearing the costume of a limit. Metering first turns U-4 from an
+  unknown into a measurement.
+
+  When the ceiling does land it lands as originally specified — attachment
+  traffic **refused, not queued**, surfaced as a clear "daily attachment limit
+  reached" — because a queue behind an exhausted daily budget is a silent
+  failure with extra steps. A warn-only threshold that never refuses was
+  rejected as the permanent design for the same reason; it is acceptable only as
+  the intermediate state the meter already gives us.
+
+  **What the meter counts, precisely: bytes on the Gmail → Mailroid leg only.**
+  Once P-13 lands there are three byte-moving legs, and only one of them is
+  charged against the limit §3.5 describes:
+
+  | leg | counted by P-5c? | why |
+  |---|---|---|
+  | Gmail → Mailroid | **YES** | this *is* the mailbox's shared daily allowance |
+  | Mailroid → object storage | no | our egress and our bill; not Gmail's |
+  | object storage → Mailroid → user | **no** | a cached read spends **zero** Gmail bandwidth |
+
+  So a user opening a cached 20 MB attachment must move the counter by **0**. If
+  it moves by 20 MB, the meter is instrumented in the wrong place — at the route
+  handler rather than at the Gmail client — and it will read a cache hit as
+  bandwidth spend, which inverts the very signal U-4 needs. Instrument it at the
+  Gmail transport, where the response body actually arrives, not at the surface
+  that serves the user.
+
+  This also makes the meter a **cache-effectiveness** measurement for free:
+  Gmail bytes per distinct attachment approaching 1× means the cache is working;
+  drifting above 1× means something is re-fetching what we already hold, which
+  is the exact failure §12.4 could not see.
+
+  The original note stands: the 75 units/sec figure is **not** retuned here.
 
 ### P-6 · Fix the attachment retry multiplication
 
@@ -819,8 +1138,60 @@ Ordered by evidence strength. Nothing here has been implemented.
   the next user action recovers it.
 - **Verification** — a test forcing 401-then-404-then-500; assert
   `network_attempts ≤ 5`.
+- **Decision (2026-08-29)** — **adopted, with a hard attempt cap added.**
+  `refreshedToken` and `refreshedId` are hoisted out of the retried closure so
+  each recovery happens once per logical operation rather than once per retry,
+  collapsing the 5×3 upper bound to roughly 3. On top of that, an explicit
+  `network_attempts` counter is threaded through the fetch and **throws** past
+  5, so the bound is enforced rather than merely implied by the control flow.
 
-### P-7 · Thumbnails must not be free full downloads
+  Hoisting the flags alone was rejected: it fixes the known instance and leaves
+  nothing standing guard, so a later refactor that reintroduces a nested
+  recovery would restore the ×25 multiplication with no test failing. The
+  counter is the part that survives refactoring.
+
+  Narrowing `withGmailRetry` to wrap only the single HTTP request — a stronger,
+  structural guarantee — was considered and deferred rather than rejected. It is
+  the better shape, but it is a larger change to a code path currently sitting in
+  `stash@{1}`, and the counter delivers the enforceable bound at a fraction of
+  the risk. Revisit it when the attachment branch is unparked in earnest.
+
+  The stated risk is accepted unchanged: a genuine token expiry occurring
+  mid-retry is no longer recovered within that operation, and the next user
+  action recovers it instead.
+
+  **Addendum (2026-09-03) — the cap must sit *behind* the cache, not in front of
+  it.** The ×25 bound is what one *logical fetch* costs when it reaches Gmail.
+  P-13 exists so that most logical fetches never reach Gmail at all, and the two
+  changes only compose if they are ordered correctly:
+
+  ```
+  request → cache lookup → HIT  → serve from storage, return.   0 Gmail calls
+                         → MISS → single-flight → withGmailRetry → Gmail
+                                                   (cap ≤ 5 here)
+  ```
+
+  The failure to avoid is the inversion — retry logic entered first, cache
+  consulted only on the success path, or a cache miss reported for bytes we
+  actually hold. In that shape a cached attachment still costs up to 5 Gmail
+  calls, the attempt cap dutifully enforces a bound on traffic that should have
+  been **zero**, and P-6 looks like it is working while P-13 is doing nothing.
+  A capped multiplication of an unnecessary call is still an unnecessary call.
+
+  Concretely: the `network_attempts` counter must never increment on a cache
+  hit, and a test should assert exactly that — fetch twice, assert
+  `network_attempts` is 0 on the second.
+
+  This is a **gate on unparking the attachment branch**, not a follow-up to it.
+
+  **Definition (2026-09-04), to close a reading that split the review — the cap
+  is 5 total, not "5 retries plus the first call."** `network_attempts` counts
+  *every* outbound Gmail attempt including the first, maximum 5. This is not a
+  new rule: [`gmail-request.ts`](../packages/services/gmail/gmail-request.ts#L227)
+  already increments the counter on the initial attempt as well as each retry,
+  so the existing code and this document now agree in writing.
+
+### P-7 · Thumbnails are a presentation layer, not a cache
 
 - **Problem** — auto-loading thumbnails are full downloads with no cache header.
 - **Evidence** — `attachment-list.tsx:104-125`; `route.ts:35`.
@@ -831,6 +1202,88 @@ Ordered by evidence strength. Nothing here has been implemented.
 - **Risk** — a slightly less magical inbox. Worth it.
 - **Verification** — mount an inbox screen cold; assert zero
   `attachments.get` until intent.
+- **Decision (2026-08-29)** — **adopted in full: all three changes, not two.**
+  Thumbnails load on intent (click, or viewport intersection), the route gains
+  `Cache-Control: private, max-age=…` **in addition to** today's `force-dynamic`,
+  and `thumbnail` is reclassified out of `INTERACTIVE_TRIGGERS` so it stops
+  jumping background reservations.
+
+  **Correction (2026-09-03) — `Cache-Control` does not replace `force-dynamic`.**
+  This decision originally read "in place of today's header-less
+  `force-dynamic`", which is wrong and would be a dangerous thing for an
+  implementer to take literally. The two are different mechanisms at different
+  layers:
+
+  | | what it controls |
+  |---|---|
+  | `force-dynamic` | Next.js **server** behaviour — opts the route out of static generation and route-level caching, which is what keeps a per-user authenticated response from being rendered once and shared |
+  | `Cache-Control` | what the **browser and any intermediary** may do with the response after it is produced |
+
+  §12.2's observation was that the route is `force-dynamic` **and** sets no
+  `Cache-Control` — the defect is the missing header, not the presence of
+  `force-dynamic`. Removing `force-dynamic` while adding a `private` cache header
+  would trade a bandwidth problem for an authorisation one, which is a strictly
+  worse bug than the one P-7 is fixing.
+
+  The requirement, stated so it cannot be misread: **the route keeps whatever
+  dynamic/authenticated behaviour it needs, and additionally sets an appropriate
+  `Cache-Control`.** Confirm the route's actual rendering requirements before
+  touching its exports rather than inferring them from this document.
+
+  The partial option — cache header and demotion, keeping auto-load — was
+  rejected. It kills the remount storm and the priority inversion, which are the
+  repeated costs, but it leaves the **first** cold render pulling every image on
+  screen. That is §12.3's 48 MB-per-screen arithmetic surviving intact, against
+  a daily allowance shared with every other client of that mailbox and currently
+  unmeasured (W-4). The multiplier has to be removed before the byte meter is
+  asked to absorb it, not after.
+
+  **Clarification (2026-09-03) — where thumbnails sit.** The heading was
+  originally "thumbnails must not be free full downloads", which is true but
+  frames the thumbnail as the thing being fixed. With P-13 the hierarchy is
+  explicit, and the thumbnail is not a cache tier at all:
+
+  ```
+                      attachment
+                          │
+                    cached in object storage?
+                     ┌────┴────┐
+                    YES        NO
+                     │          │
+                     │        Gmail
+                     │          │
+                     │    object storage
+                     └────┬─────┘
+                          ▼
+                       the bytes
+                          │
+                ┌─────────┴─────────┐
+             full view          thumbnail
+                        (a *rendering* of bytes we already hold,
+                         never its own path to Gmail)
+  ```
+
+  A thumbnail request is therefore an ordinary attachment request with a display
+  intent attached. It must go through the same cache lookup, the same
+  single-flight and the same attempt cap; it gets no shortcut and no second code
+  path to Gmail. This is what makes the three P-7 changes proportionate rather
+  than load-bearing: with the cache in place, an auto-loading thumbnail is a
+  storage read, and the intent-loading, cache header and demotion are protecting
+  the **cold** case only.
+
+  It also settles a question that would otherwise be open when the code is
+  rewritten: **there is no separate "thumbnail cache".** One object per
+  attachment, one lookup, one key.
+
+  Server-side generated thumbnails — fetch once, resize, store, serve small
+  thereafter — were considered and deferred. They are the only change that
+  actually retires the sentence "a thumbnail is a full download", but they add
+  storage and image-processing CPU to a 1 GB VPS whose AI pipeline is already
+  deliberately scope-limited, and the *first* fetch is still full size, so they
+  do not remove the cold-cache exposure that P-7 is aimed at. Revisit once the
+  byte meter (P-5c) reports what image traffic actually looks like.
+
+  The stated cost is accepted verbatim: a slightly less magical inbox. Worth it.
 
 ### P-8 · Confirm production configuration
 
@@ -838,6 +1291,455 @@ Ordered by evidence strength. Nothing here has been implemented.
 - **Change** — none in code. Read the VPS env and record it here.
 - **Verification** — `[GMAIL_PACING] configured` on the container's boot line
   should read `enabled: true`.
+- **Decision (2026-08-29)** — **revised and upgraded: this is no longer a
+  read-only action. `GMAIL_QUOTA_PACING` becomes default-on, opt-out.**
+
+  The proposal as written was "change nothing in code; go and read the VPS env".
+  That is worth doing and is still done — the value is read and recorded here
+  either way — but it leaves the underlying defect in place. The defect is not
+  that we do not *know* whether production is paced; it is that production
+  **can** be unpaced because somebody forgot to set a variable. An opt-in safety
+  control is a safety control that is off wherever it was most needed, and §2's
+  timeline shows the 9,800-thread sync ran in exactly the environment whose
+  configuration we cannot currently state.
+
+  So the flag inverts. An unset `GMAIL_QUOTA_PACING` now means **paced**;
+  running unpaced becomes a deliberate, explicit act that shows up in a diff.
+  The boot line keeps reporting the resolved value, so the verification above is
+  unchanged in form — it just now reads `enabled: true` because that is the
+  default rather than because someone remembered.
+
+  Failing the boot outright when the variable is unset in production was
+  considered and rejected: it converts a missing env var into a failed deploy,
+  which is a worse outcome than a safe default, and the safe default already
+  makes the unpaced state unreachable by accident.
+
+  This closes **C-1** and answers **U-2** by making the answer irrelevant — but
+  the VPS value is still read and recorded in §8.3, because a document that says
+  `UNKNOWN` should stop saying it.
+
+### P-9 · Admin developer tools for mailbox and watch ownership
+
+- **Problem** — B-2's recorded ownership data, P-3's `resync_required` flag and
+  §9.2's orphaned watches are all *state a human must act on*, and there is
+  currently no surface anywhere that shows any of it. Per CLAUDE.md, a
+  `watch_owner_env` column that nothing renders scores **Implemented** and
+  nothing else; the fix for a 14-hour silent mail loss cannot itself be
+  discoverable only by reading `logs/app.log`.
+- **Evidence** — §9.2 (46 deliveries, two mailboxes, no local mapping, still
+  going); B-2; the P-3 flag has no home without this.
+- **Change** — an admin-gated developer-tools surface, available in **local as
+  well as production**, that:
+  1. **lists every mapping** with its `watch_topic` and `watch_owner_env`, and
+     **flags orphans** — a mailbox pushing to this environment with no mapping,
+     or a mapping whose recorded topic is not this environment's topic;
+  2. offers **release the watch slot** (`users.stop`) per mailbox, so an orphan
+     can be stopped from the environment that is receiving its pushes;
+  3. accepts a **mailbox address or id typed directly**, and offers, for that
+     id, **re-authorise a named service** and **disconnect**;
+  4. surfaces the **`resync_required`** flag from P-3, with a deliberate,
+     explicitly budgeted trigger and a confirmation naming the mailbox.
+- **Mechanism** — turns three pieces of recorded state into three actions taken
+  at the moment the state is seen. It is also how **U-1** stops being a
+  once-off tunnel exercise: production's own mapping list becomes readable
+  without a tunnel, permanently.
+- **Decision (2026-08-29)** — **adopted, scoped to read, release and
+  re-authorise. Deliberately NOT destructive.**
+
+  "Re-authorise" issues a **consent link** for the named id rather than acting
+  on stored tokens directly — the panel never mints, mutates or replays a
+  credential, it asks the mailbox owner to re-grant. This is also consistent
+  with the standing rule that unlink/relink is not an available repair path:
+  the button produces a grant, not a re-link.
+
+  A wider scope was offered and **rejected for now**: adding *force-watch* and
+  *force-full-sync* buttons. Every one of those is an outward-facing action on a
+  real mailbox — a forced watch takes a slot from whoever holds it, a forced
+  sync is the 9,800-thread event this entire document is about — and putting
+  them one click away in an admin panel contradicts P-3, which was just decided
+  in its strictest form specifically to keep that action deliberate. The P-3
+  trigger in item 4 is the one exception, and it is budgeted and confirmed.
+
+  Read-only-first (ship the viewer, add actions later) was also considered.
+  Rejected as the *plan*, though it remains the sensible **build order**: the
+  viewer is what answers U-1 and it is safe, so it lands first — but the release
+  and re-authorise actions are in scope for this proposal, not a hypothetical
+  second pass, because an orphan you can see and cannot stop is still an orphan.
+- **Risk** — an admin panel that can disconnect a mailbox is a panel that can
+  disconnect the **wrong** mailbox. Mitigate with the admin gate, a confirmation
+  that names the mailbox, and a logged record of who did what.
+- **Verification** — with the two orphans of §9.2 present, the panel lists both
+  as orphaned; releasing one stops its pushes within minutes; no button on the
+  page can initiate a full sync except the P-3 trigger.
+
+### P-10 · Make a second limiter process visible
+
+- **Problem** — W-1. The limiter is process-global module state, which is
+  correct for one container and wrong the moment a second replica, an
+  out-of-process worker or a one-off script runs — each would pace to the full
+  rate independently, exactly the 2× failure of B-3 in a different dimension.
+- **Change** — no architectural change. Log the process/replica identity on the
+  limiter's boot line alongside the existing `[GMAIL_PACING] configured` output,
+  and state the single-process assumption in the module itself.
+- **Mechanism** — the danger in W-1 is not that a second process is impossible
+  to survive; it is that a second process would be **silent**. A boot line that
+  identifies itself turns "we are silently pacing at 2×" into a grep.
+- **Decision (2026-08-29)** — **adopted; Redis and Postgres-backed buckets both
+  rejected for now.**
+
+  Moving the bucket to Redis is the textbook answer and was rejected on the same
+  grounds §13's original rejection list gives: it adds a service and a failure
+  mode to a 1 GB VPS to solve a problem that does not exist while one container
+  runs, and — the decisive point — **it does not touch the mailbox-shared
+  limits at all.** A shared bucket makes the *unit* meter correct across
+  processes; units are the one family the project split already protects (§11.1).
+
+  A Postgres-backed bucket, using infrastructure we already run rather than
+  adding Redis, was considered and is the better option **if** this ever needs
+  doing: the acquire rate is ~75/sec, not 75,000/sec, so the round-trip is
+  affordable. Recorded here so the option is not re-derived later.
+
+  Revisit at the moment a second replica is actually planned — not before.
+- **Verification** — boot two processes locally; both boot lines identify
+  themselves distinctly.
+
+### P-11 · Stop the boot-time watch sweep from running in local dev
+
+- **Problem** — W-3. `bootstrapGmailWatches` runs on **every** process start.
+  Under `tsx watch` that is a load generator — `logs/app.log` records 26
+  `http server is running` lines — costing 100 units per due mailbox per boot.
+- **Change** — gate the sweep on `MAILROID_ENV` (the variable **P-1**
+  introduces): production boots run it, local dev does not unless explicitly
+  asked. The 00:00 UTC cron remains production's renewal path.
+- **Mechanism** — removes the restart multiplier in the only environment where
+  restarts happen dozens of times an hour, without weakening renewal where it
+  matters.
+- **Decision (2026-08-29)** — **adopted, and implemented together with P-1**
+  since it consumes the same variable.
+
+  Debouncing on a persisted `last_bootstrap_at` timestamp — environment-agnostic,
+  works everywhere — was considered and rejected as unnecessary once the
+  environment gate exists: production boots are rare, so there is nothing there
+  to debounce, and local no longer sweeps at all.
+
+  Doing nothing (Gate 2 having proved the idle case is genuinely cheap) was
+  rejected because the cost is not zero, only *bounded*, and the fix is one
+  conditional.
+
+  Moving renewal fully external and deleting the boot sweep entirely was
+  considered — it aligns with the standing rule that watch renewal must not
+  depend on the local server — but rejected **for this change**: removing the
+  in-process safety net is only safe once the external scheduler has been
+  demonstrated reliable, and that is a separate piece of work. The sweep stays
+  in production for now.
+- **Verification** — restart the local dev server repeatedly; zero `users.watch`
+  calls in `mailroid-local`'s meter.
+
+### P-12 · Give `INITIAL_SYNC_CONCURRENCY` a per-mailbox meaning
+
+- **Problem** — C-2. The value is unset (defaulting to 1) and its meaning is
+  *per Inngest app*, i.e. per environment — so two environments on one mailbox
+  is silently 2×, and §10.2 notes nothing anywhere knows.
+- **Change** — leave the value at 1, but route initial sync through the
+  **P-5b per-mailbox semaphore** so the effective ceiling is per mailbox
+  regardless of how many Inngest apps exist.
+- **Mechanism** — the number was never wrong; its *key* was, which is the same
+  defect as B-3 wearing different clothes. Fixing the key makes the 2× case
+  impossible rather than merely unlikely.
+- **Decision (2026-08-29)** — **adopted: keep the value, fix the meaning.**
+
+  Simply pinning `INITIAL_SYNC_CONCURRENCY=1` explicitly in `.env` with a
+  comment was rejected as the whole answer — it removes the "unset, defaulting
+  to" ambiguity from §8.3 and changes no behaviour, which means it documents the
+  hazard instead of removing it. Leaving it entirely alone was rejected for the
+  same reason. Pinning it explicitly is still worth doing **alongside** the
+  semaphore, purely for legibility.
+- **Verification** — two environments syncing one test mailbox never exceed the
+  semaphore's in-flight ceiling in aggregate.
+
+### P-13 · Object storage is the attachment cache
+
+- **Problem** — §12.5. There is no durable attachment cache. Every control in
+  P-5 through P-7 bounds the *rate* at which we re-download the same bytes from
+  Gmail; none of them removes the re-download. And the one number we had for
+  attachment traffic (`last_accessed_at`) was counting rows, not bytes (§12.4),
+  so we could not have noticed.
+- **Evidence** — §12.5 (`CONFIRMED BY CODE`, by absence: no store, no bucket, no
+  storage-key column, no attachment table in `packages/database`); §12.3 (48 MB
+  per screen, cold); §12.4 (the audit measured the wrong side of the cache);
+  §3.5 (bandwidth is per-mailbox, per-day, shared with every other client).
+- **Change** — the rewritten attachment path is built cache-first, against a
+  storage *contract* (put / get / head / delete, keyed by string) rather than a
+  vendor, with the backend chosen per **U-5**:
+
+  1. **Lookup precedes fetch, always.** Object storage is consulted before any
+     Gmail client is constructed. A hit costs zero Gmail calls, zero quota units
+     and zero mailbox bandwidth.
+  2. **The bytes live in the store; the row records where.** The database holds
+     `storage_key`, `size_bytes`, `content_type`, checksum and timestamps. It is
+     an index, never the evidence.
+  3. **`cached = true` is written only after the store confirms the write.**
+     Gmail-succeeded-then-upload-failed leaves the record `cached = false` and
+     serves the bytes we already have in hand for this one request. The
+     alternative — a row claiming a cache hit over an object that is not there —
+     is the §12.4 failure rebuilt deliberately.
+  4. **Single-flight wraps the miss path, keyed on the storage key.** Two
+     concurrent requests for one uncached attachment produce **one** Gmail
+     fetch; the second waits and reads the resulting object. This is not
+     inherited from the stashed `single-flight.ts` — §12.2 records that it
+     coalesces only overlapping fetches and deletes the key on settle, which is
+     correct for this purpose but must be re-established around the new cache
+     rather than assumed to carry over.
+  5. **Presence is not a fetch trigger.** An email having attachments, or an
+     inbox screen listing 500 of them, downloads nothing. Metadata renders the
+     list; bytes move only on a request for a specific attachment. Stated as a
+     rule because P-7 states it only for images: *attachment presence must never
+     itself cause a Gmail download.*
+  6. **Misconfiguration fails loudly.** No store configured is a boot failure,
+     not a fallthrough that silently restores today's behaviour of going to
+     Gmail every time.
+  7. **A miss and a storage failure are different answers.** The lookup has
+     three outcomes, not two:
+
+     ```
+     store says "here it is"   → HIT     → serve. no Gmail.
+     store says "not present"  → MISS    → Gmail is permitted.
+     store says nothing —      → FAILURE → the request FAILS.
+       timeout, 5xx, bad                   Gmail is NOT permitted.
+       credentials, no route
+     ```
+
+     Only a **confirmed** absence authorises a Gmail fetch. A storage error is
+     not evidence about whether we hold the bytes, and treating it as a miss
+     converts an object-store outage directly into a Gmail traffic storm: 500
+     requests that would have been 500 cache hits become 500 attachment
+     downloads, against the one allowance (§3.5) that is per-mailbox, per-day and
+     shared with every other client — at exactly the moment nobody is watching,
+     because the visible symptom is a storage incident.
+
+     This is item 6's rule extended from boot to runtime. Configuration absence
+     already fails loudly; **runtime unavailability must fail the same way.** The
+     user-facing outcome is an honest error on that attachment, and the standing
+     "no silent fallbacks on drift" rule is the same one: the degraded path here
+     is outward-facing, so it is surfaced rather than absorbed.
+
+     **Restated as a type, not a convention (2026-09-04).** `head()` returns
+     three outcomes, never a boolean — a boolean collapses "not there" and
+     "could not tell" into one value, and that collapse *is* the storm this item
+     describes: a `false` from a timing-out store is indistinguishable from a
+     genuine absence, and every caller then goes to Gmail.
+
+     ```ts
+     type Lookup =
+       | { status: "hit"; size: number; contentType: string }
+       | { status: "miss" }                    // store answered: not present
+       | { status: "error"; cause: unknown };  // store did not answer
+     ```
+
+     `miss` permits Gmail; `error` fails the request with zero Gmail calls. The
+     type makes the third case impossible to forget, which prose alone did not.
+
+     **The same principle applies to item 3's ordering, restated concretely.**
+     Object written, then row write failed → the attachment is **not** cached,
+     not "cached with a dangling reference." The orphaned object is harmless and
+     self-healing *because the key is deterministic*: the next fetch re-`put`s
+     to the identical key and overwrites it, so nothing accumulates. The reverse
+     order — row first — would announce a cache hit over bytes that may never
+     land, which is exactly the §12.4 failure this item exists to prevent.
+  8. **Keys are namespaced so one mailbox can never resolve another's object.**
+     The store is a single shared backend sitting underneath an architecture
+     whose entire premise (§5, §14) is *one mailbox, one environment*. A flat or
+     Gmail-derived key namespace quietly reintroduces the boundary crossing that
+     P-1 exists to prevent, at the storage layer rather than the API layer.
+
+     The exact format is not fixed here, but the invariant is:
+
+     ```
+     environment / tenant-or-mailbox / message / attachment
+     └── every read is scoped by the requester's own mailbox;
+         a Gmail attachment id is NEVER the whole key
+     ```
+
+     Gmail attachment ids are not globally unique and, per the stashed code's own
+     recovery path (`refreshedId`, B-4), they **rotate** — so an id is unsuitable
+     as an identity even within one mailbox. Scoping is enforced on the read
+     path, not merely encoded in the string: a request constructs the key from
+     the authenticated mailbox, so asking for someone else's object is not a
+     thing the API can express.
+
+     **Added (2026-09-04).** The mailbox identity in the key must come from the
+     authenticated session's connection state **only** — never from a
+     client-supplied mailbox address, tenant id, or storage key.
+     `GET /attachment?mailbox=victim@gmail.com` must be unrepresentable, not
+     merely rejected: the server derives the mailbox from the session, then
+     builds the key. This is the request-time restatement of the mismatch check
+     P-1 does at connect time.
+  9. **Single-flight is process-local.** Under the current one-container
+     deployment that is sufficient — see the limiter's own "SINGLE PROCESS ONLY"
+     header for the identical constraint applied to pacing. It does **not**
+     coalesce across replicas: two containers would each take one miss to Gmail
+     for the same attachment. State this in the module itself, so a future
+     replica is a known consideration rather than a silent regression — this is
+     W-1 in a second dimension, and P-10 (log replica identity) is its matching
+     visibility fix.
+- **Mechanism** — it moves the repeated read off the one axis a Cloud project
+  split cannot partition (§3.2) and onto infrastructure we own. Gmail is charged
+  once per **miss**, not once per attachment for all time; every subsequent read
+  against a hit is charged to storage, which has no per-mailbox daily allowance
+  and no shared concurrency slot.
+
+  **Correction (2026-09-04).** "Gmail is read once per attachment" overstates
+  the guarantee, including in §13.15's checklist phrasing below — a miss can
+  legitimately recur after an eviction, after a failed store write, or on a
+  replica that has not seen the object (item 9). The guarantee is **one fetch
+  per miss**; P-5c's Gmail-bytes-per-distinct-attachment ratio is what tells us
+  how often misses actually repeat in practice.
+- **Risk** — a cache is a second place for bytes to be wrong. Bound it with the
+  checksum and `size_bytes` on read, and treat a mismatch as a miss (re-fetch),
+  never as a silent serve of the wrong file. Storage cost is real but bounded and
+  ours; Gmail bandwidth is neither.
+- **Decision (2026-09-03)** — **adopted as an architectural requirement, and
+  promoted to a gate.** P-6 and P-7 were already gates on unparking the
+  attachment branch; P-13 joins them, and precedes both, because P-6's attempt
+  cap and P-7's intent-loading are both bounds on traffic that P-13 is supposed
+  to make unnecessary in the first place. Building them against a path that
+  re-downloads from Gmail on every view would bound the wrong thing well.
+
+  **Retention and eviction are deliberately left open**, not decided here. The
+  right threshold depends on what P-5c's meter reports about real attachment
+  sizes and re-read frequency, and choosing one today would be the same mistake
+  P-5c refused to make with the byte ceiling. The design constraint that *is*
+  fixed: eviction must delete the object **and** clear `cached` in the same
+  operation, in that order, so the two can never disagree in the dangerous
+  direction.
+
+  An in-process or on-disk cache on the VPS was considered and rejected. It is
+  cheaper to build and needs no U-5 decision, but a 1 GB VPS with a deliberately
+  scope-limited AI pipeline has no room to hold mailbox attachments, and a cache
+  that evicts under memory pressure is a cache that returns to Gmail under
+  exactly the conditions where Gmail is most likely to refuse.
+
+  Storing bytes in Postgres was also considered and rejected: it is the same
+  disk on the same 1 GB host, with the row/object split collapsed in a way that
+  makes the §12.4 confusion harder to detect rather than easier.
+- **Verification** — fetch one attachment twice. The first call records nonzero
+  Gmail bytes in P-5c's meter; the second records **zero**, and asserts
+  `network_attempts == 0`. Then: mount an inbox screen with 500 attachments cold
+  and assert zero `messages.attachments.get`. Then: force the storage write to
+  fail and assert the record stays `cached = false` and the next request retries
+  the fetch rather than serving a phantom hit. Then, for item 7: make the store
+  return a timeout on **lookup** and assert the request fails with **zero**
+  `messages.attachments.get` — the test that distinguishes a miss from an
+  outage, and the one whose absence would let the storm through. Then, for item
+  8: request a known-good key while authenticated as a different mailbox and
+  assert it does not resolve.
+
+### 13.13 · U-1 — determine the exact overlapping mailbox inventory and clean up ownership
+
+**Retitled (2026-09-04).** Overlap is confirmed, not open; the question this
+item answers is *which* mailboxes overlap, so the inventory can seed Phase 1's
+allowlist and Phase 2's cleanup — not whether an overlap exists.
+
+**Superseded in part (2026-09-03).** The decision below was written while the
+existence of an overlap was unknown, and it hedged accordingly. `CONFIRMED BY
+OPERATOR`: **the overlap exists** (§8.4). The assumption the decision rests on
+has been replaced by a fact, and P-1/P-2's urgency no longer depends on the
+tunnel returning anything. What survives unchanged is everything below about
+*how* to identify the specific mailboxes — that work is now remediation, and the
+`LOG_HASH_SECRET` correction is still the reason it is not a digest comparison.
+
+**Decision (2026-08-29)** — **you run the tunnel; the query is prepared for
+you.** Until it returns, **P-1 and P-2 are treated as urgent rather than
+planned**, on the assumption that at least one of the two orphaned mailboxes in
+§9.2 is a production mailbox — because if that is true, production mail is being
+lost right now, and the cost of being wrong in the other direction is only that
+we built two changes we had already decided to build.
+
+**A correction to the plan as first sketched.** The two orphan identifiers in
+§9.2 (`0cfe66a5…`, `107f9f96…`) are **not** comparable to digests computed in
+production. [`packages/logger/pii.ts`](../packages/logger/pii.ts#L53-L60) shows
+the digest is a *keyed* hash — `sha256(normalised_address + LOG_HASH_SECRET)`,
+truncated — and `LOG_HASH_SECRET` is documented as one value per environment for
+the lifetime of that environment. Two environments therefore produce **different
+digests for the same mailbox**, by design; that is the property that stops a log
+digest from being a rainbow-table lookup.
+
+So the comparison cannot be digest-to-digest. It must be: read production's
+`gmail_tenant_mappings.email_address` values, and re-hash each one with
+**local's** `LOG_HASH_SECRET`, then compare against the two orphan digests. Any
+match names a production mailbox that is currently pushing to a local ngrok
+endpoint.
+
+Building the panel from **P-9** first, and reading the answer from production's
+own admin page rather than a tunnel, was considered and rejected as the route to
+*this* answer — it is slower to a fact that changes how urgent P-1 and P-2 are —
+but it remains the right long-term answer, and is why P-9 exists.
+
+Deciding not to wait at all and simply building P-1/P-2 immediately was also
+considered, on the sound reasoning that U-1 changes only urgency and not the
+plan. Rejected only because the tunnel is cheap and the answer determines
+whether **anything else** should be paused; the build does not wait on it.
+
+### 13.14 · U-3 — the `*.get` cost discrepancy
+
+**Decision (2026-08-29)** — **the probe is designed now; the mailbox field is
+left blank, and nothing runs until you name one.** Per the standing rule, a
+mailbox is never nominated on your behalf: send quotas are scarce and only you
+know what is left on each account.
+
+The probe is read-only, single-digit-unit — a handful of calls per method, with
+**both** meters (`gmail.googleapis.com/default` and `total_query_cost`) read
+afterwards, since §11.2's whole point is that they may disagree in opposite
+directions. Until it runs, **the 75 units/sec figure is not touched**, in either
+direction.
+
+Deferring U-3 indefinitely was considered: the current calibration over-charges
+by 4× and can therefore only make us more conservative, so the sole cost is that
+full syncs take ~4× longer than the budget requires. Rejected as a *permanent*
+position, because §16's fourth recorded discrepancy shows the limiter derives its
+rate by applying the 6,000/min `total_query_cost` ceiling to `default` prices —
+it is mixing two meters, and "safe by accident" is not a calibration.
+
+Deriving the answer from production telemetry alone — reading both meters across
+a natural sync and backing out per-method costs, at zero additional API cost —
+was considered and kept as a **fallback**. It is confounded by concurrent methods
+in the same window, which is exactly what made §11.2's derivation an `INFERENCE`
+rather than a measurement, so it is weaker evidence than the controlled probe and
+is used only if no mailbox can be spared.
+
+### 13.15 · The gate: what must be true before attachment code is written
+
+**Decision (2026-09-03)** — the attachment branch stays parked until every line
+below is decided **and implemented**, not merely agreed. The build order in §16
+puts these last for a reason; this is the checklist that closes it.
+
+```
+[ ] U-5 answered — a backend is chosen and configured        P-13, §8.4
+[ ] object storage is the persistent attachment cache        P-13.1
+[ ] cache lookup happens before any Gmail client is built    P-13.1, P-6
+[ ] the actual bytes are in the store; the row is an index   P-13.2
+[ ] cached = true only after the store confirms the write    P-13.3
+[ ] a cache hit costs zero Gmail calls and zero units        P-13.1
+[ ] single-flight re-established around the new cache key    P-13.4
+[ ] attachment presence never triggers a download            P-13.5
+[ ] thumbnails share the one attachment path, no shortcut    P-7
+[ ] thumbnail loads are intentional (click / viewport)       P-7
+[ ] thumbnail demoted out of INTERACTIVE_TRIGGERS            P-7
+[ ] recovery flags hoisted out of the retried closure        P-6
+[ ] network_attempts capped at 5 and enforced by a throw     P-6
+[ ] network_attempts never increments on a cache hit         P-6
+[ ] Gmail → Mailroid bytes metered at the transport          P-5c
+[ ] no store configured = boot failure, not a fallthrough    P-13.6
+[ ] a storage FAILURE fails the request; only a confirmed
+    MISS may reach Gmail                                     P-13.7
+[ ] keys namespaced; one mailbox cannot resolve another's    P-13.8
+[ ] the attachment route stays dynamic AND sets Cache-Control  P-7
+[ ] the attachment route's existing behaviour has tests      —
+```
+
+Retention, eviction and a hard byte ceiling are **not** on this list. They are
+deferred on purpose (P-13, P-5c) and are decided from the meter's output, once
+there is one.
 
 ### Evaluated and rejected for now
 
@@ -848,6 +1750,31 @@ Ordered by evidence strength. Nothing here has been implemented.
   we already have.
 - **Moving the limiter to Redis.** Correct eventually (W-1), unnecessary while
   one container runs, and it does not address the mailbox-shared limits.
+  Superseded by **P-10**, which keeps the limiter in-process and makes a second
+  process *visible* instead; if a shared store is ever needed, P-10 records
+  Postgres as the preferred option over adding Redis to a 1 GB VPS.
+- **Force-watch and force-full-sync buttons in the admin panel.** Offered while
+  scoping P-9 and rejected: both are outward-facing actions on a real mailbox,
+  and putting them one click away contradicts P-3, which was decided in its
+  strictest form precisely to keep a full sync deliberate.
+- **A hard daily byte ceiling chosen today.** Deferred inside P-5c. U-4 is
+  `UNKNOWN` and the published 2,500 MB/day is an upper bound for Workspace, not
+  a floor for consumer accounts; the meter ships first so the threshold is
+  measured rather than guessed.
+- **Server-side generated thumbnails.** Deferred inside P-7 — the only change
+  that truly retires "a thumbnail is a full download", but it adds storage and
+  image CPU to the VPS and does not remove the cold-cache exposure P-7 targets.
+- **Narrowing `withGmailRetry` to a single request.** Deferred inside P-6 in
+  favour of hoisted flags plus an enforced attempt cap; revisit when the
+  attachment branch is unparked in earnest.
+- **An in-process or on-disk attachment cache on the VPS.** Rejected inside
+  P-13: no room on 1 GB, and a cache that evicts under memory pressure returns
+  to Gmail under precisely the conditions where Gmail is most likely to refuse.
+- **Attachment bytes in Postgres.** Rejected inside P-13 — same disk, same host,
+  and it collapses the row/object distinction whose confusion caused §12.4.
+- **A retention or eviction policy chosen today.** Deferred inside P-13 for the
+  same reason as the byte ceiling: it is decided from P-5c's meter, not guessed
+  before there is one.
 
 ---
 
@@ -897,6 +1824,33 @@ is what P-1 and P-2 add.
   │  Gmail  ── charge ACTUAL response bytes back to budget   │
   └─────────────────────────────────────────────────────────┘
 ```
+
+### Attachments — the cache sits *above* all of it
+
+```
+  attachment requested
+         │
+         ├─ P-13  is it in object storage?
+         │          YES → serve it. no limiter, no semaphore, no budget,
+         │                no Gmail. this is the common case.
+         ▼ NO
+  P-13.4 single-flight  ── one concurrent miss becomes one fetch
+         │
+         ▼
+  the box above  ── quota bucket → semaphore → byte budget → Gmail
+         │
+         ▼
+  object storage  ── write bytes, THEN mark cached (P-13.3)
+         │
+         ▼
+       user
+```
+
+The reason this diagram sits above the other one rather than inside it: every
+control in the box is a *rate*, and a rate applied to an unnecessary request
+still permits the request. P-13 is the only item in this document that reduces
+the **number** of attachment bytes Gmail is ever asked for, and it reduces it to
+one transfer per attachment for the lifetime of the object.
 
 Every control is keyed on the **mailbox**, because that is what Gmail is keyed
 on. The project split stays — it is genuinely load-bearing for units, and it is
@@ -1019,8 +1973,12 @@ the local ngrok endpoint with no local mapping, across 14+ hours — 46
 deliveries, all correctly dropped, all going nowhere. Whichever environment
 previously owned those mailboxes is receiving nothing.
 
-Whether either is a **production** mailbox is **U-1** — unresolved, and it needs
-the prod DB tunnel you run yourself (§8.4).
+Whether either of those two is a **production** mailbox is **U-1** — still
+unresolved, and it needs the prod DB tunnel you run yourself (§8.4). What is no
+longer in question is the general case: `CONFIRMED BY OPERATOR` (2026-09-03),
+local and production **do** share mailboxes today. The interference in this
+section's title is not a risk the architecture might permit; it is the current
+configuration.
 
 ### Q8 — What is the correct architecture?
 
@@ -1039,7 +1997,11 @@ treating the Cloud project as an isolation boundary it was never designed to be.
    not have** — an in-flight semaphore and a daily byte budget (P-5). Units are
    the dimension the project split already protects; concurrency and bandwidth
    are the ones nothing protects.
-5. **Fix the attachment amplifiers before unparking the branch** (P-6, P-7).
+5. **Make object storage the attachment cache, so Gmail is read once per
+   attachment ever** (P-13) — and fix the attachment amplifiers before
+   unparking the branch (P-6, P-7). The order within this item matters: P-6 and
+   P-7 bound how badly a Gmail attachment fetch can behave; P-13 is what makes
+   most of those fetches not happen.
 6. **Keep the per-environment projects**, and keep per-developer ones. They are
    real and useful for units, topics and endpoints. They are just not mailbox
    isolation, and describing them as such is what produced this investigation.
@@ -1076,9 +2038,12 @@ without the first fixes the wrong incident.
 | Restart does not directly cause a full sync | **CODE + TELEMETRY** |
 | Attachment retry ≈25 calls per fetch | **CODE** (structure) + **INFERENCE** (bound) |
 | The meter charges `*.get` 4× less than the published table | **TELEMETRY**, cause **INFERENCE** |
+| No durable attachment cache exists anywhere in the tracked tree | **CODE** (no store, no bucket config, no attachment table) |
+| A cache is the only control that reduces *repeat* Gmail bytes | **INFERENCE** (§12.5) |
 | Consumer-account bandwidth limits | **UNKNOWN** |
-| Whether local and prod share a mailbox today | **UNKNOWN** (U-1) |
+| **Local and production share mailboxes today** | **OPERATOR** (2026-09-03) — the overlap is confirmed; *which* mailboxes is still unmeasured (U-1) |
 | Whether pacing is enabled in production | **UNKNOWN** (U-2) |
+| Which object store backs the attachment cache | **UNKNOWN** (U-5) |
 
 ### Recorded discrepancies
 
@@ -1121,10 +2086,84 @@ without the first fixes the wrong incident.
 
 ### Next actions requiring you
 
-1. **U-1** — open the tunnel and list production's `gmail_tenant_mappings`; if
-   any address matches a local one, P-1 and P-2 become urgent rather than
-   planned.
-2. **U-2** — read `GMAIL_QUOTA_PACING` on the VPS.
+1. **U-1** — **the question changed on 2026-09-03.** You have confirmed local and
+   production share mailboxes, so this is no longer "find out whether"; P-1 and
+   P-2 are urgent regardless of what the tunnel says. What is still needed is the
+   **inventory**: open the tunnel, list production's `gmail_tenant_mappings`, and
+   identify which mailboxes overlap so they can be disconnected from the side
+   that should not hold them.
+
+   **Note the correction in §13.13:** the digests in §9.2 are keyed by a
+   per-environment `LOG_HASH_SECRET`, so they are *not* comparable across
+   environments. Production's addresses must be re-hashed with **local's**
+   secret before being compared against `0cfe66a5…` and `107f9f96…`.
+
+   Treat this as the most time-sensitive item on the list, ahead of the byte
+   meter and the cost probe: §9.2 shows two mailboxes whose mail has been going
+   nowhere for 14+ hours, and the overlap being real makes it materially more
+   likely one of them is production's.
+2. **U-2** — read `GMAIL_QUOTA_PACING` on the VPS and record it in §8.3. Note
+   that **P-8 has been upgraded** to make pacing default-on and opt-out, so the
+   answer no longer determines whether production is safe — only whether it *was*.
 3. **U-3** — a controlled per-method cost test needs a nominated mailbox and a
-   quiet window. Tell me which mailbox is safe to use and I will design it to
-   read-only, single-digit-unit operations.
+   quiet window. Per §13.14 the probe is designed with the mailbox field left
+   blank; **name a mailbox and it runs**, read-only and single-digit-unit, with
+   both meters read afterwards. Until then the 75 units/sec figure is untouched.
+4. **U-4** — no action required from you. **P-5c now measures it**: the byte
+   meter ships without a ceiling precisely so that consumer-account bandwidth
+   stops being `UNKNOWN` by observation rather than by asking Google.
+5. **U-5** — **name the object store.** P-13 is specified against a
+   put/get/head/delete contract so the code does not wait on this, but the
+   attachment branch does: §13.15 will not clear until a backend is chosen and
+   configured. The choice is between an S3-compatible bucket and a MinIO
+   container on the VPS, and §8.4 records why the 1 GB host argues against
+   self-hosting. Cost and where the data sits are yours to decide, not mine.
+
+### Decision status
+
+Every item in §8.1–§8.4 was reviewed on **2026-08-29** and has a recorded
+decision in §13, including the four that previously had no proposal attached
+(W-1, W-3, C-2, and the admin surface B-2 grew into — now P-10, P-11, P-12 and
+P-9 respectively). §13.0 is the ledger. Nothing has been implemented yet.
+
+Build order follows §8.4's own logic — the changes that make the *current* state
+safe come before the ones that make attachments safe:
+
+1. **P-1 + P-11** together (they share `MAILROID_ENV`), and **P-8**'s flag
+   inversion, which is a one-line default change.
+2. **P-2 + P-9** — watch lifecycle and the surface that makes it actionable;
+   P-9's read-only half also answers U-1 permanently.
+3. **P-3 + P-4** — never full-sync silently, and make a deliberate resync cost
+   what changed.
+4. **P-5a + P-5b + P-12**, then **P-5c**'s meter.
+5. **P-13**, then **P-6 + P-7** — the gates on unparking the attachment branch.
+   P-13 comes first within this step: it decides the shape the other two are
+   written against, and writing them first means writing them against a path
+   that goes to Gmail on every view.
+
+**P-10** can land at any point; it is a log line and a comment.
+
+**Added 2026-09-03.** §12.5, **P-13**, **U-5** and the §13.15 gate checklist
+were added after review, on the finding that the document specified how to
+*survive* attachment traffic without ever specifying that Gmail should be read
+only once per attachment. P-5c, P-6 and P-7 were amended in place — the
+Gmail→Mailroid metering boundary, cache-lookup-before-retry, and thumbnails as a
+presentation layer over one cache — rather than restated. Nothing already
+decided on 2026-08-29 was reversed.
+
+**Second pass, same day.** Four further corrections, three of which change what
+the code must do:
+
+- **U-1 is answered** and P-1/P-2 are unconditionally urgent (§8.4, §9.2, Q7,
+  §13.13). The build order above is unchanged, but step 1 is no longer being
+  done pre-emptively — it is repair.
+- **P-13.7** — a storage *failure* is not a cache *miss*. Only a confirmed
+  absence may reach Gmail; an object-store outage that falls through would
+  convert itself into the exact traffic storm this document exists to prevent.
+- **P-13.8** — storage keys are namespaced and scoped on the read path, so the
+  one-mailbox-one-environment invariant is not silently undone underneath a
+  single shared bucket. Gmail attachment ids rotate (B-4) and are not identities.
+- **P-7's `force-dynamic` wording was wrong** and is corrected: `Cache-Control`
+  is added *alongside* the route's dynamic behaviour, never in place of it.
+
+The §13.15 checklist grew from 18 items to 20 accordingly.

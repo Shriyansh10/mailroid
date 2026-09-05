@@ -224,9 +224,10 @@ app.get("/api/_debug/egress", async (req, res) => {
 
 // Gmail quota pacing, as it stands right now.
 //
-// THE FIRST THING TO CHECK IS `enabled`. Pacing is opt-in via
-// GMAIL_QUOTA_PACING=on, so a limiter that appears to be doing nothing is
-// usually a limiter that was never switched on. `buckets` counts mailboxes with
+// THE FIRST THING TO CHECK IS `enabled`. Pacing is opt-OUT (P-8) — on unless
+// GMAIL_QUOTA_PACING=off — so a limiter that appears to be doing nothing means
+// someone explicitly disabled it, or `enabled: false` in this snapshot is
+// itself the finding. `buckets` counts mailboxes with
 // a live schedule, `pacedOut` counts calls refused for exceeding their trigger's
 // wait cap, and `fallbackPriced` counts calls paced at the invented 50-unit
 // fallback because the operation is missing from QUOTA_UNITS — any non-zero
@@ -259,7 +260,18 @@ app.get("/api/_debug/watch-health", async (req, res) => {
       // A mailbox whose credentials are dead is making zero Gmail calls and
       // will not recover on its own — unlike a quota cooldown, which lapses.
       // It has to raise the alarm, not merely appear in the report body.
-      report.gmailCooldowns.some((c) => c.gmailAuthFailedAt !== null);
+      report.gmailCooldowns.some((c) => c.gmailAuthFailedAt !== null) ||
+      // P-3: a mailbox flagged resyncRequired hit a history-retention 404 and
+      // is waiting on a deliberate `gmail:resync` — it needs an operator, not
+      // patience, same as an auth failure.
+      report.gmailCooldowns.some((c) => c.resyncRequired) ||
+      // P-9: an orphaned watch (this environment's DB claims a different
+      // owner than itself) and an unmapped push are both live evidence of
+      // the exact incident this document exists for — §8.4/§9.2 — and must
+      // raise the alarm the same way an expired watch does, not sit quietly
+      // in the report body waiting to be read.
+      report.orphans.length > 0 ||
+      report.unmappedPushes.count > 0;
     return res.status(degraded ? 503 : 200).json({ degraded, report });
   } catch (err) {
     return res.status(500).json({ error: "watch-health failed", detail: describeError(err) });

@@ -1,5 +1,5 @@
 import { corsair } from "@repo/corsair";
-import { db, sql } from "@repo/database";
+import { db, sql, eq, and, inArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { logger } from "@repo/logger";
 
@@ -123,6 +123,13 @@ snippet?: string;
    * message, unlike entityId/threadId — see message-id.ts.
    */
   rfc822MessageId?: string;
+  /**
+   * P-4, docs/gmail-rate-limit-boundary.md §13. The THREAD's historyId from
+   * the threads.list page this message's thread was fetched from — see the
+   * column comment on message-metadata.ts. Stamped uniformly onto every
+   * message of one thread by syncCategoryPage; nothing else should set this.
+   */
+  threadHistoryId?: string;
 }
 
 export async function upsertMessageMetadata(input: MetadataInput): Promise<void> {
@@ -160,6 +167,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           threadId: input.threadId,
           draftId: input.draftId,
           rfc822MessageId: input.rfc822MessageId,
+          threadHistoryId: input.threadHistoryId,
         })),
       )
       .onConflictDoUpdate({
@@ -177,6 +185,12 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           isImportant: sql`excluded.is_important`,
           receivedAt: sql`excluded.received_at`,
           threadId: sql`excluded.thread_id`,
+          // COALESCE like draftId/rfc822MessageId below: this batch only ever
+          // carries a value when it came from a real threads.get (P-4), never
+          // from a path that touches the row for some other reason (e.g. the
+          // webhook diff's per-message ingest), and a bare overwrite there
+          // would null out a value P-4's own next comparison depends on.
+          threadHistoryId: sql`coalesce(excluded.thread_history_id, ${messageMetadata.threadHistoryId})`,
           // COALESCE, not a plain overwrite: a draft's message can also be
           // seen by a label/thread sync that knows nothing about draft ids,
           // and a bare `excluded.draft_id` would null out the id we need to
@@ -212,6 +226,10 @@ interface RawGmailMessage {
   snippet?: string;
   internalDate?: string;
   payload?: unknown;
+  /** P-4 — see MetadataInput.threadHistoryId. Not a field Gmail's message
+   *  resource carries; syncCategoryPage stamps it in from the thread envelope
+   *  before calling processMessages. */
+  threadHistoryId?: string;
 }
 
 function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput | null {
@@ -245,6 +263,7 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
     receivedAt,
     threadId: msg.threadId,
     rfc822MessageId: rfc822MessageId || undefined,
+    threadHistoryId: msg.threadHistoryId,
   };
 }
 
@@ -314,17 +333,36 @@ export async function mapWithConcurrency<T, R>(
  * is wrapped in its own `step.run`, so Inngest checkpoints after every page
  * and a redeploy resumes from the exact page it left off (via the returned
  * nextPageToken), rather than restarting the whole mailbox.
+ *
+ * P-4 (docs/gmail-rate-limit-boundary.md §13): threads.list is cheap (10
+ * units for up to 100 threads) but ALSO reports each thread's current
+ * historyId, and threads.get is the expensive part (40 units each) — so the
+ * list response is diffed against what's already stored, per thread, BEFORE
+ * mapWithConcurrency spends a single threads.get. The decision, precisely:
+ *
+ *   not stored             -> fetch   (never synced)
+ *   stored, unchanged       -> skip    (nothing in the thread has moved)
+ *   stored, changed         -> fetch   (something did)
+ *   force=true (any state)  -> fetch   (explicit resync — see triggerGmailSync)
+ *
+ * `force` exists because "unchanged" is a claim about Gmail's state, not
+ * about the shape of the row we'd write — a category-derivation fix or a new
+ * column backfill needs every thread re-fetched regardless of historyId, and
+ * that is what an operator asking for `gmail:resync`/`gmail:resync-categories`
+ * actually means.
  */
 export async function syncCategoryPage(
   userId: string,
   category: string,
   pageToken?: string,
-): Promise<{ processed: number; nextPageToken?: string }> {
+  force = false,
+): Promise<{ processed: number; skipped: number; nextPageToken?: string }> {
   // Drafts are a separate Gmail resource, not a label query — they need the
   // draft id (which is not the message id) to be editable later.
   if (category === "DRAFT") {
     const { syncDraftsPage } = await import("./drafts.ts");
-    return syncDraftsPage(userId, pageToken);
+    const draftResult = await syncDraftsPage(userId, pageToken);
+    return { ...draftResult, skipped: 0 };
   }
 
   const tenant = corsair.withTenant(userId);
@@ -332,7 +370,7 @@ export async function syncCategoryPage(
   const labelId = CATEGORY_TO_GMAIL_LABEL[category];
 
   const result = await withGmailRetry<{
-    threads?: Array<{ id?: string }>;
+    threads?: Array<{ id?: string; historyId?: string }>;
     nextPageToken?: string | null;
   }>(`threads.list ${category}`, () =>
     tenant.gmail.api.threads.list({
@@ -355,8 +393,47 @@ export async function syncCategoryPage(
     { tenantId: userId, trigger: "sync" },
   );
 
+  const listedThreads = (result.threads ?? []).filter(
+    (t): t is { id: string; historyId?: string } => Boolean(t.id),
+  );
+
+  let toFetch = listedThreads;
+  let skipped = 0;
+
+  if (!force && listedThreads.length > 0) {
+    const threadIds = listedThreads.map((t) => t.id);
+    // DISTINCT ON: multiple message rows can share a threadId, but
+    // syncCategoryPage always stamps the same value onto every one of a
+    // thread's messages (below), so any one row is representative.
+    const storedRows = await db
+      .selectDistinctOn([messageMetadata.threadId], {
+        threadId: messageMetadata.threadId,
+        threadHistoryId: messageMetadata.threadHistoryId,
+      })
+      .from(messageMetadata)
+      .where(and(eq(messageMetadata.userId, userId), inArray(messageMetadata.threadId, threadIds)));
+
+    const storedByThread = new Map(storedRows.map((r) => [r.threadId, r.threadHistoryId]));
+
+    toFetch = listedThreads.filter((t) => {
+      const stored = storedByThread.get(t.id);
+      // No stored value (never synced, or synced before this column existed)
+      // -> fetch. Stored and equal to the fresh list-page value -> skip.
+      // Anything else — including a t.historyId Gmail didn't send, which must
+      // not be treated as "unchanged" — falls through to fetch.
+      return !(stored !== undefined && stored !== null && t.historyId !== undefined && stored === t.historyId);
+    });
+    skipped = listedThreads.length - toFetch.length;
+
+    if (skipped > 0) {
+      logger.debug("[SYNC] P-4 diff skipped unchanged threads", {
+        userId, category, listed: listedThreads.length, fetched: toFetch.length, skipped,
+      });
+    }
+  }
+
   const detailed = await mapWithConcurrency(
-    result.threads ?? [],
+    toFetch,
     // 4, DOWN FROM 10 — and the reason changed, not just the number.
     //
     // Throughput no longer needs concurrency: quota-limiter.ts admits ~1.9
@@ -371,7 +448,7 @@ export async function syncCategoryPage(
     // arriving mid-sync is still admitted immediately. At ten the depth is 400
     // units (~5.3s) and that same UI call lands squarely on its 2s cap.
     4,
-    (t: any) =>
+    (t) =>
       withGmailRetry(`threads.get ${t.id}`, () =>
         tenant.gmail.api.threads.get({
           id: t.id,
@@ -381,14 +458,28 @@ export async function syncCategoryPage(
       ),
   );
 
+  // Stamped from the LIST page's historyId, not from anything threads.get
+  // returns — the list value is what the next page's diff will be compared
+  // against, so storing anything else would compare apples to oranges.
+  //
+  // Zipped against `toFetch` by index BEFORE filtering out failed fetches
+  // (mapWithConcurrency leaves `undefined` in place for those, preserving
+  // index alignment with its input) — filtering first would shift indices
+  // and stamp threads with the wrong neighbour's historyId.
   const messages: RawGmailMessage[] = detailed
-    .filter((t): t is NonNullable<typeof t> => Boolean(t))
-    .flatMap((t: any) => (t.messages ?? []).filter((m: any) => m?.id));
+    .map((t: any, i: number) => (t ? { thread: t, historyId: toFetch[i]?.historyId } : null))
+    .filter((entry): entry is NonNullable<typeof entry> => entry !== null)
+    .flatMap(({ thread, historyId }) =>
+      (thread.messages ?? [])
+        .filter((m: any) => m?.id)
+        .map((m: any) => ({ ...m, threadHistoryId: historyId })),
+    );
 
   await processMessages(userId, messages);
 
   return {
     processed: messages.length,
+    skipped,
     nextPageToken: result.nextPageToken ?? undefined,
   };
 }
@@ -410,6 +501,7 @@ export async function syncAllEmails(
   category: string,
   runningTotal = 0,
   onPage?: () => Promise<unknown>,
+  force = false,
 ): Promise<number> {
   let pageToken: string | undefined;
   let total = runningTotal;
@@ -419,6 +511,7 @@ export async function syncAllEmails(
       userId,
       category,
       pageToken,
+      force,
     );
     pageToken = nextPageToken;
     total += processed;
@@ -435,18 +528,33 @@ export async function syncAllEmails(
  * to an in-process syncMailbox so the flow still works in dev or before the
  * INNGEST_* keys are set. This is the single entry point used by the OAuth
  * callback, the gmail.resync tRPC mutation, and the resync CLI.
+ *
+ * `force` is P-4's escape hatch (docs/gmail-rate-limit-boundary.md §13),
+ * threaded all the way down to syncCategoryPage's diff. Defaults false, i.e.
+ * the diff is live for every ordinary trigger of this function — OAuth
+ * connect on a fresh mailbox has nothing stored yet so it fetches everything
+ * regardless, and a later re-trigger benefits from the skip. Pass `force:
+ * true` only when the caller genuinely wants every thread re-fetched
+ * regardless of whether Gmail reports it unchanged — the admin resync CLI
+ * does, deliberately, because "refresh this mailbox" from an operator means
+ * "re-derive every row," not "trust the diff."
  */
-export async function triggerGmailSync(userId: string): Promise<void> {
+export async function triggerGmailSync(
+  userId: string,
+  options: { force?: boolean } = {},
+): Promise<void> {
+  const force = options.force ?? false;
+
   if (process.env.INNGEST_EVENT_KEY) {
     await markSyncQueued(userId);
     const { inngest } = await import("@repo/inngest");
-    await inngest.send({ name: "gmail/sync.requested", data: { userId } });
-    logger.info("[SYNC] enqueued durable gmail sync", { userId });
+    await inngest.send({ name: "gmail/sync.requested", data: { userId, force } });
+    logger.info("[SYNC] enqueued durable gmail sync", { userId, force });
     return;
   }
   logger.warn(
     "[SYNC] INNGEST_EVENT_KEY not set — running in-process sync (not durable/resumable)",
-    { userId },
+    { userId, force },
   );
   const estimatedTotal = await estimateMailboxTotal(userId);
   await markSyncRunning(userId, estimatedTotal);
@@ -456,8 +564,10 @@ export async function triggerGmailSync(userId: string): Promise<void> {
     // from it); the page token stays null, honestly, because unlike
     // gmailInitialSync this path genuinely cannot resume — a restart mid-sync
     // starts over.
-    await syncMailbox(userId, (categoryIndex) =>
-      updateSyncProgress(userId, { categoryIndex, pageToken: null }),
+    await syncMailbox(
+      userId,
+      (categoryIndex) => updateSyncProgress(userId, { categoryIndex, pageToken: null }),
+      force,
     );
     await markSyncComplete(userId);
   } catch (err) {
@@ -469,6 +579,7 @@ export async function triggerGmailSync(userId: string): Promise<void> {
 export async function syncMailbox(
   userId: string,
   onPage?: (categoryIndex: number) => Promise<unknown>,
+  force = false,
 ): Promise<number> {
   let total = 0;
   for (const [index, category] of ALL_CATEGORIES.entries()) {
@@ -477,7 +588,7 @@ export async function syncMailbox(
     try {
       // Report the index of the category being worked on, so a stalled or
       // failed category still leaves the waiting screen's stage label correct.
-      total = await syncAllEmails(userId, category, total, onPage && (() => onPage(index)));
+      total = await syncAllEmails(userId, category, total, onPage && (() => onPage(index)), force);
     } catch (err) {
       logger.error("[SYNC] syncAllEmails category failed, continuing", {
         userId, category, error: String(err),

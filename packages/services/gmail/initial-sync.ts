@@ -44,10 +44,21 @@ const MAX_PAGES_PER_RUN = 15;
 export const gmailInitialSync = inngest.createFunction(
   {
     id: "gmail-initial-sync",
-    // Cap simultaneous syncs so a burst of new connections can't exhaust the
-    // API container. Per-user Gmail rate limiting is handled inside
-    // syncCategoryPage (concurrency cap + backoff/retry).
-    concurrency: { limit: Number(process.env.INITIAL_SYNC_CONCURRENCY ?? 1) },
+    // PINNED to 1, not configurable (P-5b + P-12, docs/gmail-rate-limit-boundary.md
+    // §13). This used to be `Number(process.env.INITIAL_SYNC_CONCURRENCY ?? 1)`
+    // — a knob that bounded concurrent syncs PER INNGEST APP, i.e. per
+    // environment. That is B-3 in different clothes: two environments each
+    // running their own "concurrency 1" limit still allows two simultaneous
+    // initial syncs against the SAME mailbox, because the cap was never keyed
+    // on the mailbox. The real per-mailbox ceiling now lives in
+    // mailbox-semaphore.ts, acquired transparently at the transport boundary
+    // by every Gmail call this function's syncCategoryPage steps make — see
+    // docs/gmail-call-graph.md. This Inngest-level knob is kept only to bound
+    // how many DIFFERENT mailboxes' initial syncs run at once on one
+    // container; raising it no longer relaxes any per-mailbox limit, so it is
+    // pinned rather than left as an env var that would misleadingly suggest
+    // otherwise.
+    concurrency: { limit: 1 },
     retries: 4,
     onFailure: async ({ event }) => {
       // onFailure's event wraps the original triggering event at event.data.event
@@ -59,6 +70,12 @@ export const gmailInitialSync = inngest.createFunction(
   { event: "gmail/sync.requested" },
   async ({ event, step }) => {
     const userId: string = event.data.userId;
+    // P-4 (docs/gmail-rate-limit-boundary.md §13). Carried through every
+    // continuation event below so a resync that started forced stays forced
+    // across MAX_PAGES_PER_RUN boundaries — losing it partway through would
+    // silently start diffing (and skipping) threads the operator asked to
+    // have re-fetched unconditionally.
+    const force: boolean = event.data.force ?? false;
     const isFirstRun = event.data.categoryIndex === undefined;
     let categoryIndex: number = event.data.categoryIndex ?? 0;
     let pageToken: string | undefined = event.data.pageToken ?? undefined;
@@ -82,7 +99,7 @@ export const gmailInitialSync = inngest.createFunction(
       // so this step id is unique within the run and deterministic on replay.
       const { nextPageToken } = await step.run(
         `sync-${category}-page-${pagesThisRun}`,
-        () => syncCategoryPage(userId, category, pageToken),
+        () => syncCategoryPage(userId, category, pageToken, force),
       );
 
       pagesThisRun += 1;
@@ -107,7 +124,7 @@ export const gmailInitialSync = inngest.createFunction(
       ) {
         await step.sendEvent("continue-gmail-sync", {
           name: "gmail/sync.requested",
-          data: { userId, categoryIndex, pageToken },
+          data: { userId, categoryIndex, pageToken, force },
         });
         return { userId, syncedTotal, continued: true };
       }

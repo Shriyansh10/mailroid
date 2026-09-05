@@ -52,6 +52,22 @@ export const messageMetadata = pgTable(
     receivedAt: timestamp("received_at", { withTimezone: true }),
     threadId: text("thread_id"),
 
+    // P-4, docs/gmail-rate-limit-boundary.md §13. The THREAD's historyId, as
+    // reported by threads.list — NOT a message-level value, and not to be
+    // confused with any per-message historyId Gmail also exposes. Every
+    // message row belonging to one thread carries the same value: it is
+    // stamped once, from the list-page response, onto every message
+    // syncCategoryPage fetched for that thread.
+    //
+    // What it's FOR: before spending a threads.get (40 units) on a thread
+    // already-synced, syncCategoryPage compares this stored value against the
+    // one the current threads.list page just reported. Unchanged means
+    // nothing in the thread has moved since the last sync — skip the fetch.
+    // Changed (or NULL — never synced) means fetch. NULL is deliberately not
+    // backfilled retroactively: it just means the first sync after this
+    // column shipped always fetches once, which is correct and self-healing.
+    threadHistoryId: text("thread_history_id"),
+
     // The RFC822 `Message-ID` header, normalised (angle brackets stripped).
     //
     // Unlike `entityId` and `threadId` — which Gmail assigns per mailbox, so

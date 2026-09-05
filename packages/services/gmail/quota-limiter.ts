@@ -114,22 +114,24 @@ const BURST_UNITS = clampedEnvInt(
 );
 
 /**
- * OPT-IN, and off until explicitly switched on.
+ * OPT-OUT, and on unless explicitly switched off (P-8,
+ * docs/gmail-rate-limit-boundary.md §13).
  *
- * Two reasons it defaults off rather than on. First, enabling pacing has
- * prerequisites that cannot be checked from inside the process: the applicable
- * quota tier must be confirmed per GCP project in the Cloud console (projects
- * with Gmail API use between November 2025 and April 2026 keep their older
- * quotas), and a paced sync page takes ~50s, which has to fit inside the Inngest
- * step and proxy timeouts. Defaulting on would enable it in environments where
- * nobody had checked either.
+ * This inverts the original opt-in design. The pre-flight checks that
+ * justified opt-in — confirm the GCP quota tier per project, confirm a ~50s
+ * paced sync page fits inside the Inngest step and proxy timeouts — were the
+ * argument FOR shipping unpaced by default while they were pending. They are
+ * no longer pending, and the 2026-08-25 incident is what an unpaced call rate
+ * costs when nobody remembered to flip the switch: pacing that a developer has
+ * to opt into is pacing that is off by default in every environment where
+ * nobody thought to ask. Every Gmail call in the product now awaits this
+ * module, so the failure mode of defaulting on is "briefly conservative
+ * throughput"; the failure mode of defaulting off is this document's §2.1.
  *
- * Second, every Gmail call in the product now awaits this module. A one-env-var
- * disable that needs no rollback is cheap insurance for that.
- *
- * Set GMAIL_QUOTA_PACING=on once the pre-flight checks pass.
+ * The one-env-var escape hatch is kept, inverted: set GMAIL_QUOTA_PACING=off
+ * to disable, e.g. for a one-off script that wants the raw call rate.
  */
-const PACING_ENABLED_AT_BOOT = process.env.GMAIL_QUOTA_PACING === "on";
+const PACING_ENABLED_AT_BOOT = process.env.GMAIL_QUOTA_PACING !== "off";
 
 /**
  * Mutable so tests can exercise the algorithm without the env var, and so the
@@ -310,6 +312,16 @@ export interface QuotaHooks {
 
 export interface QuotaRequest {
   tenantId?: string;
+  /**
+   * P-5a (docs/gmail-rate-limit-boundary.md §13). The mailbox address, when
+   * the caller has one — resolved OUTSIDE this module (see bucketKey below
+   * for why) and passed in. Two tenants connected to the same mailbox (the
+   * one-at-a-time shared-test-mailbox handover, §5) must pace against ONE
+   * bucket, because that is Gmail's own key (§3.1: "shared by all Gmail API
+   * clients for a user"); keying on tenantId alone lets them silently double
+   * the real admitted rate against that mailbox.
+   */
+  mailbox?: string;
   operation: string;
   trigger: string;
   correlationId?: string;
@@ -329,10 +341,22 @@ const defaultNow = (): number => Date.now();
 const defaultSleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
-function bucketKey(tenantId: string | undefined): string {
-  // An unattributed call is paced against a shared bucket rather than escaping
-  // pacing entirely. Conservative on purpose: escaping would be the bug.
-  return tenantId ?? "unattributed";
+/**
+ * P-5a. Prefers `mailbox` — Gmail's own key — over `tenantId`, and never
+ * resolves one from the other itself: this module's header commits to a
+ * deliberately tiny dependency budget (@repo/logger and the pure
+ * ./gmail-errors only), and a DB read to resolve a mailbox on the pacing hot
+ * path would violate it. Resolution happens in the two callers that already
+ * know the tenant — gmail-request.ts and retry.ts — via a cached resolver
+ * (./mailbox-resolver.ts) that THEY import, not this module.
+ *
+ * Falls back to tenantId, then to the shared "unattributed" bucket, so a
+ * resolver miss (mailbox not yet known, or a resolver failure) paces
+ * CONSERVATIVELY rather than escaping pacing — same reasoning as the
+ * original tenantId-only fallback below, one level down.
+ */
+function bucketKey(req: { mailbox?: string; tenantId?: string }): string {
+  return req.mailbox ?? req.tenantId ?? "unattributed";
 }
 
 /**
@@ -352,7 +376,7 @@ export async function acquireQuota(
 
   if (req.fallbackPriced) fallbackPricedCount += 1;
 
-  const key = bucketKey(req.tenantId);
+  const key = bucketKey(req);
   const at = now();
 
   if (++sinceSweep >= SWEEP_EVERY) {
@@ -453,7 +477,7 @@ export function chargeQuota(req: Omit<QuotaRequest, "hooks"> & { hooks?: QuotaHo
   try {
     const now = req.hooks?.now ?? defaultNow;
     const at = now();
-    const key = bucketKey(req.tenantId);
+    const key = bucketKey(req);
     const baseTat = Math.max(readTat(key, at), at);
     writeTat(key, baseTat + req.units * MS_PER_UNIT, at);
   } catch {

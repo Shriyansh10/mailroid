@@ -17,7 +17,9 @@ import { getPause } from "@repo/services/gmail/pause.js";
 import { withTenantSingleFlight } from "@repo/services/gmail/tenant-lock.js";
 import { syncCalendarEvents } from "@repo/services/calendar/sync-events.js";
 import { logger, errorFields, hashMailbox, preview } from "@repo/logger";
+import { isMailboxAllowedInThisEnvironment, mailroidEnv } from "@repo/services/env.js";
 import { describeError } from "../diagnostics/describe-error.js";
+import { recordUnmappedPush } from "../diagnostics/unmapped-push-counter.js";
 
 // Stage 3 rollout flag (see docs/architecture-plan.md). false = the History
 // diff still runs inline in this Express handler as a fire-and-forget
@@ -46,7 +48,11 @@ async function resolveTenantIdFromEmail(targetEmail: string): Promise<string | u
       return mapping.tenantId;
     }
 
-    logger.warn("[WEBHOOK] no tenant mapping for mailbox", { mailbox });
+    // Loud (error, not warn) and countable — see unmapped-push-counter.ts.
+    // This IS what an orphaned or stolen watch looks like from here (§9.2),
+    // and a warn that scrolls past is how it went uncounted for 14+ hours.
+    recordUnmappedPush();
+    logger.error("[WEBHOOK] no tenant mapping for mailbox", { mailbox });
   } catch (err) {
     logger.error("[WEBHOOK] tenant resolution lookup failed", {
       mailbox,
@@ -74,6 +80,14 @@ export async function handleCorsairWebhook(req: {
 }) {
   const parsedUrl = new URL(req.url, "http://localhost");
   let tenantId = parsedUrl.searchParams.get("tenantId") ?? undefined;
+
+  // P-1's allowlist (docs/gmail-rate-limit-boundary.md §13) only guards NEW
+  // OAuth connects. A mailbox that was already (mis)connected before that
+  // shipped — §8.4's confirmed local/production overlap — never passes
+  // through that check again; it just keeps pushing here. This flag marks the
+  // second enforcement point, below, so the eventual 200 ack names the real
+  // reason instead of being folded into the generic "unmapped mailbox" case.
+  let droppedForWrongEnvironment = false;
 
   // Resolve calendar tenantId from the x-goog-channel-id header
   let calendarTenantId: string | undefined = undefined;
@@ -202,13 +216,31 @@ export async function handleCorsairWebhook(req: {
 
           if (!tenantId && typeof dataObj.emailAddress === "string") {
             const email = dataObj.emailAddress;
-            const resolvedId = await resolveTenantIdFromEmail(email);
-            if (resolvedId) {
-              tenantId = resolvedId;
+
+            // Checked BEFORE the mapping lookup, and independent of whether a
+            // mapping exists. §8.4's overlapping mailboxes ARE mapped locally
+            // — that's the incident — so "is it mapped" cannot be the gate.
+            // The allowlist is the one source of truth for ownership (1a); a
+            // push for a mailbox this environment does not own is dropped
+            // here regardless of what gmail_tenant_mappings says.
+            if (!isMailboxAllowedInThisEnvironment(email)) {
+              droppedForWrongEnvironment = true;
+              logger.error(
+                "[WEBHOOK] dropping gmail push: mailbox not owned by this environment",
+                {
+                  mailbox: hashMailbox(email),
+                  mailroidEnv: mailroidEnv.env,
+                  outcome: "droppedWrongEnvironmentMailbox",
+                },
+              );
             } else {
-              logger.warn("[WEBHOOK] unresolvable mailbox on gmail push", {
-                mailbox: hashMailbox(email),
-              });
+              // A null return here already logged and counted the miss —
+              // resolveTenantIdFromEmail above, "no tenant mapping for
+              // mailbox" — so there is nothing left to log for this branch.
+              const resolvedId = await resolveTenantIdFromEmail(email);
+              if (resolvedId) {
+                tenantId = resolvedId;
+              }
             }
           }
         }
@@ -251,13 +283,20 @@ export async function handleCorsairWebhook(req: {
   // stop once that account's watch expires. (Calendar pushes are handled
   // earlier via channelId, so this only catches the Gmail path.)
   if (!tenantId && incomingHistoryId) {
-    logger.warn("[WEBHOOK] ignoring gmail push for unmapped mailbox", {
-      incomingHistoryId,
-      outcome: "ignoredUnmappedMailbox",
-    });
+    // The loud error line already ran above for the wrong-environment case —
+    // this is just the required 200 ack, with the action field naming which
+    // of the two guards fired rather than folding both into one label.
+    if (!droppedForWrongEnvironment) {
+      logger.warn("[WEBHOOK] ignoring gmail push for unmapped mailbox", {
+        incomingHistoryId,
+        outcome: "ignoredUnmappedMailbox",
+      });
+    }
     return {
       plugin: "gmail",
-      action: "ignoredUnmappedMailbox",
+      action: droppedForWrongEnvironment
+        ? "droppedWrongEnvironmentMailbox"
+        : "ignoredUnmappedMailbox",
       response: {
         statusCode: 200,
         responseHeaders: {},
