@@ -1,7 +1,7 @@
 import { auth, type Session } from "./index.js";
 
 /**
- * Thrown by requireAdminSession. Caught by the shared error-handling
+ * Thrown by requireDeveloperSession. Caught by the shared error-handling
  * middleware in server.ts, which turns it into the matching HTTP response —
  * callers never branch on the result, they just await this and keep going.
  */
@@ -16,13 +16,16 @@ export class HttpError extends Error {
 }
 
 /**
- * Guard for admin-only Express routes. Throws HttpError(401) if there is no
- * session, HttpError(403) if the session exists but isn't an admin — Express
- * ^5 forwards rejected promises from async handlers to error middleware
- * automatically, so a route just does `const session = await requireAdminSession(req);`
- * with no branching.
+ * Guard for DEVELOPER-only Express routes. Throws HttpError(401) if there is no
+ * session, HttpError(403) if the session exists but the user is not a platform
+ * DEVELOPER — Express ^5 forwards rejected promises from async handlers to error
+ * middleware automatically, so a route just does
+ * `const session = await requireDeveloperSession(req);` with no branching.
+ *
+ * Authority comes from platform_role alone. A plan never confers it, so nothing
+ * here looks at a subscription.
  */
-export async function requireAdminSession(req: {
+export async function requireDeveloperSession(req: {
   headers: unknown;
 }): Promise<Session> {
   const session = await auth.api.getSession({
@@ -31,7 +34,7 @@ export async function requireAdminSession(req: {
   if (!session) {
     throw new HttpError(401, "Unauthorized");
   }
-  if (!session.user.isAdmin) {
+  if (session.user.platformRole !== "DEVELOPER") {
     throw new HttpError(403, "Forbidden");
   }
   return session;

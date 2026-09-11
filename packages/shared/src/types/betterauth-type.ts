@@ -7,7 +7,7 @@ export const userSchema = z.object({
   email: z.string().email(),
   emailVerified: z.boolean(),
   image: z.string().nullable().optional(),
-  isAdmin: z.boolean(),
+  platformRole: z.enum(["USER", "DEVELOPER"]),
   createdAt: z.date(),
   updatedAt: z.date(),
 });

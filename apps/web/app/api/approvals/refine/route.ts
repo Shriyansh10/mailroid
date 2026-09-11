@@ -135,7 +135,7 @@ export async function POST(request: Request) {
     // draft is not itself an outward-facing action — the send is, and that
     // is charged when the approval executes. Charging per refine would bill
     // the user for pressing "More formal" and then changing their mind.
-    const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
+    const limitCheck = await checkDailyLimit(userId, userTimeZone);
     if (!limitCheck.allowed) {
       return NextResponse.json({ error: limitCheck.message }, { status: 429 });
     }

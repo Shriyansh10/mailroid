@@ -50,8 +50,9 @@ export class ToolOrchestrator {
     skipPermissionCheck?: boolean,
     userTimeZone?: string,
     userEmail?: string,
+    isDeveloper?: boolean,
   ): Promise<ToolResult> {
-    const ctx: ToolExecutionContext = { userId, requestId, userTimeZone, userEmail };
+    const ctx: ToolExecutionContext = { userId, requestId, userTimeZone, userEmail, isDeveloper };
 
     // ── 1. Validate tool exists ────────────────────────────────────
     const tool = this.registry.get(toolName);
@@ -306,7 +307,7 @@ export class ToolOrchestrator {
     }
 
     // ── 5. Rate Limiter — check BEFORE execution (counts ALL attempts) ──
-    const rateResult = rateLimiter.check(userId, toolName, ctx.userEmail);
+    const rateResult = rateLimiter.check(userId, toolName, ctx.isDeveloper);
     if (!rateResult.allowed) {
       const result = makeResult(
         toolName,

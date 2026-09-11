@@ -1,5 +1,20 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text, timestamp, boolean, index } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, boolean, index, pgEnum } from "drizzle-orm/pg-core";
+
+/**
+ * Authority over Mailroid itself — deliberately not a plan.
+ *
+ * A plan says what someone paid for and governs ordinary product limits; this
+ * says who they are internally and governs dev tools, the _debug routes and
+ * limit bypass. Keeping them apart is what stops "give them PRO" becoming the
+ * way people get developer powers, and stops a lapsed plan silently removing
+ * them. Organization roles (OWNER/ADMIN/MANAGER) are a third, separate axis and
+ * must never be conflated with this one.
+ *
+ * Replaces the previous `isAdmin` boolean, which could not express DEVELOPER as
+ * distinct from an organization admin.
+ */
+export const platformRoleEnum = pgEnum("platform_role", ["USER", "DEVELOPER"]);
 
 export const user = pgTable("user", {
   id: text("id").primaryKey(),
@@ -7,7 +22,7 @@ export const user = pgTable("user", {
   email: text("email").notNull().unique(),
   emailVerified: boolean("email_verified").default(false).notNull(),
   image: text("image"),
-  isAdmin: boolean("is_admin").default(false).notNull(),
+  platformRole: platformRoleEnum("platform_role").default("USER").notNull(),
   createdAt: timestamp("created_at").defaultNow().notNull(),
   updatedAt: timestamp("updated_at")
     .defaultNow()

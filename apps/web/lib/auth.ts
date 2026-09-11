@@ -36,9 +36,9 @@ export const auth = betterAuth({
   // declared fields in the returned session/user object, not a raw SELECT *.
   user: {
     additionalFields: {
-      isAdmin: {
-        type: "boolean",
-        defaultValue: false,
+      platformRole: {
+        type: "string",
+        defaultValue: "USER",
         input: false,
       },
     },

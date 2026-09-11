@@ -1,6 +1,9 @@
 import { db, eq, and } from "@repo/database";
 import { userUsage } from "@repo/database/models/user-usage";
 
+import { PLAN_LIMITS, limitFor, type Plan } from "./entitlement-policy.ts";
+import { resolveEntitlement } from "./entitlements.ts";
+
 /**
  * Generic daily-action-limit ("credit") accounting, shared by every AI-costing
  * user action: chat turns, tool approvals, email generation, summarization,
@@ -8,6 +11,12 @@ import { userUsage } from "@repo/database/models/user-usage";
  * packages/services/gmail/classification.ts needs it and cannot depend on
  * apps/web — apps/web/lib/limits.ts re-exports these verbatim so its existing
  * callers need no changes.
+ *
+ * The cap comes from the user's plan (@repo/services/entitlements). It used to
+ * come from a hardcoded 10/20 with a WHITELISTED_EMAILS env var bypassing it;
+ * both are gone. `userEmail` is no longer a parameter anywhere here — identity
+ * is the userId, and entitlement is a database read, not a string match against
+ * a comma-separated environment variable.
  */
 
 export interface UsageCheckResult {
@@ -16,29 +25,47 @@ export interface UsageCheckResult {
   actionCount: number;
   limit: number;
   message?: string;
+  /**
+   * Carried here because every caller that checks the limit before running a
+   * tool also needs it for the rate limiter, and this call has already paid for
+   * the entitlement read. Returning it avoids a second round trip on a hot path.
+   */
+  isDeveloper: boolean;
 }
 
-function whitelisted(userEmail?: string): boolean {
-  if (!userEmail) return false;
-  const whitelistStr = process.env.WHITELISTED_EMAILS || "";
-  const whitelistedEmails = whitelistStr.split(",").map((e) => e.trim().toLowerCase());
-  return whitelistedEmails.includes(userEmail.toLowerCase());
+/** Sentinel reported for accounts that are not metered at all. */
+const UNMETERED = 9999;
+
+export { limitFor };
+
+function todayIn(userTimeZone: string | undefined): string {
+  return new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone ?? "UTC" });
+}
+
+function limitMessage(plan: Plan, unlocked: boolean, limit: number): string {
+  if (plan !== "FREE") {
+    return `You've used all ${limit} assistant actions for today on your ${plan} plan. They reset tomorrow.`;
+  }
+  return unlocked
+    ? `🎯 You've reached your maximum limit of ${limit} assistant actions today. Please check back tomorrow to continue helping us shape Mailroid!`
+    : `🎯 You're helping shape Mailroid. You've used your first ${limit} assistant actions today. Share a bug report, feature request, or product feedback to unlock ${PLAN_LIMITS.FREE.unlockedBonus} more actions.`;
 }
 
 /**
- * Check if the user is within their daily action limits.
- * Whitelisted email addresses bypass limits completely.
+ * Check whether the user is within their daily action limit.
+ * A DEVELOPER is not metered — that authority comes from platform_role, never
+ * from a plan, so it survives a plan lapsing.
  */
 export async function checkDailyLimit(
   userId: string,
-  userEmail?: string,
   userTimeZone = "UTC",
 ): Promise<UsageCheckResult> {
-  if (whitelisted(userEmail)) {
-    return { allowed: true, unlocked: true, actionCount: 0, limit: 9999 };
+  const entitlement = await resolveEntitlement(userId);
+  if (entitlement.isDeveloper) {
+    return { allowed: true, unlocked: true, actionCount: 0, limit: UNMETERED, isDeveloper: true };
   }
 
-  const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone });
+  const dateStr = todayIn(userTimeZone);
 
   const [usage] = await db
     .select()
@@ -48,29 +75,31 @@ export async function checkDailyLimit(
 
   const actionCount = usage ? usage.actionCount : 0;
   const unlocked = usage ? usage.unlocked : false;
-  const limit = unlocked ? 20 : 10;
+  const limit = limitFor(entitlement.plan, unlocked);
 
   if (actionCount >= limit) {
-    const message = unlocked
-      ? "🎯 You've reached your maximum limit of 20 assistant actions today. Please check back tomorrow to continue helping us shape Mailroid!"
-      : "🎯 You're helping shape Mailroid. You've used your first 10 assistant actions today. Share a bug report, feature request, or product feedback to unlock 10 more actions.";
-    return { allowed: false, unlocked, actionCount, limit, message };
+    return {
+      allowed: false,
+      unlocked,
+      actionCount,
+      limit,
+      message: limitMessage(entitlement.plan, unlocked, limit),
+      isDeveloper: false,
+    };
   }
 
-  return { allowed: true, unlocked, actionCount, limit };
+  return { allowed: true, unlocked, actionCount, limit, isDeveloper: false };
 }
 
 /**
  * Atomically increment daily action usage count inside a row-locking database transaction.
- * Bypasses increment if the user email is whitelisted.
  * Returns true if increment succeeded, false if limit was exceeded under lock.
  */
 export async function incrementDailyLimit(
   userId: string,
-  userEmail?: string,
   userTimeZone = "UTC",
 ): Promise<boolean> {
-  return incrementDailyLimitBy(userId, userEmail, userTimeZone, 1);
+  return incrementDailyLimitBy(userId, userTimeZone, 1);
 }
 
 /**
@@ -81,15 +110,15 @@ export async function incrementDailyLimit(
  */
 export async function incrementDailyLimitBy(
   userId: string,
-  userEmail: string | undefined,
   userTimeZone: string | undefined,
   amount: number,
 ): Promise<boolean> {
-  if (whitelisted(userEmail)) {
-    return true; // Bypass increment
+  const entitlement = await resolveEntitlement(userId);
+  if (entitlement.isDeveloper) {
+    return true; // Not metered.
   }
 
-  const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone ?? "UTC" });
+  const dateStr = todayIn(userTimeZone);
 
   return await db.transaction(async (tx) => {
     const [usage] = await tx
@@ -101,7 +130,7 @@ export async function incrementDailyLimitBy(
 
     const actionCount = usage ? usage.actionCount : 0;
     const unlocked = usage ? usage.unlocked : false;
-    const limit = unlocked ? 20 : 10;
+    const limit = limitFor(entitlement.plan, unlocked);
 
     if (actionCount + amount > limit) {
       return false; // Would exceed the limit — reject the whole charge, not a partial one.
@@ -135,13 +164,15 @@ export async function incrementDailyLimitBy(
  */
 export async function refundDailyLimit(
   userId: string,
-  userEmail: string | undefined,
   userTimeZone: string | undefined,
   amount: number,
 ): Promise<void> {
-  if (whitelisted(userEmail) || amount <= 0) return;
+  if (amount <= 0) return;
 
-  const dateStr = new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone ?? "UTC" });
+  const entitlement = await resolveEntitlement(userId);
+  if (entitlement.isDeveloper) return; // Was never charged.
+
+  const dateStr = todayIn(userTimeZone);
 
   await db.transaction(async (tx) => {
     const [usage] = await tx

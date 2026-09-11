@@ -3,6 +3,8 @@ import { auth } from "@web/lib/auth";
 import { db, eq, and } from "@repo/database";
 import { userUsage } from "@repo/database/schema";
 import { resolveEffectiveTimeZone } from "@web/lib/timezone";
+import { resolveEntitlement } from "@repo/services/entitlements";
+import { limitFor } from "@repo/services/usage-limits";
 
 export const runtime = "nodejs";
 
@@ -13,20 +15,20 @@ export async function GET(request: Request) {
       return NextResponse.json({ error: "Unauthorized" }, { status: 401 });
     }
     const userId = session.user.id;
-    const userEmail = session.user.email;
 
-    // Check whitelist
-    const whitelistStr = process.env.WHITELISTED_EMAILS || "";
-    const whitelistedEmails = whitelistStr.split(",").map((e) => e.trim().toLowerCase());
-    const isWhitelisted = whitelistedEmails.includes(userEmail.toLowerCase());
+    const entitlement = await resolveEntitlement(userId);
 
-    if (isWhitelisted) {
+    if (entitlement.isDeveloper) {
       return NextResponse.json({
         actionCount: 0,
         limit: 9999,
         remaining: 9999,
         unlocked: true,
         feedbackUnlocks: 0,
+        plan: entitlement.plan,
+        isDeveloper: true,
+        expiresAt: null,
+        expiringSoon: false,
       });
     }
 
@@ -41,7 +43,7 @@ export async function GET(request: Request) {
 
     const actionCount = usage ? usage.actionCount : 0;
     const unlocked = usage ? usage.unlocked : false;
-    const limit = unlocked ? 20 : 10;
+    const limit = limitFor(entitlement.plan, unlocked);
     const remaining = Math.max(0, limit - actionCount);
 
     return NextResponse.json({
@@ -50,6 +52,10 @@ export async function GET(request: Request) {
       remaining,
       unlocked,
       feedbackUnlocks: usage ? (usage.feedbackUnlocks || 0) : 0,
+      plan: entitlement.plan,
+      isDeveloper: false,
+      expiresAt: entitlement.expiresAt?.toISOString() ?? null,
+      expiringSoon: entitlement.expiringSoon,
     });
   } catch (error) {
     console.error("[api:usage] Error fetching usage:", error);

@@ -279,7 +279,7 @@ export async function getOrCreateSummary(
   }
 
   if (opts.charge === "on-generate") {
-    const limitCheck = await checkDailyLimit(userId, opts.userEmail, opts.userTimeZone);
+    const limitCheck = await checkDailyLimit(userId, opts.userTimeZone);
     if (!limitCheck.allowed) {
       return { ok: false, reason: "limit_reached", message: limitCheck.message ?? "Daily limit reached." };
     }
@@ -387,7 +387,7 @@ export async function getOrCreateSummary(
     .where(and(eq(messageMetadata.entityId, meta.entityId), eq(messageMetadata.userId, userId)));
 
   if (opts.charge === "on-generate") {
-    const charged = await incrementDailyLimit(userId, opts.userEmail, opts.userTimeZone);
+    const charged = await incrementDailyLimit(userId, opts.userTimeZone);
     if (!charged) {
       // Raced past the limit while generating. The summary is already saved
       // and cached, so surface it rather than throwing away work the user

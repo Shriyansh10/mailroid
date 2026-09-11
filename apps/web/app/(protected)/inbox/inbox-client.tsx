@@ -436,7 +436,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
                 <PlugIcon className="mr-2 h-4 w-4" />
                 <span>Connected Services</span>
               </DropdownMenuItem>
-              {session?.user?.isAdmin && (
+              {session?.user?.platformRole === "DEVELOPER" && (
                 <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/developer")}>
                   <TerminalIcon className="mr-2 h-4 w-4" />
                   <span>Developer</span>

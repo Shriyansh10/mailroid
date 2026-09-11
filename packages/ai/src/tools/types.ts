@@ -70,6 +70,12 @@ export interface ToolExecutionContext {
   requestId: string;
   userTimeZone?: string;
   userEmail?: string;
+  /**
+   * Platform DEVELOPER authority, resolved by the caller. Exempts the call from
+   * per-tool rate limits. Deliberately not derived from the plan — a lapsed
+   * plan must never remove developer authority.
+   */
+  isDeveloper?: boolean;
 }
 
 // ── Tool definition ──────────────────────────────────────────────────

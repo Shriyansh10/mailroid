@@ -50,7 +50,7 @@ export async function POST(request: Request) {
     const userTimeZone = await resolveEffectiveTimeZone(userId, request);
 
     // ── Check Daily Action Limit ───────────────────────────────────
-    const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
+    const limitCheck = await checkDailyLimit(userId, userTimeZone);
     if (!limitCheck.allowed) {
       return NextResponse.json(
         { error: limitCheck.message },
@@ -111,6 +111,7 @@ export async function POST(request: Request) {
       true, // skipPermissionCheck — approval already granted
       userTimeZone,
       session.user.email,
+      limitCheck.isDeveloper,
     );
 
     const conversationId = body.conversationId;
@@ -236,6 +237,7 @@ export async function POST(request: Request) {
                 false,
                 userTimeZone,
                 session.user.email,
+                limitCheck.isDeveloper,
               );
             },
             userId,
@@ -345,7 +347,7 @@ export async function POST(request: Request) {
     }
 
     if (shouldCharge) {
-      const incrementSuccess = await incrementDailyLimit(userId, session.user.email, userTimeZone);
+      const incrementSuccess = await incrementDailyLimit(userId, userTimeZone);
       if (!incrementSuccess) {
         return NextResponse.json(
           { error: "Daily limit reached during concurrent processing." },

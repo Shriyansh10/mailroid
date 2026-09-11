@@ -53,10 +53,9 @@ export interface ClassificationCostEstimate {
 export async function computeCreditPlan(
   pendingCount: number,
   userId: string,
-  userEmail?: string,
   userTimeZone?: string,
 ): Promise<ClassificationCostEstimate> {
-  const { actionCount, limit } = await checkDailyLimit(userId, userEmail, userTimeZone);
+  const { actionCount, limit } = await checkDailyLimit(userId, userTimeZone);
   const remainingCredits = limit - actionCount;
 
   if (remainingCredits <= 0) {
@@ -88,11 +87,10 @@ export async function computeCreditPlan(
 export async function estimateClassificationCost(
   userId: string,
   since: Date,
-  userEmail?: string,
   userTimeZone?: string,
 ): Promise<ClassificationCostEstimate> {
   const pendingCount = await countPendingForScope(userId, since);
-  return computeCreditPlan(pendingCount, userId, userEmail, userTimeZone);
+  return computeCreditPlan(pendingCount, userId, userTimeZone);
 }
 
 // An email can never classify (e.g. no sender/subject/snippet at all) stays
@@ -470,7 +468,6 @@ export type StartClassificationJobResult =
 export async function startClassificationJob(
   userId: string,
   scope: ClassificationScope,
-  userEmail?: string,
   userTimeZone?: string,
 ): Promise<StartClassificationJobResult> {
   const since = scopeToSinceDate(scope);
@@ -478,7 +475,7 @@ export async function startClassificationJob(
   // Credit check happens before anything else, including the hydrate event
   // below — a call that can't actually start a job shouldn't have side
   // effects.
-  const estimate = await estimateClassificationCost(userId, since, userEmail, userTimeZone);
+  const estimate = await estimateClassificationCost(userId, since, userTimeZone);
   if (estimate.noCredits) {
     return { started: false, reason: "no_credits" };
   }
@@ -489,7 +486,7 @@ export async function startClassificationJob(
 
   // Charge once, up front, against exactly this estimate — never trued up
   // later even if the actual pending count drifts while the job runs.
-  const charged = await incrementDailyLimitBy(userId, userEmail, userTimeZone, estimate.creditsToCharge);
+  const charged = await incrementDailyLimitBy(userId, userTimeZone, estimate.creditsToCharge);
   if (!charged) {
     // A concurrent request (a second tab, a double-click) consumed the
     // remaining credits between the estimate read above and this row-locked
@@ -512,7 +509,7 @@ export async function startClassificationJob(
     // We already charged above. The job losing the race for the
     // one-active-job-per-user constraint means this charge paid for nothing
     // — give it back rather than silently keep it.
-    await refundDailyLimit(userId, userEmail, userTimeZone, estimate.creditsToCharge);
+    await refundDailyLimit(userId, userTimeZone, estimate.creditsToCharge);
     return { started: false, reason: "already_running" };
   }
 
@@ -563,7 +560,6 @@ export type RetryFailedResult =
  */
 export async function retryFailedClassifications(
   userId: string,
-  userEmail?: string,
   userTimeZone?: string,
 ): Promise<RetryFailedResult> {
   const [oldest] = await db
@@ -583,7 +579,7 @@ export async function retryFailedClassifications(
   }
 
   const failedCount = await countFailedClassifications(userId);
-  const estimate = await computeCreditPlan(failedCount, userId, userEmail, userTimeZone);
+  const estimate = await computeCreditPlan(failedCount, userId, userTimeZone);
   if (estimate.noCredits) {
     return { started: false, reason: "no_credits" };
   }
@@ -605,7 +601,7 @@ export async function retryFailedClassifications(
     .limit(estimate.cappedCount);
   const targetIds = targets.map((t) => t.entityId);
 
-  const charged = await incrementDailyLimitBy(userId, userEmail, userTimeZone, estimate.creditsToCharge);
+  const charged = await incrementDailyLimitBy(userId, userTimeZone, estimate.creditsToCharge);
   if (!charged) {
     return { started: false, reason: "credits_changed" };
   }
@@ -632,7 +628,7 @@ export async function retryFailedClassifications(
     // them up if its own window covers them, and otherwise the next retry
     // click starts a job that does. But the charge above paid for a job that
     // didn't happen, so give it back.
-    await refundDailyLimit(userId, userEmail, userTimeZone, estimate.creditsToCharge);
+    await refundDailyLimit(userId, userTimeZone, estimate.creditsToCharge);
     logger.info("[CLASSIFY] retry reset rows but a job is already running", {
       userId, resetCount: reset.length,
     });

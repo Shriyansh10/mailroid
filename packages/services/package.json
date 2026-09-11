@@ -8,6 +8,8 @@
     "./env.js": "./env.ts",
     "./usage-limits": "./usage-limits.ts",
     "./usage-limits.js": "./usage-limits.ts",
+    "./entitlements": "./entitlements.ts",
+    "./entitlements.js": "./entitlements.ts",
     "./gmail/index": "./gmail/index.ts",
     "./gmail/index.js": "./gmail/index.ts",
     "./gmail/quota-limiter": "./gmail/quota-limiter.ts",

@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAdminSession, HttpError } from "@web/lib/require-admin";
+import { requireDeveloperSession, HttpError } from "@web/lib/require-developer";
 import { ToolRegistry, RiskLevel, toOpenAiToolDefs } from "@repo/ai";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 
@@ -19,7 +19,7 @@ registerProductionExecutors(registry);
 
 export async function GET(request: Request) {
   try {
-    await requireAdminSession(request);
+    await requireDeveloperSession(request);
 
     const defs = toOpenAiToolDefs(registry);
     const tools = defs.map((def) => {

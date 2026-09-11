@@ -316,6 +316,20 @@
       "when": 1788515121324,
       "tag": "0046_narrow_winter_soldier",
       "breakpoints": true
+    },
+    {
+      "idx": 47,
+      "version": "7",
+      "when": 1789133139696,
+      "tag": "0047_chunky_captain_america",
+      "breakpoints": true
+    },
+    {
+      "idx": 48,
+      "version": "7",
+      "when": 1789133239675,
+      "tag": "0048_shocking_ricochet",
+      "breakpoints": true
     }
   ]
 }

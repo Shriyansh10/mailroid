@@ -6,7 +6,7 @@ import type { auth } from "./auth";
 
 export const authClient = createAuthClient({
   baseURL: process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000",
-  // Type-only: gives session.user.isAdmin (and any future additionalFields)
+  // Type-only: gives session.user.platformRole (and any future additionalFields)
   // a real type on the client without bundling apps/web/lib/auth.ts's
   // server-only code (db connection, secrets) into the browser build.
   plugins: [inferAdditionalFields<typeof auth>()],

@@ -152,7 +152,7 @@ export async function POST(request: Request) {
     }
 
     // ── Daily limit (check before generating) ────────────────────────
-    const limitCheck = await checkDailyLimit(userId, session.user.email, userTimeZone);
+    const limitCheck = await checkDailyLimit(userId, userTimeZone);
     if (!limitCheck.allowed) {
       return NextResponse.json({ error: limitCheck.message }, { status: 429 });
     }
@@ -193,7 +193,7 @@ export async function POST(request: Request) {
     }
 
     // ── Charge one action on success ─────────────────────────────────
-    const incremented = await incrementDailyLimit(userId, session.user.email, userTimeZone);
+    const incremented = await incrementDailyLimit(userId, userTimeZone);
     if (!incremented) {
       return NextResponse.json(
         { error: "Daily limit reached during concurrent processing." },

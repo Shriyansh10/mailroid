@@ -200,7 +200,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   // ==========================================
   console.log("\n--- Test 6: Daily Limits & Unlock Flow ---");
   // 1. Initial limit check
-  let limitCheck = await checkDailyLimit(tenantId, userEmail, "UTC");
+  let limitCheck = await checkDailyLimit(tenantId, "UTC");
   console.log("Initial limit check:", limitCheck);
   if (limitCheck.allowed && limitCheck.limit === 10 && limitCheck.actionCount === 0) {
     console.log("✅ Initial limit checks passed (limit = 10, actionCount = 0)");
@@ -212,7 +212,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   // 2. Consume 10 actions
   console.log("Consuming 10 actions...");
   for (let i = 0; i < 10; i++) {
-    const success = await incrementDailyLimit(tenantId, userEmail, "UTC");
+    const success = await incrementDailyLimit(tenantId, "UTC");
     if (!success) {
       console.error(`❌ Failed: Could not increment action at index ${i}`);
       process.exit(1);
@@ -220,7 +220,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   }
 
   // 3. Verify limit is hit
-  limitCheck = await checkDailyLimit(tenantId, userEmail, "UTC");
+  limitCheck = await checkDailyLimit(tenantId, "UTC");
   console.log("Limit check at 10 actions:", limitCheck);
   if (!limitCheck.allowed && limitCheck.actionCount === 10) {
     console.log("✅ Daily limit successfully hit at 10 actions!");
@@ -230,7 +230,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   }
 
   // Try to increment 11th time (should fail)
-  const incSuccess11 = await incrementDailyLimit(tenantId, userEmail, "UTC");
+  const incSuccess11 = await incrementDailyLimit(tenantId, "UTC");
   if (!incSuccess11) {
     console.log("✅ Daily limit atomic increment correctly blocked the 11th request!");
   } else {
@@ -265,7 +265,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   });
 
   // Verify limit has extended to 20
-  limitCheck = await checkDailyLimit(tenantId, userEmail, "UTC");
+  limitCheck = await checkDailyLimit(tenantId, "UTC");
   console.log("Limit check after approved feedback unlock:", limitCheck);
   if (limitCheck.allowed && limitCheck.limit === 20 && limitCheck.unlocked) {
     console.log("✅ Limits successfully unlocked and extended to 20 actions!");
@@ -277,7 +277,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   // 5. Consume remaining 10 actions (to reach 20)
   console.log("Consuming 10 more actions...");
   for (let i = 0; i < 10; i++) {
-    const success = await incrementDailyLimit(tenantId, userEmail, "UTC");
+    const success = await incrementDailyLimit(tenantId, "UTC");
     if (!success) {
       console.error(`❌ Failed: Could not increment action at index ${i + 10}`);
       process.exit(1);
@@ -285,7 +285,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   }
 
   // Verify limit is hit at 20
-  limitCheck = await checkDailyLimit(tenantId, userEmail, "UTC");
+  limitCheck = await checkDailyLimit(tenantId, "UTC");
   console.log("Limit check at 20 actions:", limitCheck);
   if (!limitCheck.allowed && limitCheck.actionCount === 20) {
     console.log("✅ Action limit successfully hit at 20 actions!");
@@ -295,7 +295,7 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
   }
 
   // Try to increment 21st time (should fail)
-  const incSuccess21 = await incrementDailyLimit(tenantId, userEmail, "UTC");
+  const incSuccess21 = await incrementDailyLimit(tenantId, "UTC");
   if (!incSuccess21) {
     console.log("✅ Daily limit atomic increment correctly blocked the 21st request!");
   } else {
@@ -303,32 +303,9 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
     process.exit(1);
   }
 
-  // ==========================================
-  // Test 7: Whitelist Behavior
-  // ==========================================
-  console.log("\n--- Test 7: Whitelist Behavior ---");
-  // Set Whitelist env
-  process.env.WHITELISTED_EMAILS = `admin@example.com,${userEmail},judge@test.com`;
-
-  limitCheck = await checkDailyLimit(tenantId, userEmail, "UTC");
-  console.log("Limit check with whitelisted email:", limitCheck);
-  if (limitCheck.allowed && limitCheck.limit === 9999) {
-    console.log("✅ Whitelisted user correctly bypassed daily limits!");
-  } else {
-    console.error("❌ Failed: Whitelisted user was blocked or did not bypass limits", limitCheck);
-    process.exit(1);
-  }
-
-  const whitelistInc = await incrementDailyLimit(tenantId, userEmail, "UTC");
-  if (whitelistInc) {
-    console.log("✅ Whitelisted user increment correctly bypassed and returned true!");
-  } else {
-    console.error("❌ Failed: Whitelisted user increment blocked");
-    process.exit(1);
-  }
-
-  // Reset whitelist env
-  delete process.env.WHITELISTED_EMAILS;
+  // Test 7 covered WHITELISTED_EMAILS, which no longer exists — limit bypass is
+  // now platform_role = DEVELOPER, read from the database rather than an env
+  // var. That behaviour is covered by packages/services/entitlements.test.ts.
 
   // ==========================================
   // Test 8: Concurrent Request Safety (Row Locking)
@@ -342,11 +319,11 @@ I would also like to see support for keyboard shortcuts and bulk email actions i
 
   console.log("Spawning 5 concurrent daily limit increments when actionCount = 9...");
   const results = await Promise.all([
-    incrementDailyLimit(tenantId, userEmail, "UTC"),
-    incrementDailyLimit(tenantId, userEmail, "UTC"),
-    incrementDailyLimit(tenantId, userEmail, "UTC"),
-    incrementDailyLimit(tenantId, userEmail, "UTC"),
-    incrementDailyLimit(tenantId, userEmail, "UTC"),
+    incrementDailyLimit(tenantId, "UTC"),
+    incrementDailyLimit(tenantId, "UTC"),
+    incrementDailyLimit(tenantId, "UTC"),
+    incrementDailyLimit(tenantId, "UTC"),
+    incrementDailyLimit(tenantId, "UTC"),
   ]);
 
   console.log("Concurrency Results:", results);

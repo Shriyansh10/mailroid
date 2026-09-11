@@ -1,5 +1,5 @@
 import { NextResponse } from "next/server";
-import { requireAdminSession, HttpError } from "@web/lib/require-admin";
+import { requireDeveloperSession, HttpError } from "@web/lib/require-developer";
 import {
   ToolOrchestrator,
   ToolRegistry,
@@ -67,14 +67,24 @@ export async function POST(request: Request) {
       );
     }
 
-    // ── Resolve userId from Better Auth session cookie (admin-only) ─
-    const session = await requireAdminSession(request);
+    // ── Resolve userId from Better Auth session cookie (DEVELOPER-only) ─
+    const session = await requireDeveloperSession(request);
     const userId = session.user.id;
     console.log("[api:tools:execute] authenticated userId:", userId);
 
     // ── Execute via orchestrator ───────────────────────────────
     const result = await withAiUsage({ userId }, () =>
-      orchestrator.executeTool(parsed.data.toolName, parsed.data.args, userId, requestId),
+      // This route is DEVELOPER-gated above, so the caller is one by definition.
+      orchestrator.executeTool(
+        parsed.data.toolName,
+        parsed.data.args,
+        userId,
+        requestId,
+        undefined,
+        undefined,
+        undefined,
+        true,
+      ),
     );
 
     // ── Map status to HTTP code ────────────────────────────────────

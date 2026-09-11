@@ -9,6 +9,7 @@
     ".": "./index.ts",
     "./schema": "./schema.ts",
     "./models/auth": "./models/auth.ts",
+    "./models/billing": "./models/billing.ts",
     "./models/corsair-connections": "./models/corsair-connections.ts",
     "./models/corsair": "./models/corsair.ts",
     "./models/emails": "./models/emails.ts",

@@ -36,13 +36,17 @@ export interface RateCheckResult {
 export class RateLimiter {
   private counters = new Map<string, Map<string, ToolCounter>>();
 
-  check(userId: string, toolName: string, userEmail?: string): RateCheckResult {
-    if (userEmail) {
-      const whitelistStr = process.env.WHITELISTED_EMAILS || "";
-      const whitelistedEmails = whitelistStr.split(",").map((e) => e.trim().toLowerCase());
-      if (whitelistedEmails.includes(userEmail.toLowerCase())) {
-        return { allowed: true, remaining: 9999, resetAt: Date.now() + 3600000, currentCount: 0 };
-      }
+  /**
+   * `bypass` is passed in rather than derived here: this class is synchronous
+   * and lives in @repo/ai, so it cannot read the database to find out who the
+   * caller is. The caller resolves the entitlement (it has already done the
+   * async work) and says yes or no. It used to match the email against a
+   * WHITELISTED_EMAILS env var inline, which put per-user authorization in the
+   * environment and in three separate files.
+   */
+  check(userId: string, toolName: string, bypass = false): RateCheckResult {
+    if (bypass) {
+      return { allowed: true, remaining: 9999, resetAt: Date.now() + 3600000, currentCount: 0 };
     }
 
     const config = LIMITS[toolName] ?? DEFAULT_LIMIT;

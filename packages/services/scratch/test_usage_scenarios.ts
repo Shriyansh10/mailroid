@@ -67,7 +67,7 @@ async function main() {
   console.log("Should charge chat request?", shouldCharge);
 
   if (shouldCharge) {
-    await incrementDailyLimit(tenantId, userEmail, "UTC");
+    await incrementDailyLimit(tenantId, "UTC");
   }
 
   // User clicks "Cancel". Marks CANCELLED. No limit increment.
@@ -118,7 +118,7 @@ async function main() {
 
   console.log("Should charge on cognitive refusal?", shouldChargeB);
   if (shouldChargeB) {
-    await incrementDailyLimit(tenantId, userEmail, "UTC");
+    await incrementDailyLimit(tenantId, "UTC");
   }
 
   const countB = await getActionCount(tenantId, dateStr);
@@ -161,7 +161,7 @@ async function main() {
 
   console.log("Should charge on successful tool execution?", shouldChargeC);
   if (shouldChargeC) {
-    await incrementDailyLimit(tenantId, userEmail, "UTC");
+    await incrementDailyLimit(tenantId, "UTC");
   }
 
   const countC = await getActionCount(tenantId, dateStr);
@@ -186,7 +186,7 @@ async function main() {
     throw new Error("OpenAI API Rate Limit Exceeded");
     
     // This is never reached:
-    await incrementDailyLimit(tenantId, userEmail, "UTC");
+    await incrementDailyLimit(tenantId, "UTC");
   } catch (err: any) {
     console.log("Caught simulated assistant error:", err.message);
   }

@@ -17,13 +17,13 @@ export const auth = betterAuth({
 
   user: {
     additionalFields: {
-      // input: false stops a user setting their own isAdmin via any
-      // self-service update-profile call. There is no admin-management UI —
-      // the only supported way to create an admin is flipping this column
-      // directly via SQL/Drizzle Studio.
-      isAdmin: {
-        type: "boolean",
-        defaultValue: false,
+      // input: false stops a user granting themselves DEVELOPER via any
+      // self-service update-profile call. Promotion is deliberately not a
+      // self-service operation — it happens through the developer grant path
+      // or directly in the database.
+      platformRole: {
+        type: "string",
+        defaultValue: "USER",
         input: false,
       },
     },

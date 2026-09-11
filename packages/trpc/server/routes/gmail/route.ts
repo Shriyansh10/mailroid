@@ -561,7 +561,7 @@ export const gmailRouter = router({
     )
     .query(async ({ ctx, input }) => {
       const since = scopeToSinceDate(input.scope);
-      const estimate = await estimateClassificationCost(ctx.user!.id, since, ctx.user!.email);
+      const estimate = await estimateClassificationCost(ctx.user!.id, since);
       return { ...estimate, estimatedAiRequests: Math.ceil(estimate.cappedCount / LLM_BATCH_SIZE) };
     }),
 
@@ -588,7 +588,7 @@ export const gmailRouter = router({
     )
     .query(async ({ ctx }) => {
       const failedCount = await countFailedClassifications(ctx.user!.id);
-      const estimate = await computeCreditPlan(failedCount, ctx.user!.id, ctx.user!.email);
+      const estimate = await computeCreditPlan(failedCount, ctx.user!.id);
       return { ...estimate, estimatedAiRequests: Math.ceil(estimate.cappedCount / LLM_BATCH_SIZE) };
     }),
 
@@ -665,7 +665,7 @@ export const gmailRouter = router({
     )
     .mutation(async ({ ctx }) => {
       logger.info("[TRPC] gmail.retryFailedClassifications called", { userId: ctx.user!.id });
-      const result = await retryFailedClassifications(ctx.user!.id, ctx.user!.email);
+      const result = await retryFailedClassifications(ctx.user!.id);
       if (!result.started) {
         return { started: false, jobId: null, totalCount: 0, resetCount: 0, capped: false, cappedCount: 0, creditsCharged: 0, reason: result.reason };
       }

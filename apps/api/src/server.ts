@@ -13,7 +13,7 @@ import { env } from "./env.js";
 
 import { authHandler } from "./auth/handler.js";
 import { auth } from "./auth/index.js";
-import { requireAdminSession, HttpError } from "./auth/require-admin.js";
+import { requireDeveloperSession, HttpError } from "./auth/require-developer.js";
 import { gmailOAuthRouter } from "./auth/gmail-oauth.js";
 import { calendarOAuthRouter } from "./auth/calendar-oauth.js";
 import { handleCorsairWebhook } from "./auth/webhook-handler.js";
@@ -211,7 +211,7 @@ app.post("/api/webhook", async (req, res) => {
 // or returned. Registered before the /api catch-all router below so it isn't
 // swallowed by it.
 app.get("/api/_debug/egress", async (req, res) => {
-  await requireAdminSession(req);
+  await requireDeveloperSession(req);
   try {
     const attempts = Math.min(Number(req.query.attempts ?? 5) || 5, 20);
     const report = await probeEgress(attempts);
@@ -236,7 +236,7 @@ app.get("/api/_debug/egress", async (req, res) => {
 // In-memory and per-process, so this describes THIS container only. Reads no
 // database and touches no credentials.
 app.get("/api/_debug/quota-pacing", async (req, res) => {
-  await requireAdminSession(req);
+  await requireDeveloperSession(req);
   try {
     return res.json(quotaLimiterSnapshot());
   } catch (err) {
@@ -249,7 +249,7 @@ app.get("/api/_debug/quota-pacing", async (req, res) => {
 // delivering with no other signal. `expired > 0` (or a high `missing`) is the
 // alarm. Reads only expiration columns — no credentials touched.
 app.get("/api/_debug/watch-health", async (req, res) => {
-  await requireAdminSession(req);
+  await requireDeveloperSession(req);
   try {
     const report = await getWatchHealth();
     const degraded =
@@ -342,7 +342,7 @@ app.use(
 
 // Shared error-handling middleware — must be registered last. Express ^5
 // forwards a rejected promise from any async route handler here automatically,
-// so requireAdminSession (and anything else that throws HttpError) needs no
+// so requireDeveloperSession (and anything else that throws HttpError) needs no
 // per-route try/catch.
 app.use((err: unknown, _req: express.Request, res: express.Response, next: express.NextFunction) => {
   if (err instanceof HttpError) {
