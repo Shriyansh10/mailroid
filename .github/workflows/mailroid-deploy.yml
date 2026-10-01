@@ -195,3 +195,30 @@ jobs:
               caddy:2-alpine
 
             docker image prune -af
+
+      # Re-register the app's functions with Inngest Cloud. Swapping containers
+      # does not tell Inngest anything: a function added or changed in this
+      # deploy stays unknown — its events accepted and then never run, its cron
+      # never scheduled — until the serve endpoint is PUT. That is exactly how
+      # gmail-sync-failures-retry/-sweep sat inactive after the 2026-10-01
+      # deploy. Hits the PUBLIC URL on purpose: the serve handler registers the
+      # URL it was reached on, and Inngest must call back to production, not to
+      # a container-internal address.
+      #
+      # Fails the run if registration never succeeds: a deploy whose background
+      # jobs are silently unregistered should not show green.
+      - name: Re-sync Inngest functions
+        env:
+          INNGEST_SERVE_URL: https://mailroid.in/api/inngest
+        run: |
+          for i in $(seq 1 24); do
+            body=$(curl -sS -X PUT "$INNGEST_SERVE_URL" || true)
+            if echo "$body" | grep -q '"Successfully registered"'; then
+              echo "Inngest re-sync: $body"
+              exit 0
+            fi
+            echo "Attempt $i: app not ready or not registered yet (${body:-no response}); retrying in 5s"
+            sleep 5
+          done
+          echo "Inngest re-sync failed after 2 minutes. Run manually: curl -X PUT $INNGEST_SERVE_URL"
+          exit 1
