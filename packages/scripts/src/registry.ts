@@ -25,12 +25,14 @@ import calendarTestGuestLookup from "./commands/calendar-test-guest-lookup.ts";
 import calendarBackfillSharedProps from "./commands/calendar-backfill-shared-props.ts";
 import calendarStopChannels from "./commands/calendar-stop-channels.ts";
 import aiUsage from "./commands/ai-usage.ts";
+import gmailQuotaReconcile from "./commands/gmail-quota-reconcile.ts";
 
 // Within a group: cheapest and safest first, so the expensive whole-mailbox
 // walk is never the first thing someone reaches for.
 export const commands: Command[] = [
   aiUsage,
   gmailStatus,
+  gmailQuotaReconcile,
   gmailResyncCategories,
   gmailResync,
   gmailBackfillMessageIds,
