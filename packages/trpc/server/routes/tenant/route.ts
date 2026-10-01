@@ -8,7 +8,7 @@ import { withGmailRetry } from "@repo/services/gmail/retry.js";
 import { authOutputSchema } from "@repo/shared";
 import { authorizePlugins, ensureTenant, getGmailOAuthUrl, getCalendarOAuthUrl, getConnectedPlugins, getConnectedAccounts, getAccountsExist } from "../../../services/index.js";
 
-import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel, getCalendarOAuthUrlOutputModel, connectedPluginsOutputModel, connectedAccountsOutputModel, getAccountsExistOutputModel } from "./models.js";
+import { authorizePluginsOutputModel, getGmailOAuthUrlOutputModel, getCalendarOAuthUrlOutputModel, getOAuthUrlInputModel, connectedPluginsOutputModel, connectedAccountsOutputModel, getAccountsExistOutputModel } from "./models.js";
 
 const TAGS = ["Tenants"];
 const getPath = generatePath("/tenants");
@@ -78,9 +78,10 @@ export const authRouter = router({
         tags: TAGS,
       },
     })
+    .input(getOAuthUrlInputModel)
     .output(getGmailOAuthUrlOutputModel)
-    .mutation(async ({ ctx }: { ctx: Context }) => {
-      return getGmailOAuthUrl(ctx.user!.id);
+    .mutation(async ({ ctx, input }: { ctx: Context; input?: { returnTo?: string } }) => {
+      return getGmailOAuthUrl(ctx.user!.id, input?.returnTo);
     }),
 
   getCalendarOAuthUrl: protectedProcedure
@@ -91,9 +92,10 @@ export const authRouter = router({
         tags: TAGS,
       },
     })
+    .input(getOAuthUrlInputModel)
     .output(getCalendarOAuthUrlOutputModel)
-    .mutation(async ({ ctx }: { ctx: Context }) => {
-      return getCalendarOAuthUrl(ctx.user!.id);
+    .mutation(async ({ ctx, input }: { ctx: Context; input?: { returnTo?: string } }) => {
+      return getCalendarOAuthUrl(ctx.user!.id, input?.returnTo);
     }),
 
   getConnectedPlugins: protectedProcedure
