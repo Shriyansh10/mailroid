@@ -139,7 +139,11 @@ test("a completed sync clears only its own or an older marker", async () => {
   const code = await read("./quota-cooldown.ts");
   const fn = code.slice(code.indexOf("export async function clearWebhookMarker"));
   assert.ok(
-    /lte\(gmailTenantMappings\.lastWebhookFailureAt,\s*markerAt\)/.test(fn.slice(0, 600)),
+    // Conditional AND at millisecond precision: markerAt is a JS Date, the
+    // column is microsecond, and an exact compare never clears a SQL-written marker.
+    /lte\(sql`date_trunc\('milliseconds', \$\{gmailTenantMappings\.lastWebhookFailureAt\}\)`,\s*markerAt\)/.test(
+      fn.slice(0, 1200),
+    ),
     "an unconditional clear would erase a newer delivery's recovery guarantee",
   );
 });

@@ -582,7 +582,13 @@ export async function clearWebhookMarker(tenantId: string, markerAt: Date): Prom
     .where(
       and(
         eq(gmailTenantMappings.tenantId, tenantId),
-        lte(gmailTenantMappings.lastWebhookFailureAt, markerAt),
+        // Compared at millisecond precision. markerAt is a JS Date (ms) that
+        // round-trips through an event as an ISO string; the column is
+        // microsecond. A marker written by SQL now() — an operator, or any
+        // future writer — stores e.g. .390939 while markerAt reads .390, so a
+        // plain <= is false, the marker never clears, and the resume cron
+        // re-probes the mailbox every hour. Found in local testing.
+        lte(sql`date_trunc('milliseconds', ${gmailTenantMappings.lastWebhookFailureAt})`, markerAt),
       ),
     );
 }
