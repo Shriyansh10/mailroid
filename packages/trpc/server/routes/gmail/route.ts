@@ -621,7 +621,7 @@ export const gmailRouter = router({
     )
     .mutation(async ({ ctx, input }) => {
       logger.info("[TRPC] gmail.startClassificationJob called", { userId: ctx.user!.id, scope: input.scope });
-      const result = await startClassificationJob(ctx.user!.id, input.scope, ctx.user!.email);
+      const result = await startClassificationJob(ctx.user!.id, input.scope);
       if (!result.started) {
         return { started: false, jobId: null, totalCount: 0, capped: false, cappedCount: 0, creditsCharged: 0, reason: result.reason };
       }
