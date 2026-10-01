@@ -27,6 +27,8 @@ import {
   GmailPacedOutError,
   classifyGmailFailure,
   isGmailUnavailable,
+  isPermissionDenied,
+  isQuotaError,
 } from "./gmail-errors.ts";
 
 function pacedOut(): GmailPacedOutError {
@@ -55,7 +57,7 @@ test("the pacing message is safe even stripped of its type", () => {
   // Spelled out, so a future edit to the message has to fail this deliberately
   // rather than by accident.
   const text = pacedOut().message.toLowerCase();
-  for (const forbidden of ["429", "rate limit", "user-rate", "resource_exhausted"]) {
+  for (const forbidden of ["429", "rate limit", "user-rate", "resource_exhausted", "quota exceeded"]) {
     assert.ok(!text.includes(forbidden), `pacing message must not contain "${forbidden}"`);
   }
 });
@@ -95,4 +97,97 @@ test("the error carries what an operator needs to act on it", () => {
   assert.equal(err.trigger, "ui");
   assert.equal(err.waitMs, 5_000);
   assert.equal(err.capMs, 2_000);
+});
+
+// ── quota 403s and genuine permission 403s ──────────────────────────
+
+/**
+ * The exact body Google returned to prod at 2026-10-01T14:52:51Z (webhook
+ * history.list for mailbox 008). Captured from the api log, not hand-written.
+ */
+const PROD_QUOTA_403_BODY = {
+  error: {
+    code: 403,
+    message:
+      "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user' of service 'gmail.googleapis.com' for consumer 'project_number:347863351495'.",
+    errors: [
+      {
+        message:
+          "Quota exceeded for quota metric 'Total Query Cost' and limit 'Units per minute per user' of service 'gmail.googleapis.com' for consumer 'project_number:347863351495'.",
+        domain: "usageLimits",
+        reason: "rateLimitExceeded",
+      },
+    ],
+    status: "PERMISSION_DENIED",
+  },
+};
+
+/** The shape corsair's request layer throws: message "Forbidden", body parsed. */
+function corsairApiError(status: number, body: unknown) {
+  return Object.assign(new Error(status === 403 ? "Forbidden" : "Error"), {
+    name: "ApiError",
+    status,
+    statusText: "Forbidden",
+    body,
+  });
+}
+
+const reasonBody = (reason: string, domain = "global") => ({
+  error: { code: 403, message: "x", errors: [{ reason, domain, message: "x" }], status: "PERMISSION_DENIED" },
+});
+
+test("the production quota 403, as corsair throws it, is a quota error", () => {
+  // The bug this fixes: message "Forbidden", status 403, PERMISSION_DENIED —
+  // every previous check missed it, so initial sync skipped the thread.
+  const err = corsairApiError(403, PROD_QUOTA_403_BODY);
+  assert.equal(isQuotaError(err), true);
+  assert.equal(classifyGmailFailure(err), "quota");
+  assert.equal(isPermissionDenied(err), false);
+});
+
+test("the production quota 403, as the raw history fetch throws it, is a quota error", () => {
+  const text = JSON.stringify(PROD_QUOTA_403_BODY);
+  const err = Object.assign(new Error(`Gmail history fetch failed: 403 - ${text}`), {
+    status: 403,
+    body: PROD_QUOTA_403_BODY,
+  });
+  assert.equal(classifyGmailFailure(err), "quota");
+});
+
+test("every Google quota reason reads as quota, inside corsair's error shape", () => {
+  for (const reason of ["rateLimitExceeded", "userRateLimitExceeded", "quotaExceeded", "dailyLimitExceeded"]) {
+    const err = corsairApiError(403, reasonBody(reason));
+    assert.equal(classifyGmailFailure(err), "quota", reason);
+    assert.equal(isPermissionDenied(err), false, reason);
+  }
+});
+
+test("a body that arrives as a JSON string is read the same way", () => {
+  assert.equal(isQuotaError(corsairApiError(403, JSON.stringify(PROD_QUOTA_403_BODY))), true);
+});
+
+test("a genuine permission 403 is denied, never quota", () => {
+  for (const reason of ["forbidden", "insufficientPermissions", "domainPolicy"]) {
+    const err = corsairApiError(403, reasonBody(reason));
+    assert.equal(isQuotaError(err), false, reason);
+    assert.equal(isPermissionDenied(err), true, reason);
+    assert.equal(classifyGmailFailure(err), "other", reason);
+  }
+});
+
+test("a 403 with no readable detail is neither quota nor confirmed denied", () => {
+  // Could be a quota refusal whose body was lost. Declaring it permanent on
+  // first sight would drop the data; calling it quota would invent a cooldown.
+  for (const body of [undefined, "", "not json", { error: {} }, { error: { errors: "x" } }]) {
+    const err = corsairApiError(403, body);
+    assert.equal(isQuotaError(err), false, JSON.stringify(body));
+    assert.equal(isPermissionDenied(err), false, JSON.stringify(body));
+  }
+});
+
+test("a 429 is still quota, and a quota 403 now counts as Gmail being unavailable", () => {
+  assert.equal(classifyGmailFailure(corsairApiError(429, undefined)), "quota");
+  // So cached reads degrade during a quota 403 instead of failing outright.
+  assert.equal(isGmailUnavailable(corsairApiError(403, PROD_QUOTA_403_BODY)), true);
+  assert.equal(isGmailUnavailable(corsairApiError(403, reasonBody("forbidden"))), false);
 });

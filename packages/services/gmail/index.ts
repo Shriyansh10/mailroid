@@ -1369,6 +1369,21 @@ export type IngestSource =
   | "unknown";
 
 /**
+ * The ledger trigger for each ingest source. The ledger's trigger set is
+ * closed, and passing the source through verbatim folded "hydrate" and every
+ * sync source into "unknown" — so hydration traffic was unattributable in the
+ * very summaries meant to explain a quota spike.
+ */
+const INGEST_TRIGGER: Record<IngestSource, string> = {
+  webhook: "webhook",
+  "sync-emails": "sync",
+  "initial-sync": "sync",
+  "manual-resync": "sync",
+  hydrate: "hydration",
+  unknown: "unknown",
+};
+
+/**
  * True when Gmail says the message no longer exists (404 Not Found / 410 Gone).
  *
  * A history diff routinely names messages that were deleted between the
@@ -1433,7 +1448,7 @@ export async function ingestMessage(
     msg = await withGmailRetry<unknown>(
       `messages.get ${messageId}`,
       () => tenant.gmail.api.messages.get({ id: messageId, format: "full" }),
-      { tenantId, trigger: source },
+      { tenantId, trigger: INGEST_TRIGGER[source] },
     );
   } catch (err) {
     if (isMessageGone(err)) {

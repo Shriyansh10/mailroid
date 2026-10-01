@@ -54,6 +54,8 @@
     "./gmail/webhook-inngest.js": "./gmail/webhook-inngest.ts",
     "./gmail/webhook-push": "./gmail/webhook-push.ts",
     "./gmail/webhook-push.js": "./gmail/webhook-push.ts",
+    "./gmail/sync-failures": "./gmail/sync-failures.ts",
+    "./gmail/sync-failures.js": "./gmail/sync-failures.ts",
     "./gmail/watch.ts": "./gmail/watch.ts",
     "./gmail/watch": "./gmail/watch.ts",
     "./gmail/watch.js": "./gmail/watch.ts",

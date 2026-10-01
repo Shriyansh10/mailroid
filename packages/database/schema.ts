@@ -8,6 +8,7 @@ export * from './models/approvals';
 export * from './models/message-metadata';
 export * from './models/gmail-tenant-mappings';
 export * from './models/sync-pauses';
+export * from './models/gmail-sync-failures';
 export * from './models/calendar-tenant-mappings';
 export * from './models/calendar-events';
 export * from './models/thread-calendar-events';

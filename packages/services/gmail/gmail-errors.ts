@@ -146,6 +146,15 @@ function errorText(err: unknown): string {
 export function isQuotaError(err: unknown): boolean {
   if (errorStatus(err) === 429) return true;
 
+  // Google answers its per-minute quota with a 403, not a 429: status
+  // PERMISSION_DENIED, message "Quota exceeded for quota metric …", and the only
+  // structured signal is errors[].reason. Corsair's ApiError keeps that body but
+  // its message is just "Forbidden", so none of the checks below can see it.
+  // Missing this is how initial sync skipped 008's threads as "Forbidden"
+  // instead of cooling down.
+  const { reasons, domains } = googleErrorReasons(err);
+  if (reasons.some((r) => QUOTA_REASONS.has(r)) || domains.includes("usageLimits")) return true;
+
   const bodyStatus = (err as { body?: { error?: { status?: unknown } } } | null)
     ?.body?.error?.status;
   if (bodyStatus === "RESOURCE_EXHAUSTED") return true;
@@ -153,7 +162,69 @@ export function isQuotaError(err: unknown): boolean {
   const text = `${errorBodyMessage(err)} ${String(
     (err as { message?: unknown } | null)?.message ?? err ?? "",
   )}`;
-  return /\b429\b|rate ?limit ?exceeded|user-rate limit|RESOURCE_EXHAUSTED/i.test(text);
+  return /\b429\b|rate ?limit ?exceeded|user-rate limit|RESOURCE_EXHAUSTED|quota exceeded/i.test(text);
+}
+
+/** Google's quota reasons. All of them are "wait", none is "you may not". */
+const QUOTA_REASONS = new Set([
+  "rateLimitExceeded",
+  "userRateLimitExceeded",
+  "quotaExceeded",
+  "dailyLimitExceeded",
+]);
+
+/**
+ * 403 reasons that mean access is genuinely refused. Retrying them changes
+ * nothing, so a failed-thread retry marks them terminal for an operator.
+ */
+const PERMISSION_REASONS = new Set(["forbidden", "insufficientPermissions", "domainPolicy"]);
+
+/**
+ * Google's structured `error.errors[]` reasons and domains, from whichever shape
+ * the error arrived in: corsair's ApiError (`body` parsed), our raw fetches
+ * (`body` parsed or a JSON string). Empty when there is nothing structured —
+ * never guessed from prose.
+ */
+function googleErrorReasons(err: unknown): { reasons: string[]; domains: string[] } {
+  let body = (err as { body?: unknown } | null)?.body;
+  if (typeof body === "string") {
+    try {
+      body = JSON.parse(body);
+    } catch {
+      body = undefined;
+    }
+  }
+  const items = (body as { error?: { errors?: unknown } } | undefined)?.error?.errors;
+  if (!Array.isArray(items)) return { reasons: [], domains: [] };
+
+  const reasons: string[] = [];
+  const domains: string[] = [];
+  for (const item of items) {
+    const reason = (item as { reason?: unknown } | null)?.reason;
+    const domain = (item as { domain?: unknown } | null)?.domain;
+    if (typeof reason === "string") reasons.push(reason);
+    if (typeof domain === "string") domains.push(domain);
+  }
+  return { reasons, domains };
+}
+
+/**
+ * A 403 that genuinely denies access — as opposed to a quota 403 (handled by
+ * isQuotaError) or a 403 we cannot read at all.
+ *
+ * Requires an explicit permission reason. A 403 with a missing or unparseable
+ * body is NOT treated as denied: it could be a quota refusal whose detail was
+ * lost, and declaring it permanent on first sight would drop data for good.
+ */
+export function isPermissionDenied(err: unknown): boolean {
+  if (errorStatus(err) !== 403) return false;
+  if (isQuotaError(err)) return false;
+  return googleErrorReasons(err).reasons.some((r) => PERMISSION_REASONS.has(r));
+}
+
+/** The HTTP status a Gmail error carries, if any. */
+export function gmailErrorStatus(err: unknown): number | undefined {
+  return errorStatus(err);
 }
 
 /**

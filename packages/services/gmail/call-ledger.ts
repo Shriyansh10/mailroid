@@ -67,6 +67,9 @@ const QUOTA_UNITS: Readonly<Record<string, number>> = {
   "messages.delete": 10,
   "threads.list": 10,
   "threads.modify": 10,
+  // Our own labels for threads.modify (bulk star / mark read in index.ts).
+  "threads.setStarred": 10,
+  "threads.setRead": 10,
   "threads.untrash": 10,
   "drafts.update": 15,
   "drafts.get": 20,

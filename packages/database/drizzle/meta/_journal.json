@@ -330,6 +330,13 @@
       "when": 1789133239675,
       "tag": "0048_shocking_ricochet",
       "breakpoints": true
+    },
+    {
+      "idx": 49,
+      "version": "7",
+      "when": 1790877857758,
+      "tag": "0049_gmail_sync_failures",
+      "breakpoints": true
     }
   ]
 }
