@@ -5,6 +5,13 @@ export const authorizePluginsOutputModel = z.object({
   url: z.string().describe("The URL to authorize plugins for the tenant"),
 });
 
+// Input schema shared by both OAuth URL generators — where to send the user
+// back to once the callback completes. Defaults to onboarding when omitted.
+export const getOAuthUrlInputModel = z.object({
+  returnTo: z.string().startsWith("/").optional()
+    .describe("Path to redirect back to after the OAuth callback completes"),
+}).optional();
+
 // Output schema for the Gmail OAuth URL generation
 export const getGmailOAuthUrlOutputModel = z.object({
   url: z.string().url().describe("The Gmail OAuth authorization URL"),

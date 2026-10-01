@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { processOAuthCallbackForPlugin, rollbackGmailConnection, storeGmailConnectedEmail } from "@repo/trpc/services";
+import { processOAuthCallbackForPlugin, rollbackGmailConnection, storeGmailConnectedEmail, takeOAuthReturnTo } from "@repo/trpc/services";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata";
 import { startGmailWatch } from "@repo/services/gmail/watch.ts";
 
@@ -45,7 +45,8 @@ gmailOAuthRouter.get("/", async (req, res) => {
       console.error("[gmail-oauth] triggerGmailSync failed:", err),
     );
 
-    return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);
+    const returnUrl = `${env.FRONTEND_URL}${takeOAuthReturnTo(result.tenantId, "/onboarding")}`;
+    return res.redirect(`${returnUrl}?connected=${encodeURIComponent(result.plugin)}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
 

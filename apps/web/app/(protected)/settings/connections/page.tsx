@@ -94,8 +94,8 @@ export default function ConnectionsPage() {
     try {
       const result =
         id === "gmail"
-          ? await getGmailOAuthUrlAsync()
-          : await getCalendarOAuthUrlAsync();
+          ? await getGmailOAuthUrlAsync({ returnTo: "/settings/connections" })
+          : await getCalendarOAuthUrlAsync({ returnTo: "/settings/connections" });
       if (!result?.url) throw new Error("No authorization URL was returned.");
       window.location.href = result.url;
     } catch (err) {
@@ -183,17 +183,16 @@ export default function ConnectionsPage() {
                   {isLoading ? (
                     <Loader2Icon className="size-4 shrink-0 animate-spin text-muted-foreground" />
                   ) : (
-                    !connected && (
-                      <Button
-                        size="sm"
-                        disabled={busy}
-                        onClick={() => void connect(service.id)}
-                        className="shrink-0"
-                      >
-                        {busy && <Loader2Icon className="size-3.5 animate-spin" />}
-                        Connect
-                      </Button>
-                    )
+                    <Button
+                      size="sm"
+                      variant={connected ? "outline" : "default"}
+                      disabled={busy}
+                      onClick={() => void connect(service.id)}
+                      className="shrink-0"
+                    >
+                      {busy && <Loader2Icon className="size-3.5 animate-spin" />}
+                      {connected ? "Reconnect" : "Connect"}
+                    </Button>
                   )}
                 </div>
               </CardHeader>

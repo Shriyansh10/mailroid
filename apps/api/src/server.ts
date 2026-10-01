@@ -32,6 +32,7 @@ import { gmailCooldownResumeCron } from "@repo/services/gmail/cooldown-resume-cr
 import { quotaLimiterSnapshot } from "@repo/services/gmail/quota-limiter.js";
 import { getGlobalMaintenance } from "@repo/services/gmail/pause.js";
 import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
+import { gmailSyncFailuresRetry, gmailSyncFailuresSweep } from "@repo/services/gmail/sync-failures.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
 
@@ -312,6 +313,8 @@ app.use(
       reconciliationCron,
       gmailCooldownResumeCron,
       gmailWebhookSync,
+      gmailSyncFailuresRetry,
+      gmailSyncFailuresSweep,
     ],
   })
 );

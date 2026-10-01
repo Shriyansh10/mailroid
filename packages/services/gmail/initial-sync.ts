@@ -1,6 +1,7 @@
 import { inngest } from "@repo/inngest";
 import { syncCategoryPage } from "./sync-metadata.ts";
 import { ALL_CATEGORIES } from "./metadata.ts";
+import { hasPendingSyncFailures } from "./sync-failures.ts";
 import {
   markSyncRunning,
   updateSyncProgress,
@@ -132,6 +133,17 @@ export const gmailInitialSync = inngest.createFunction(
 
     const total = await step.run("sync-status-complete", () => markSyncComplete(userId));
 
-    return { userId, syncedTotal: total, done: true };
+    // Threads this sync could not fetch were recorded as they failed. Start
+    // their retry now rather than waiting for the 15-minute sweep; the worker
+    // still honours each row's next_attempt_at, so a cooldown is not cut short.
+    const owesRetries = await step.run("check-sync-failures", () => hasPendingSyncFailures(userId));
+    if (owesRetries) {
+      await step.sendEvent("retry-sync-failures", {
+        name: "gmail/sync-failures.retry",
+        data: { userId },
+      });
+    }
+
+    return { userId, syncedTotal: total, done: true, owesRetries };
   },
 );

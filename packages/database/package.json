@@ -16,6 +16,7 @@
     "./models/message-metadata": "./models/message-metadata.ts",
     "./models/gmail-tenant-mappings": "./models/gmail-tenant-mappings.ts",
     "./models/sync-pauses": "./models/sync-pauses.ts",
+    "./models/gmail-sync-failures": "./models/gmail-sync-failures.ts",
     "./models/calendar-tenant-mappings": "./models/calendar-tenant-mappings.ts",
     "./models/calendar-events": "./models/calendar-events.ts",
     "./models/thread-calendar-events": "./models/thread-calendar-events.ts",

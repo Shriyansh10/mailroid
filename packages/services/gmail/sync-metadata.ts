@@ -6,6 +6,7 @@ import { logger } from "@repo/logger";
 import {CATEGORY_TO_GMAIL_QUERY, CATEGORY_TO_GMAIL_LABEL, ALL_CATEGORIES, extractHeader} from './metadata.ts';
 import { withGmailRetry } from './retry.ts';
 import { normalizeMessageId } from './message-id.ts';
+import { recordSyncFailure } from "./sync-failures-record.ts";
 import {
   markSyncQueued,
   markSyncRunning,
@@ -219,7 +220,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
 // instead of re-fetching messages.get(format:"full") per message removes
 // ~1 redundant Gmail API call (and a full-body download) per email synced.
 
-interface RawGmailMessage {
+export interface RawGmailMessage {
   id?: string;
   threadId?: string;
   labelIds?: string[];
@@ -305,6 +306,13 @@ export async function mapWithConcurrency<T, R>(
   items: T[],
   concurrency: number,
   fn: (item: T) => Promise<R>,
+  /**
+   * Called, and AWAITED, for each item that failed. If it throws, the whole
+   * call rejects — deliberately: the caller is a durable step, and a failure
+   * that cannot even be recorded must fail the step so it is retried, rather
+   * than be skipped with no trace.
+   */
+  onError?: (item: T, err: unknown) => Promise<void>,
 ): Promise<(R | undefined)[]> {
   const results: (R | undefined)[] = new Array(items.length);
   let index = 0;
@@ -316,6 +324,7 @@ export async function mapWithConcurrency<T, R>(
         results[current] = await fn(items[current]!);
       } catch (err) {
         logger.error("[SYNC] thread fetch failed, skipping", { error: String(err) });
+        if (onError) await onError(items[current]!, err);
       }
     }
   }
@@ -456,6 +465,9 @@ export async function syncCategoryPage(
         }),
         { tenantId: userId, trigger: "sync" },
       ),
+    // Every skipped thread is recorded and retried later (sync-failures.ts).
+    // Skipping without a record is how mailbox 008 lost seven threads.
+    (t, err) => recordSyncFailure(userId, t.id, err, "initial-sync"),
   );
 
   // Stamped from the LIST page's historyId, not from anything threads.get

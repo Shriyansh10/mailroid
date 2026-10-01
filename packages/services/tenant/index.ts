@@ -11,6 +11,9 @@ import { gmailRequestWithAuthRecovery } from "../gmail/gmail-request.ts";
 import { stopGmailWatch } from "../gmail/watch.ts";
 import { invalidateMailboxCache } from "../gmail/mailbox-resolver.ts";
 import { isMailboxAllowedInThisEnvironment, mailroidEnv } from "../env.ts";
+import { setOAuthReturnTo, takeOAuthReturnTo } from "./oauth-return-to.ts";
+
+export { takeOAuthReturnTo };
 
 /**
  * Thrown by storeGmailConnectedEmail when this environment's mailbox policy
@@ -76,9 +79,11 @@ export async function authorizePlugins({
  * @param userId - The user's ID (tenant ID).
  * @returns { url, state } — redirect URL and HMAC-signed state parameter.
  */
-export async function getGmailOAuthUrl(userId: string): Promise<GetGmailOAuthUrlOutput> {
-  const callbackUrl = process.env.GMAIL_OAUTH_CALLBACK_URL ?? 
+export async function getGmailOAuthUrl(userId: string, returnTo?: string): Promise<GetGmailOAuthUrlOutput> {
+  const callbackUrl = process.env.GMAIL_OAUTH_CALLBACK_URL ??
     (process.env.BASE_URL ? `${process.env.BASE_URL}/api/auth/gmail-callback` : "http://localhost:8000/api/auth/gmail-callback");
+
+  setOAuthReturnTo(userId, returnTo);
 
   const { url, state } = await generateOAuthUrl(corsair, "gmail", {
     tenantId: userId,
@@ -94,10 +99,12 @@ export async function getGmailOAuthUrl(userId: string): Promise<GetGmailOAuthUrl
  * @param userId - The user's ID (tenant ID).
  * @returns { url, state } — redirect URL and HMAC-signed state parameter.
  */
-export async function getCalendarOAuthUrl(userId: string): Promise<GetCalendarOAuthUrlOutput> {
+export async function getCalendarOAuthUrl(userId: string, returnTo?: string): Promise<GetCalendarOAuthUrlOutput> {
   const callbackUrl =
     process.env.CALENDAR_OAUTH_CALLBACK_URL ??
     (process.env.BASE_URL ? `${process.env.BASE_URL}/api/auth/calendar-callback` : "http://localhost:8000/api/auth/calendar-callback");
+
+  setOAuthReturnTo(userId, returnTo);
 
   const { url, state } = await generateOAuthUrl(corsair, "googlecalendar", {
     tenantId: userId,

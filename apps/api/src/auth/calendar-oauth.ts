@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { processOAuthCallbackForPlugin, storeCalendarConnectedEmail } from "@repo/trpc/services";
+import { processOAuthCallbackForPlugin, storeCalendarConnectedEmail, takeOAuthReturnTo } from "@repo/trpc/services";
 import { startCalendarWatch } from "@repo/services/calendar/watch.ts";
 
 import { env } from "../env.js";
@@ -33,7 +33,8 @@ calendarOAuthRouter.get("/", async (req, res) => {
       await startCalendarWatch(result.tenantId);
     }
 
-    return res.redirect(`${DASHBOARD_URL}?connected=${encodeURIComponent(result.plugin)}`);
+    const returnUrl = `${env.FRONTEND_URL}${takeOAuthReturnTo(result.tenantId, "/onboarding")}`;
+    return res.redirect(`${returnUrl}?connected=${encodeURIComponent(result.plugin)}`);
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return res.redirect(`${DASHBOARD_URL}?error=${encodeURIComponent(message)}`);
