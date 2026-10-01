@@ -1,5 +1,6 @@
 import { inngest } from "@repo/inngest";
 import { syncHistoryForTenant } from "./webhook-sync.ts";
+import { clearWebhookMarker } from "./quota-cooldown.ts";
 
 /**
  * Durable replacement for the fire-and-forget Express webhook path (see
@@ -32,9 +33,23 @@ export const gmailWebhookSync = inngest.createFunction(
     // still names the Pub/Sub delivery that caused it. Without this the
     // correlation breaks exactly where the work crosses a process boundary.
     const correlationId: string | undefined = event.data.correlationId;
+    // The durable "not yet processed" marker this notification is answerable
+    // for (see WEBHOOK_IN_FLIGHT in webhook-push.ts). Absent on events from
+    // senders that wrote no marker.
+    const markerAt: string | undefined = event.data.markerAt;
 
-    return step.run("sync-history", () =>
+    const result = await step.run("sync-history", () =>
       syncHistoryForTenant(tenantId, incomingHistoryId, { correlationId }),
     );
+
+    // Only after the sync step completed. If it exhausts its retries this line
+    // never runs, the marker stays, and the resume cron re-drives the mailbox.
+    if (markerAt) {
+      await step.run("clear-webhook-marker", () =>
+        clearWebhookMarker(tenantId, new Date(markerAt)),
+      );
+    }
+
+    return result;
   },
 );

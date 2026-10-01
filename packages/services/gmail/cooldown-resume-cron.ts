@@ -1,11 +1,12 @@
 import { inngest } from "@repo/inngest";
-import { db, lt } from "@repo/database";
+import { and, db, isNull, lt, or } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { errorFields, hashMailbox, logger } from "@repo/logger";
 
 import { getAuthFailure, handleGmailFailure, markGmailHealthy } from "./quota-cooldown.ts";
 import { gmailRequestWithAuthRecovery } from "./gmail-request.ts";
 import { getPausedTenantIds, isTenantPaused } from "./pause.ts";
+import { WEBHOOK_MARKER_STALE_MS } from "./webhook-push.ts";
 
 /**
  * A webhook that arrived during a Gmail quota cooldown was acked with 200 and
@@ -45,16 +46,43 @@ export const gmailCooldownResumeCron = inngest.createFunction(
   { id: "gmail-cooldown-resume-cron" },
   [{ cron: "0 * * * *" }, { event: "gmail/cooldown-resume.run" }],
   async ({ step }) => {
-    const expiredCooldowns = await step.run("find-expired-cooldowns", () =>
-      db
+    // Two kinds of mailbox owe a re-drive, and both are resumed the same way:
+    //   1. a quota cooldown that has expired (the original purpose), and
+    //   2. a webhook marker older than WEBHOOK_MARKER_STALE_MS on a mailbox NOT
+    //      in cooldown — a delivery was acked but never confirmed processed: its
+    //      sync failed, its Inngest send failed, or the process died mid-diff.
+    //      The cursor did not move, so re-driving from it recovers the work.
+    // An ACTIVE cooldown excludes a row from both: probing it would re-arm the
+    // window. Paused and auth-dead mailboxes are filtered per row below.
+    const expiredCooldowns = await step.run("find-expired-cooldowns", async () => {
+      const now = new Date();
+      const staleBefore = new Date(now.getTime() - WEBHOOK_MARKER_STALE_MS);
+      const rows = await db
         .select({
           tenantId: gmailTenantMappings.tenantId,
           emailAddress: gmailTenantMappings.emailAddress,
           until: gmailTenantMappings.quotaCooldownUntil,
+          markerAt: gmailTenantMappings.lastWebhookFailureAt,
         })
         .from(gmailTenantMappings)
-        .where(lt(gmailTenantMappings.quotaCooldownUntil, new Date())),
-    );
+        .where(
+          or(
+            lt(gmailTenantMappings.quotaCooldownUntil, now),
+            and(
+              isNull(gmailTenantMappings.quotaCooldownUntil),
+              lt(gmailTenantMappings.lastWebhookFailureAt, staleBefore),
+            ),
+          ),
+        );
+      // ISO strings, not Dates: step results are JSON-serialised, and the
+      // marker instant must survive that exactly to clear the right marker.
+      return rows.map((row) => ({
+        tenantId: row.tenantId,
+        emailAddress: row.emailAddress,
+        cooldownExpired: row.until !== null,
+        markerAt: row.markerAt?.toISOString() ?? null,
+      }));
+    });
 
     // This cron exists to CALL Gmail, so it is the one that most obviously must
     // respect a pause — probing a mailbox someone deliberately silenced defeats
@@ -179,14 +207,22 @@ export const gmailCooldownResumeCron = inngest.createFunction(
         if (profile.historyId) {
           await inngest.send({
             name: "gmail/webhook.notification",
-            data: { tenantId: row.tenantId, incomingHistoryId: profile.historyId },
+            // markerAt lets the sync clear exactly the marker that selected this
+            // row, and nothing a newer delivery wrote since.
+            data: {
+              tenantId: row.tenantId,
+              incomingHistoryId: profile.historyId,
+              markerAt: row.markerAt ?? undefined,
+            },
           });
         }
 
-        logger.info("[RESUME] resumed mailbox after quota cooldown", {
+        logger.info("[RESUME] resumed mailbox", {
           tenantId: row.tenantId,
           mailbox: hashMailbox(row.emailAddress),
           historyId: profile.historyId,
+          cause: row.cooldownExpired ? "cooldown-expired" : "webhook-unconfirmed",
+          markerAt: row.markerAt,
         });
         return { resumed: true };
       });

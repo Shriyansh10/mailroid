@@ -3,6 +3,7 @@ import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings
 import { calendarTenantMappings } from "@repo/database/models/calendar-tenant-mappings";
 import { syncPauses } from "@repo/database/models/sync-pauses";
 import { mailroidEnv } from "@repo/services/env.js";
+import { isWebhookMarkerActionable } from "@repo/services/gmail/webhook-push.js";
 import { unmappedPushSnapshot, type UnmappedPushSnapshot } from "./unmapped-push-counter.js";
 
 const RENEW_THRESHOLD_MS = 2 * 24 * 60 * 60 * 1000; // 48h — matches the watch crons
@@ -178,7 +179,9 @@ export async function getWatchHealth(): Promise<WatchHealthReport> {
       (r) =>
         r.quotaResumeFailures > 0 ||
         r.quotaCooldownUntil !== null ||
-        r.lastWebhookFailureAt !== null ||
+        // A fresh IN_FLIGHT marker is written on every dispatched delivery and
+        // is not a finding until it outlives its window — see webhook-push.ts.
+        isWebhookMarkerActionable(r.lastWebhookFailureAt, r.lastWebhookFailureReason, now) ||
         // An auth-dead mailbox can have entirely clean quota columns — that is
         // the whole point of the split — so it needs its own clause or it
         // would be invisible here, which is how the incident stayed unexplained.

@@ -1,4 +1,4 @@
-import { db, eq, sql } from "@repo/database";
+import { and, db, eq, lte, sql } from "@repo/database";
 import { gmailTenantMappings } from "@repo/database/models/gmail-tenant-mappings";
 import { logger } from "@repo/logger";
 
@@ -10,6 +10,7 @@ import {
   extractRetryAfter,
 } from "./gmail-errors.ts";
 import type { GmailCallContext } from "./gmail-errors.ts";
+import { WEBHOOK_IN_FLIGHT } from "./webhook-push.ts";
 
 // Classification is pure and lives in gmail-errors.ts so that gmail-request.ts
 // can use it without importing this module's gates. Re-exported so existing
@@ -541,11 +542,49 @@ export async function recordWebhookFailure(tenantId: string, reason: string): Pr
     .where(eq(gmailTenantMappings.tenantId, tenantId));
 }
 
-export async function clearWebhookFailure(tenantId: string): Promise<void> {
+/**
+ * Durable "this delivery is not yet processed" marker, written BEFORE a push is
+ * acked. Returns the exact instant written, which the caller threads through to
+ * clearWebhookMarker. See WEBHOOK_IN_FLIGHT in webhook-push.ts.
+ *
+ * Throws if the write fails — the caller must then NACK, because without the
+ * marker an acked delivery whose sync later fails would leave nothing behind
+ * for the resume cron to find.
+ */
+export async function markWebhookInFlight(tenantId: string): Promise<Date> {
+  const at = new Date();
+  await db
+    .update(gmailTenantMappings)
+    .set({ lastWebhookFailureAt: at, lastWebhookFailureReason: WEBHOOK_IN_FLIGHT })
+    .where(eq(gmailTenantMappings.tenantId, tenantId));
+  return at;
+}
+
+/**
+ * Clear the marker after a sync COMPLETED — but only if nothing newer was
+ * written since `markerAt`.
+ *
+ * The `<=` is the whole point. Deliveries for one mailbox overlap: A writes its
+ * marker, B writes a later one, A's sync finishes. An unconditional clear here
+ * would erase B's guarantee while B is still queued; if B then crashed, nothing
+ * would remain to say it never ran. With the condition, A's success leaves B's
+ * marker (and any failure recorded after A started) in place.
+ *
+ * Clearing on any completed sync is safe even for a delivery that is not the
+ * newest: syncHistoryForTenant diffs from the stored cursor, so a completed run
+ * has covered every change up to its own historyId, failed predecessors
+ * included.
+ */
+export async function clearWebhookMarker(tenantId: string, markerAt: Date): Promise<void> {
   await db
     .update(gmailTenantMappings)
     .set({ lastWebhookFailureAt: null, lastWebhookFailureReason: null })
-    .where(eq(gmailTenantMappings.tenantId, tenantId));
+    .where(
+      and(
+        eq(gmailTenantMappings.tenantId, tenantId),
+        lte(gmailTenantMappings.lastWebhookFailureAt, markerAt),
+      ),
+    );
 }
 
 /**
