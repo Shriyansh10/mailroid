@@ -25,6 +25,9 @@ import { corsair } from "@repo/corsair";
 import { logger } from "@repo/logger";
 
 import { GmailAuthError, classifyGmailFailure } from "./gmail-errors.ts";
+// Safe against the invariant below: auth-latch is a leaf (db + model + logger),
+// so no gate can arrive through it. See the module header there.
+import { clearGmailAuthLatch } from "./auth-latch.ts";
 import type { GmailCallContext } from "./gmail-errors.ts";
 // Safe against the invariant above: call-ledger imports @repo/logger and
 // nothing else from this package, so no gate can arrive through it.
@@ -323,6 +326,13 @@ export async function gmailRequestWithAuthRecovery(
   const first = await send();
   if (first.status !== 401) {
     record(first.ok, first);
+    // Gmail answered on the stored token, so whatever marked this mailbox as
+    // auth-failed is now stale. Nothing else on this path can clear it — see
+    // the deadlock described in auth-latch.ts. Non-2xx is not proof: a 403 or
+    // 404 says the request was refused, not that the credentials are good.
+    if (first.ok) {
+      await clearGmailAuthLatch(tenantId, { trigger: ctx.trigger, operation: ctx.operation });
+    }
     return first;
   }
 
@@ -365,6 +375,12 @@ export async function gmailRequestWithAuthRecovery(
   }
 
   record(retried.ok, retried);
+
+  // A refresh that produced a working call is the strongest evidence there is
+  // that the credentials are healthy again — this is the reconnect case.
+  if (retried.ok) {
+    await clearGmailAuthLatch(tenantId, { trigger: ctx.trigger, operation: ctx.operation });
+  }
 
   logger.info("[GMAIL_AUTH] refresh succeeded", {
     tenantId,

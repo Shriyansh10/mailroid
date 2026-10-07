@@ -7,6 +7,10 @@ export const threadSummarySchema = z.object({
   /** The Gmail message id of the message this row represents — resolvable via message_metadata/emails. Absent for results the live Gmail API path doesn't attach a local id to. */
   entityId: z.string().optional(),
   sender: z.string(),
+  /** The `To` header of the message this row represents. Only meaningful in
+      the Sent and Draft views, where every row is from the user and the sender
+      says nothing — those views show this instead. */
+  recipient: z.string().optional(),
   subject: z.string(),
   date: z.string(),
   snippet: z.string(),

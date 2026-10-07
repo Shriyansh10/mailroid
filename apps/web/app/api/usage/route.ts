@@ -4,7 +4,7 @@ import { db, eq, and } from "@repo/database";
 import { userUsage } from "@repo/database/schema";
 import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 import { resolveEntitlement } from "@repo/services/entitlements";
-import { limitFor } from "@repo/services/usage-limits";
+import { limitFor, PLAN_LIMITS } from "@repo/services/usage-limits";
 
 export const runtime = "nodejs";
 
@@ -25,6 +25,7 @@ export async function GET(request: Request) {
         remaining: 9999,
         unlocked: true,
         feedbackUnlocks: 0,
+        unlockedBonus: 0,
         plan: entitlement.plan,
         isDeveloper: true,
         expiresAt: null,
@@ -52,6 +53,9 @@ export async function GET(request: Request) {
       remaining,
       unlocked,
       feedbackUnlocks: usage ? (usage.feedbackUnlocks || 0) : 0,
+      // Sent so the widget can name the offer without hardcoding a number that
+      // drifts the moment PLAN_LIMITS changes.
+      unlockedBonus: PLAN_LIMITS[entitlement.plan].unlockedBonus,
       plan: entitlement.plan,
       isDeveloper: false,
       expiresAt: entitlement.expiresAt?.toISOString() ?? null,

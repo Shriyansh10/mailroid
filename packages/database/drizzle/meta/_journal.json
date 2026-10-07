@@ -337,6 +337,20 @@
       "when": 1790877857758,
       "tag": "0049_gmail_sync_failures",
       "breakpoints": true
+    },
+    {
+      "idx": 50,
+      "version": "7",
+      "when": 1791375894880,
+      "tag": "0050_normal_hex",
+      "breakpoints": true
+    },
+    {
+      "idx": 51,
+      "version": "7",
+      "when": 1791382646968,
+      "tag": "0051_friendly_gambit",
+      "breakpoints": true
     }
   ]
 }

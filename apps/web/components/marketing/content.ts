@@ -54,7 +54,7 @@ export const worksWith = {
   headlineB: "Not instead of it.",
   body: "Your account, your mail, your events. Nothing to migrate, nothing to import.",
   detail:
-    "Archive something here and it is archived in Gmail. Book something here and it is a real Google Calendar invite. Change something in Google and it is here immediately.",
+    "Bin something here and it is in the Bin in Gmail. Book something here and it is a real Google Calendar invite. Change something in Google and it is here immediately.",
 } as const;
 
 export const philosophy = {
@@ -105,7 +105,7 @@ export const inbox = {
     {
       title: "Clear the list without touching the mouse.",
       // `keys` renders as <kbd> chips inside the sentence.
-      body: "{j} {k} to move, {o} to open, {e} to archive, {c} to compose, {/} to search — and they switch off the instant you start typing, so a stray letter never lands inside a draft.",
+      body: "{j} {k} to move, {o} to open, {e} to bin, {c} to compose, {/} to search — and they switch off the instant you start typing, so a stray letter never lands inside a draft.",
     },
     {
       title: "Understand a 30-email thread in seconds.",
@@ -177,7 +177,7 @@ export const faq = {
   items: [
     {
       q: "Does Mailroid replace Gmail?",
-      a: "No. It is a second surface on the same mailbox. Archive here and it is archived in Gmail; send here and it is in your Gmail sent folder.",
+      a: "No. It is a second surface on the same mailbox. Bin something here and it is binned in Gmail; send here and it is in your Gmail sent folder.",
     },
     {
       q: "Can it read my emails?",

@@ -30,7 +30,7 @@ const SHORTCUT_GROUPS: ShortcutGroup[] = [
     title: "Actions",
     shortcuts: [
       { keys: ["c"], description: "Compose a new email" },
-      { keys: ["e"], description: "Archive the selected email" },
+      { keys: ["e"], description: "Move the selected email to Bin" },
       { keys: ["/"], description: "Focus the search box" },
     ],
   },

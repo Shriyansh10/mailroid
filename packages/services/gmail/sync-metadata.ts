@@ -110,6 +110,8 @@ export interface MetadataInput {
   category: string;
   isUnread: boolean;
   sender?: string;
+  /** The `To` header — see the column comment on message-metadata.ts. */
+  recipient?: string;
 subject?: string;
 snippet?: string;
   isInInbox: boolean;
@@ -158,6 +160,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           gmailLabels: input.gmailLabels,
           category: input.category as any,
           sender: input.sender,
+          recipient: input.recipient,
           subject: input.subject,
           snippet: input.snippet,
           isUnread: input.isUnread,
@@ -178,6 +181,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           gmailLabels: sql`excluded.gmail_labels`,
           category: sql`excluded.category`,
           sender: sql`excluded.sender`,
+          recipient: sql`excluded.recipient`,
           subject: sql`excluded.subject`,
           snippet: sql`excluded.snippet`,
           isUnread: sql`excluded.is_unread`,
@@ -238,6 +242,7 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
 
   const raw = msg as Record<string, unknown>;
   const sender = extractHeader(raw, "From");
+  const recipient = extractHeader(raw, "To");
   const subject = extractHeader(raw, "Subject");
   // threads.get(format:"metadata") returns the full header set — no
   // metadataHeaders restriction is set anywhere — so this path can capture the
@@ -257,6 +262,7 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
     userId,
     gmailLabels: labels,
     sender,
+    recipient,
     subject,
     snippet,
     category,

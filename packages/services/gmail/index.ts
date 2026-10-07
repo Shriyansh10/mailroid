@@ -1550,6 +1550,7 @@ export async function ingestMessage(
     userId: tenantId,
     gmailLabels: labels,
     sender: from || undefined,
+    recipient: to || undefined,
     subject: subject || undefined,
     snippet: snippet || undefined,
     category,

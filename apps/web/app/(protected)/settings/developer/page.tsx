@@ -6,6 +6,7 @@ import { toast } from "sonner";
 import { ArrowLeftIcon, TerminalIcon, PlayIcon } from "lucide-react";
 
 import { useListTools, useExecuteTool } from "@web/hooks/api/tools";
+import { MaintenanceJobs } from "@web/components/developer/maintenance-jobs";
 import { Button } from "@web/components/ui/button";
 import {
   Card,
@@ -66,7 +67,10 @@ export default function DeveloperSettingsPage() {
 
   return (
     <div className="min-h-screen bg-background text-foreground px-6 py-10">
-      <div className="max-w-2xl mx-auto flex flex-col gap-6">
+      {/* Wider than the 2xl the tool runner used: the job catalogue is a
+          two-column grid and the audit history is a table, both of which are
+          unreadable squeezed into a form-width column. */}
+      <div className="max-w-4xl mx-auto flex flex-col gap-6">
         <Button
           variant="ghost"
           size="sm"
@@ -178,6 +182,8 @@ export default function DeveloperSettingsPage() {
             </CardContent>
           </Card>
         )}
+
+        <MaintenanceJobs />
       </div>
     </div>
   );

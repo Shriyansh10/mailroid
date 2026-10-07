@@ -10,6 +10,7 @@ import { profileRouter } from "./routes/profile/route.js";
 import { mailTemplatesRouter } from "./routes/mail-templates/route.js";
 import { schedulingRouter } from "./routes/scheduling/route.js";
 import { billingRouter } from "./routes/billing/route.js";
+import { adminJobsRouter } from "./routes/admin-jobs/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
@@ -21,6 +22,7 @@ export const serverRouter = router({
   mailTemplates: mailTemplatesRouter,
   scheduling: schedulingRouter,
   billing: billingRouter,
+  adminJobs: adminJobsRouter,
 });
 
 export { createContext } from "./context.js";

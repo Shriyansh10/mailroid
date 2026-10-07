@@ -28,7 +28,7 @@ import {
   useAiReadiness,
 } from "@web/hooks/api/gmail";
 import { usePriorityProfile } from "@web/hooks/api/profile";
-import { useCalendarEvents, useCreateEvent } from "@web/hooks/api/calendar";
+import { useCalendarEvents } from "@web/hooks/api/calendar";
 import { Button } from "@web/components/ui/button";
 import { Badge } from "@web/components/ui/badge";
 import { Spinner } from "@web/components/ui/spinner";
@@ -37,15 +37,11 @@ import {
   ChevronRightIcon, 
   SearchIcon, 
   SparklesIcon, 
-  CalendarDaysIcon, 
   SendIcon, 
-  ArchiveIcon,
   SquareIcon,
   StarIcon,
   RefreshCwIcon,
   MoreVerticalIcon,
-  InboxIcon,
-  ArrowUpRightIcon,
   Trash2Icon,
   ArchiveRestoreIcon,
   MailOpenIcon,
@@ -241,25 +237,6 @@ function ArchiveIllustration() {
   );
 }
 
-function CalendarIllustration() {
-  return (
-    <svg
-      viewBox="0 0 100 100"
-      className="w-12 h-12 text-[#b08d57]/25 my-1 mx-auto stroke-current"
-      fill="none"
-      strokeWidth="1.2"
-      strokeLinecap="round"
-      strokeLinejoin="round"
-    >
-      <rect x="25" y="25" width="50" height="50" rx="2" />
-      <line x1="25" y1="42" x2="75" y2="42" />
-      <line x1="40" y1="20" x2="40" y2="30" />
-      <line x1="60" y1="20" x2="60" y2="30" />
-      <circle cx="50" cy="56" r="2.5" className="fill-[#b08d57]/20" />
-    </svg>
-  );
-}
-
 // ── Executive Briefing Strip ─────────────────────────────────────────
 
 function ExecutiveBriefing({ 
@@ -299,369 +276,6 @@ function ExecutiveBriefing({
         </div>
       </div>
     </div>
-  );
-}
-
-// ── Context Rail ─────────────────────────────────────────────────────
-
-function ContextRail({ 
-  thread, 
-  threads,
-  onArchiveThread,
-  onBackToList
-}: { 
-  thread: any; 
-  threads: Array<any>;
-  onArchiveThread: (id: string) => void;
-  onBackToList?: () => void;
-}) {
-  const { createEventAsync } = useCreateEvent();
-  
-  const [scheduling, setScheduling] = useState(false);
-  const [meetingTitle, setMeetingTitle] = useState("");
-  const [meetingDate, setMeetingDate] = useState("");
-  const [meetingTime, setMeetingTime] = useState("");
-  const [meetingDuration, setMeetingDuration] = useState("60");
-  const [submittingMeeting, setSubmittingMeeting] = useState(false);
-
-  useEffect(() => {
-    if (thread) {
-      setMeetingTitle(`Discussion: ${thread.subject || "Untitled"}`);
-      const tomorrow = new Date();
-      tomorrow.setDate(tomorrow.getDate() + 1);
-      setMeetingDate(tomorrow.toISOString().split("T")[0] || "");
-      setMeetingTime("10:00");
-      setScheduling(false);
-    }
-  }, [thread]);
-
-  const senderEmail = useMemo(() => {
-    if (!thread?.sender) return "";
-    const match = thread.sender.match(/<([^>]+)>/);
-    return match ? match[1] : thread.sender;
-  }, [thread?.sender]);
-
-  // Fetch upcoming calendar events for matching (next 14 days)
-  const now = useMemo(() => new Date(), [thread]);
-  const oneDayAgo = useMemo(() => new Date(now.getTime() - 24 * 60 * 60 * 1000), [now]);
-  const fourteenDaysLater = useMemo(() => new Date(now.getTime() + 14 * 24 * 60 * 60 * 1000), [now]);
-
-  const { data: calendarEvents } = useCalendarEvents(
-    oneDayAgo.toISOString(),
-    fourteenDaysLater.toISOString()
-  );
-
-  const relatedMeetings = useMemo(() => {
-    if (!thread || !calendarEvents) return [];
-    const subject = (thread.subject || "").toLowerCase();
-    
-    return calendarEvents.filter((event) => {
-      const emailMatch = event.attendees?.some((email: string) => 
-        email.toLowerCase() === senderEmail.toLowerCase()
-      );
-      const titleMatch = event.title && event.title.toLowerCase().includes(subject) ||
-        (subject.length > 4 && event.title && subject.includes(event.title.toLowerCase()));
-      const descMatch = event.description && event.description.toLowerCase().includes(subject);
-      
-      return emailMatch || titleMatch || descMatch;
-    });
-  }, [thread, calendarEvents, senderEmail]);
-
-  // Related correspondence - filters loaded emails for sender matches
-  const relatedCorrespondence = useMemo(() => {
-    if (!thread || !threads) return [];
-    return threads.filter(t => 
-      t.threadId !== thread.threadId && 
-      (t.sender.toLowerCase().includes(senderEmail.toLowerCase()) || 
-       (thread.subject && t.subject && t.subject.toLowerCase().includes(thread.subject.toLowerCase().slice(0, 10))))
-    ).slice(0, 3);
-  }, [thread, threads, senderEmail]);
-
-  const handleConfirmMeeting = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setSubmittingMeeting(true);
-    try {
-      const startDateTime = new Date(`${meetingDate}T${meetingTime}`);
-      const endDateTime = new Date(startDateTime.getTime() + parseInt(meetingDuration, 10) * 60 * 1000);
-      
-      await createEventAsync({
-        title: meetingTitle,
-        start: startDateTime.toISOString(),
-        end: endDateTime.toISOString(),
-        description: `Scheduled from Mailroid Dossier: ${thread.subject || ""}\nSender: ${thread.sender}`,
-        attendees: senderEmail ? [senderEmail] : [],
-      });
-      
-      toast.success("Meeting Scheduled", {
-        description: `Successfully scheduled with ${senderEmail}`,
-      });
-      setScheduling(false);
-    } catch (err: any) {
-      console.error(err);
-      toast.error("Failed to schedule meeting", {
-        description: err.message || "An unknown error occurred",
-      });
-    } finally {
-      setSubmittingMeeting(false);
-    }
-  };
-
-  if (!thread) {
-    return (
-      <div className="flex flex-col items-center justify-center h-full text-center py-24 text-[#D9D1C1]/20">
-        <ArchiveIllustration />
-        <p className="text-[10px] font-mono uppercase tracking-widest">Select correspondence</p>
-      </div>
-    );
-  }
-
-  return (
-    <motion.div 
-      key={thread.threadId}
-      initial={{ opacity: 0 }}
-      animate={{ opacity: 1 }}
-      transition={{ duration: 0.25 }}
-      className="flex flex-col gap-6 h-full py-2"
-    >
-      {onBackToList && (
-        <Button 
-          variant="ghost" 
-          size="sm" 
-          onClick={onBackToList} 
-          className="lg:hidden text-[#b08d57] hover:text-[#b08d57]/80 self-start p-0 mb-2 font-mono text-xs uppercase"
-        >
-          ← Back to Dossiers
-        </Button>
-      )}
-
-      {/* Header Info */}
-      <div className="border-b border-[#b08d57]/15 pb-4">
-        <h2 className="font-serif text-lg font-semibold text-[#D9D1C1] leading-tight mt-2 mb-1.5">
-          {thread.subject || "(No Subject)"}
-        </h2>
-        <p className="text-[10px] font-mono text-[#D9D1C1]/60 truncate">
-          Sender: {thread.sender}
-        </p>
-      </div>
-
-      {/* AI Summary ("Why Important") */}
-      <div className="flex flex-col gap-2">
-        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
-          Why Important
-        </h3>
-        <div className="bg-[#b08d57]/5 border border-[#b08d57]/10 rounded-lg p-4 font-serif text-sm text-[#D9D1C1]/90 leading-relaxed relative overflow-hidden">
-          <div className="absolute right-2 top-2 select-none opacity-20">
-            <SparklesIcon className="size-3.5 text-[#b08d57]" />
-          </div>
-          <span className="block text-[8.5px] font-mono uppercase tracking-wider text-[#b08d57]/50 mb-1.5 select-none">
-            Intelligence Classification
-          </span>
-          {thread.priorityReason ? (
-            <p>&ldquo;{thread.priorityReason}&rdquo;</p>
-          ) : (
-            <p className="italic text-[#D9D1C1]/50">
-              No priority triage explanation stored. This message contains standard correspondence.
-            </p>
-          )}
-        </div>
-      </div>
-
-      {/* Related Meetings */}
-      <div className="flex flex-col gap-2">
-        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
-          Related Meetings
-        </h3>
-        {relatedMeetings.length === 0 ? (
-          <div className="flex flex-col items-center justify-center text-center py-4 bg-white/[0.01] border border-white/[0.03] rounded-lg">
-            <CalendarIllustration />
-            <span className="text-[9px] font-mono text-[#D9D1C1]/40 uppercase tracking-wider">No related meetings found.</span>
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {relatedMeetings.map((event) => (
-              <div 
-                key={event.id} 
-                className="bg-white/[0.01] border border-white/[0.04] hover:border-[#b08d57]/20 rounded-lg p-3 flex flex-col gap-1 transition-colors"
-              >
-                <span className="text-xs font-serif font-bold text-[#D9D1C1]">
-                  {event.title}
-                </span>
-                <div className="flex items-center justify-between text-[9px] font-mono text-[#D9D1C1]/50 mt-1">
-                  <span>
-                    {new Date(event.start).toLocaleDateString(undefined, { month: "short", day: "numeric" })}
-                  </span>
-                  <span>
-                    {new Date(event.start).toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Recent Related Correspondence */}
-      <div className="flex flex-col gap-2">
-        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57]">
-          Recent Related Correspondence
-        </h3>
-        {relatedCorrespondence.length === 0 ? (
-          <div className="text-[9px] font-mono text-[#D9D1C1]/30 bg-white/[0.01] border border-white/[0.03] rounded-lg p-3 italic">
-            No related entries on file.
-          </div>
-        ) : (
-          <div className="flex flex-col gap-2">
-            {relatedCorrespondence.map((rel) => (
-              <div 
-                key={rel.threadId}
-                className="bg-white/[0.01] border border-white/[0.04] rounded-lg p-2.5 flex flex-col gap-0.5 cursor-pointer hover:border-[#b08d57]/20"
-                onClick={() => window.location.href = `/inbox/${rel.threadId}`}
-              >
-                <span className="text-[11px] font-serif font-bold text-[#D9D1C1] truncate">{rel.subject}</span>
-                <span className="text-[8.5px] font-mono text-[#D9D1C1]/50 truncate">{formatThreadDate(rel.date)}</span>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-
-      {/* Suggested Actions */}
-      <div className="flex flex-col gap-2 mt-auto">
-        <h3 className="text-[10px] font-mono uppercase tracking-wider text-[#b08d57] mb-1">
-          Suggested Action
-        </h3>
-        <div className="flex flex-col gap-2">
-          {/* Reply */}
-          <Button
-            variant="outline"
-            className="w-full justify-start text-left border-white/10 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
-            onClick={() => {
-              window.dispatchEvent(
-                new CustomEvent("mailroid-compose-email", {
-                  detail: {
-                    to: senderEmail,
-                    subject: thread.subject ? `Re: ${thread.subject}` : "Reply",
-                    body: `\n\n--- On Original Thread ---\nFrom: ${thread.sender}\nSubject: ${thread.subject}\nSnippet: ${thread.snippet}`,
-                  },
-                })
-              );
-            }}
-          >
-            <SendIcon className="size-3.5 rotate-[-45deg] text-[#b08d57]" />
-            Reply to Sender
-          </Button>
-
-          {/* Schedule Meeting Form */}
-          {scheduling ? (
-            <motion.form 
-              initial={{ opacity: 0, y: 5 }}
-              animate={{ opacity: 1, y: 0 }}
-              onSubmit={handleConfirmMeeting} 
-              className="bg-white/[0.01] border border-[#b08d57]/15 rounded-lg p-4 flex flex-col gap-3"
-            >
-              <span className="text-[9px] font-mono uppercase tracking-wider text-[#b08d57] font-bold">
-                Direct Scheduler
-              </span>
-              <div className="flex flex-col gap-1">
-                <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Title</label>
-                <input
-                  type="text"
-                  value={meetingTitle}
-                  onChange={(e) => setMeetingTitle(e.target.value)}
-                  className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2.5 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-serif"
-                  required
-                />
-              </div>
-              <div className="grid grid-cols-2 gap-2">
-                <div className="flex flex-col gap-1">
-                  <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Date</label>
-                  <input
-                    type="date"
-                    value={meetingDate}
-                    onChange={(e) => setMeetingDate(e.target.value)}
-                    className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
-                    required
-                  />
-                </div>
-                <div className="flex flex-col gap-1">
-                  <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Time</label>
-                  <input
-                    type="time"
-                    value={meetingTime}
-                    onChange={(e) => setMeetingTime(e.target.value)}
-                    className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
-                    required
-                  />
-                </div>
-              </div>
-              <div className="flex flex-col gap-1">
-                <label className="text-[9px] text-[#D9D1C1]/50 uppercase font-mono">Duration</label>
-                <select
-                  value={meetingDuration}
-                  onChange={(e) => setMeetingDuration(e.target.value)}
-                  className="bg-black/40 border border-white/10 focus:border-[#b08d57] rounded px-2 py-1.5 text-xs text-[#D9D1C1] outline-none transition-colors font-mono"
-                >
-                  <option value="30">30 minutes</option>
-                  <option value="60">1 hour</option>
-                  <option value="90">1.5 hours</option>
-                  <option value="120">2 hours</option>
-                </select>
-              </div>
-              <div className="flex gap-2 justify-end mt-1">
-                <Button
-                  size="sm"
-                  variant="ghost"
-                  type="button"
-                  className="text-[9px] font-mono uppercase border border-white/5 hover:bg-white/5 text-[#D9D1C1] h-7 px-2.5"
-                  onClick={() => setScheduling(false)}
-                >
-                  Cancel
-                </Button>
-                <Button
-                  size="sm"
-                  type="submit"
-                  disabled={submittingMeeting}
-                  className="text-[9px] font-mono uppercase bg-[#b08d57] text-black hover:bg-[#8c6f37] hover:text-white h-7 px-3"
-                >
-                  {submittingMeeting ? "Scheduling..." : "Confirm"}
-                </Button>
-              </div>
-            </motion.form>
-          ) : (
-            <Button
-              variant="outline"
-              className="w-full justify-start text-left border-white/10 hover:border-[#b08d57]/30 hover:bg-[#b08d57]/5 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
-              onClick={() => setScheduling(true)}
-            >
-              <CalendarDaysIcon className="size-3.5 text-[#b08d57]" />
-              Schedule Meeting
-            </Button>
-          )}
-
-          {/* Archive */}
-          <Button
-            variant="outline"
-            className="w-full justify-start text-left border-white/10 hover:border-red-950/30 hover:bg-red-950/10 text-[#D9D1C1] gap-2.5 font-mono text-xs uppercase tracking-wider py-4 cursor-pointer"
-            onClick={() => onArchiveThread(thread.threadId)}
-          >
-            <InboxIcon className="size-3.5 text-[#b08d57]" />
-            Archive Dossier
-          </Button>
-
-          {/* Open Thread callback */}
-          <Button
-            variant="ghost"
-            className="w-full justify-start text-left text-[#b08d57]/70 hover:text-[#b08d57] hover:bg-transparent gap-2.5 font-mono text-xs uppercase tracking-wider py-2 px-1 mt-1 cursor-pointer"
-            onClick={() => {
-              window.location.href = `/inbox/${thread.threadId}`;
-            }}
-          >
-            <ArrowUpRightIcon className="size-3.5" />
-            Open Full Discussion
-          </Button>
-        </div>
-      </div>
-    </motion.div>
   );
 }
 
@@ -827,6 +441,9 @@ function DossierLayout({
 }) {
   const router = useRouter();
   const utils = trpc.useUtils();
+  /** Read, not threaded through as a prop: four call sites render this layout
+      and only one of them has a page number to pass. */
+  const listPage = useSearchParams().get("page") ?? "1";
   const { trashThreadAsync } = useTrashThread();
   const { untrashThreadAsync } = useUntrashThread();
   const { setStarredAsync } = useSetStarred();
@@ -860,8 +477,9 @@ function DossierLayout({
   const isBin = category === "TRASH";
   const isDraftView = category === "DRAFT";
   const isSpamView = category === "SPAM";
+  const isSentView = category === "SENT";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
-  const [archivedIds, setArchivedIds] = useState<string[]>([]);
+  const [hiddenIds, setHiddenIds] = useState<string[]>([]);
 
   /**
    * Threads ticked for a bulk action. Distinct from `selectedThreadId`, which
@@ -877,12 +495,25 @@ function DossierLayout({
   const [checkedIds, setCheckedIds] = useState<Set<string>>(new Set());
   const [bulkBusy, setBulkBusy] = useState(false);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
-  const [mobileView, setMobileView] = useState<"list" | "detail">("list");
   const [refreshing, setRefreshing] = useState(false);
+
+  /**
+   * The optimistic hide list only has to outlive the refetch of the list it was
+   * created in. Carrying it across views is what made binned mail invisible in
+   * the Bin: the server returned the threads and this filter removed them again
+   * by id, with only a full page reload able to clear it.
+   */
+  useEffect(() => {
+    setHiddenIds([]);
+  }, [category, listPage]);
 
   // Refetch the current inbox data in place instead of reloading the whole SPA.
   const handleRefresh = async () => {
     setRefreshing(true);
+    // Refresh means "show me server truth", so the optimistic hides go too —
+    // without this the button refetches correctly and still appears to do
+    // nothing, because the rows it brings back are the ones being filtered.
+    setHiddenIds([]);
     try {
       await Promise.all([utils.gmail.invalidate(), utils.calendar.invalidate()]);
     } finally {
@@ -891,12 +522,8 @@ function DossierLayout({
   };
 
   const visibleThreads = useMemo(() => {
-    return threads.filter((t) => !archivedIds.includes(t.threadId));
-  }, [threads, archivedIds]);
-
-  const activeThread = useMemo(() => {
-    return visibleThreads.find((t) => t.threadId === selectedThreadId);
-  }, [visibleThreads, selectedThreadId]);
+    return threads.filter((t) => !hiddenIds.includes(t.threadId));
+  }, [threads, hiddenIds]);
 
   // Sync calendar events count for executive briefing
   const startOfToday = useMemo(() => {
@@ -956,20 +583,20 @@ function DossierLayout({
       }
     };
 
-    const handleArchiveSelected = () => {
-      if (selectedThreadId) void handleArchiveThread(selectedThreadId);
+    const handleBinSelected = () => {
+      if (selectedThreadId) void handleMoveToBin(selectedThreadId);
     };
 
     window.addEventListener("mailroid-select-next", handleNext);
     window.addEventListener("mailroid-select-prev", handlePrev);
     window.addEventListener("mailroid-open-selected", handleOpen);
-    window.addEventListener("mailroid-archive-selected", handleArchiveSelected);
+    window.addEventListener("mailroid-bin-selected", handleBinSelected);
 
     return () => {
       window.removeEventListener("mailroid-select-next", handleNext);
       window.removeEventListener("mailroid-select-prev", handlePrev);
       window.removeEventListener("mailroid-open-selected", handleOpen);
-      window.removeEventListener("mailroid-archive-selected", handleArchiveSelected);
+      window.removeEventListener("mailroid-bin-selected", handleBinSelected);
     };
   }, [activeIndex, visibleThreads, router, selectedThreadId, buildThreadHref]);
 
@@ -980,26 +607,20 @@ function DossierLayout({
     }
   }, [activeIndex]);
 
-  const handleSelectThread = (threadId: string) => {
-    setSelectedThreadId(threadId);
-    setMobileView("detail");
-  };
-
   /**
    * Move a thread to Bin. Hides the row immediately and un-hides it if Gmail
    * rejects the call — previously this was optimistic-only and never actually
    * trashed anything, so the row reappeared on the next refetch.
    */
-  const handleArchiveThread = async (threadId: string) => {
-    setArchivedIds((prev) => [...prev, threadId]);
-    setMobileView("list");
+  const handleMoveToBin = async (threadId: string) => {
+    setHiddenIds((prev) => [...prev, threadId]);
     try {
       await trashThreadAsync({ threadId });
       toast.success("Moved to Bin", {
         description: "Gmail keeps binned mail for about 30 days.",
       });
     } catch (err) {
-      setArchivedIds((prev) => prev.filter((id) => id !== threadId));
+      setHiddenIds((prev) => prev.filter((id) => id !== threadId));
       toast.error("Couldn't move to Bin", {
         description: err instanceof Error ? err.message : "Please try again.",
       });
@@ -1008,12 +629,12 @@ function DossierLayout({
 
   /** Restore a thread out of Bin, back to wherever its labels put it. */
   const handleRestoreThread = async (threadId: string) => {
-    setArchivedIds((prev) => [...prev, threadId]);
+    setHiddenIds((prev) => [...prev, threadId]);
     try {
       await untrashThreadAsync({ threadId });
       toast.success("Restored from Bin");
     } catch (err) {
-      setArchivedIds((prev) => prev.filter((id) => id !== threadId));
+      setHiddenIds((prev) => prev.filter((id) => id !== threadId));
       toast.error("Couldn't restore", {
         description: err instanceof Error ? err.message : "Please try again.",
       });
@@ -1100,14 +721,14 @@ function DossierLayout({
     const ids = Array.from(checkedIds);
     if (ids.length === 0 || bulkBusy) return;
     setBulkBusy(true);
-    if (opts?.removesRows) setArchivedIds((prev) => [...prev, ...ids]);
+    if (opts?.removesRows) setHiddenIds((prev) => [...prev, ...ids]);
 
     try {
       const result = await action(ids);
       const failedIds = new Set(result.failed.map((f) => f.threadId));
 
       if (opts?.removesRows && failedIds.size > 0) {
-        setArchivedIds((prev) => prev.filter((id) => !failedIds.has(id)));
+        setHiddenIds((prev) => prev.filter((id) => !failedIds.has(id)));
       }
 
       if (result.failed.length === 0) {
@@ -1127,7 +748,7 @@ function DossierLayout({
       // A throw here is the whole batch being refused up front (mailbox
       // paused, or cooling down after a quota error) — nothing was attempted.
       if (opts?.removesRows) {
-        setArchivedIds((prev) => prev.filter((id) => !ids.includes(id)));
+        setHiddenIds((prev) => prev.filter((id) => !ids.includes(id)));
       }
       toast.error(`Couldn't ${label.toLowerCase()}`, {
         description: err instanceof Error ? err.message : "Please try again.",
@@ -1176,10 +797,7 @@ function DossierLayout({
   return (
     <div className="flex flex-col h-full min-h-[calc(100vh-120px)] text-foreground">
       {/* Dossier List Column */}
-      <div className={cn(
-        "flex flex-col min-w-0 h-full w-full px-4 lg:px-8",
-        mobileView === "detail" ? "hidden lg:flex" : "flex"
-      )}>
+      <div className="flex flex-col min-w-0 h-full w-full px-4 lg:px-8">
 
         {/* Gmail Style Toolbar */}
         <div className="flex items-center justify-between h-12 px-4 border-b border-border bg-background sticky top-0 z-10">
@@ -1319,12 +937,25 @@ function DossierLayout({
                 // packages/services/gmail/index.ts.
                 const isUnread = thread.isUnread ?? false;
 
-                // Extract sender name
-                let senderName = thread.sender;
-                if (senderName) {
-                  const match = senderName.match(/^([^<]+)/);
-                  if (match) senderName = match[1].replace(/"/g, "").trim();
+                // In Sent and Drafts every row is from the user, so the From
+                // header carries no information — who it went TO is the only
+                // useful party. Labelled rather than swapped silently, because
+                // an unlabelled name column that means two different things
+                // depending on the tab is worse than either.
+                const showsRecipient = isSentView || isDraftView;
+                let partyName = showsRecipient ? thread.recipient : thread.sender;
+                if (partyName) {
+                  const match = partyName.match(/^([^<]+)/);
+                  if (match) partyName = match[1].replace(/"/g, "").trim();
                 }
+                // Never fall back to the sender here: on a Sent row that would
+                // render the user's own address as though it were the other
+                // party. Say the recipient is missing instead.
+                const partyLabel = showsRecipient
+                  ? partyName
+                    ? `To ${partyName}`
+                    : "To (unknown)"
+                  : partyName;
 
                 return (
                   <motion.div
@@ -1383,7 +1014,7 @@ function DossierLayout({
                           isUnread ? "font-bold text-foreground" : "font-normal text-muted-foreground"
                         )}
                       >
-                        {senderName}
+                        {partyLabel}
                       </div>
                       <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate text-[13px]">
                         <span
@@ -1487,7 +1118,7 @@ function DossierLayout({
                             className="h-8 w-8 text-muted-foreground hover:text-destructive"
                             onClick={(e) => {
                               e.stopPropagation();
-                              void handleArchiveThread(thread.threadId);
+                              void handleMoveToBin(thread.threadId);
                             }}
                           >
                             <Trash2Icon className="size-3.5" />
@@ -1863,7 +1494,12 @@ function FirstClassifyBanner() {
       return;
     }
     if (result.jobId === null) {
-      toast.info("Nothing to classify in that range");
+      // The empty window is recorded as a completed job, so these buttons are
+      // about to disappear for good — say so, rather than let them vanish
+      // under a message that reads like nothing happened.
+      toast.info(
+        "Nothing left to classify in that range — every email in it is already classified, so this one-time step is done.",
+      );
       void utils.gmail.classifyControlsStatus.invalidate();
       return;
     }

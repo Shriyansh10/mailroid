@@ -27,3 +27,4 @@ export * from './models/email-chunks';
 export * from './models/ai-setup-status';
 export * from './models/mail-templates';
 export * from './models/ai-usage';
+export * from './models/developer-job-runs';
