@@ -1,12 +1,13 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 import { renderContextBlock, type ClassificationContext } from "./user-summary.ts";
 
 // A ceiling, not a reservation: billing counts tokens actually generated, so
-// headroom here is free and only protects against truncation. The default is
-// deepseek-chat's own 8192 limit, because sending a larger value to DeepSeek
-// is an API error — raise it per-deployment instead (gpt-4o-mini allows
-// 16384). See classifyEmailPriorityBatch for why the ceiling matters.
+// headroom here is free and only protects against truncation. 8192 is a
+// conservative default that every model in use accepts — asking for more than
+// a model's own max output is an API error, so this is raised per-deployment
+// via LLM_MAX_OUTPUT_TOKENS once the configured model's limit is known.
+// See classifyEmailPriorityBatch for why the ceiling matters.
 const MAX_OUTPUT_TOKENS = Number(process.env.LLM_MAX_OUTPUT_TOKENS ?? 8192);
 
 // Which profile signals drove a classification — structured for analytics
@@ -120,9 +121,9 @@ export async function classifyEmailPriority(
     : SYSTEM_PROMPT;
 
   const response = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         {
@@ -209,7 +210,7 @@ Output a strictly valid JSON object (no markdown, no extra text) matching this s
  * Batching cuts request count and repeated system-prompt tokens, but does
  * NOT cut output tokens — the model still generates one result per email,
  * one token at a time. At ~80 tokens/email that's ~4000 tokens for 50
- * emails, dangerously close to deepseek-chat's 4096 default `max_tokens`;
+ * emails, dangerously close to aiClient-chat's 4096 default `max_tokens`;
  * capping the reason to ~8 words and setting max_tokens explicitly
  * (MAX_OUTPUT_TOKENS) keeps a full batch comfortably under the ceiling
  * instead of truncating the JSON mid-array and silently losing every
@@ -248,9 +249,9 @@ export async function classifyEmailPriorityBatch(
     : BATCH_SYSTEM_PROMPT;
 
   const response = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         {

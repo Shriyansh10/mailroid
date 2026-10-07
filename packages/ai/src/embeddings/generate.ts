@@ -4,33 +4,31 @@ import { tagClientProvider, embeddingsCreate } from "../usage/track.ts";
 import type { UsageMeta } from "../usage/track.ts";
 
 /**
- * Provider-agnostic embedding client.
+ * The embedding client. Separate from the chat client (client.ts) because the
+ * two can legitimately point at different providers — embeddings are often
+ * cheapest somewhere other than where the best chat model lives.
  *
- * Set EMBEDDINGS_BASE_URL to use any OpenAI-compatible provider:
+ * Any OpenAI-compatible embeddings endpoint works, hosted or local.
  *
- *   OpenAI (default):     https://api.openai.com/v1
- *   DeepSeek:             https://api.deepseek.com/v1
- *   Claude (via proxy):   https://api.anthropic.com/v1  (if proxy supports embeddings)
- *   Cursor:               https://api.cursor.sh/v1
- *   Local (Ollama):       http://localhost:11434/v1
- *
- * EMBEDDINGS_API_KEY is required for all providers.
- * EMBEDDINGS_MODEL defaults to "text-embedding-3-small".
+ *   EMBEDDINGS_PROVIDER — label recorded in `ai_usage.provider`. Falls back to
+ *                         AI_PROVIDER when both run on the same provider.
+ *   EMBEDDINGS_API_KEY  — required.
+ *   EMBEDDINGS_BASE_URL — required.
+ *   EMBEDDINGS_MODEL    — required; must match the `vector(1536)` column's
+ *                         dimensions, so changing it is a migration, not a
+ *                         config change.
  */
 // .trim() — `docker run --env-file` keeps trailing whitespace, which would
 // corrupt the base URL / model name (see client.ts for the 404 this causes).
-// Tag reflects the configured default (OPENAI_BASE_URL / api.openai.com) —
-// override EMBEDDINGS_BASE_URL to point this at a different provider, and
-// update the tag below to match, so ai_usage.provider stays truthful.
 export const client = tagClientProvider(
   new OpenAI({
-    apiKey: (process.env.EMBEDDINGS_API_KEY ?? process.env.OPENAI_API_KEY ?? "").trim(),
-    baseURL: (process.env.EMBEDDINGS_BASE_URL ?? process.env.OPENAI_BASE_URL ?? "").trim() || undefined,
+    apiKey: (process.env.EMBEDDINGS_API_KEY ?? "").trim(),
+    baseURL: (process.env.EMBEDDINGS_BASE_URL ?? "").trim() || undefined,
   }),
-  "openai",
+  (process.env.EMBEDDINGS_PROVIDER ?? process.env.AI_PROVIDER ?? "").trim() || "unconfigured",
 );
 
-const MODEL = (process.env.EMBEDDINGS_MODEL ?? "text-embedding-3-small").trim();
+const MODEL = (process.env.EMBEDDINGS_MODEL ?? "").trim();
 
 /**
  * Generate an embedding vector for a single text string.

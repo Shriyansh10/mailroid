@@ -25,8 +25,8 @@ export const assistantMessages = pgTable("assistant_messages", {
     .references(() => conversations.id, { onDelete: "cascade" }),
   role: text("role", { enum: ["user", "assistant", "tool"] }).notNull(),
   content: text("content"), // Nullable to support tool call requests without text
-  toolCalls: jsonb("tool_calls"), // raw tool calls array from DeepSeek/OpenAI, nullable
-  toolCallId: text("tool_call_id"), // deepseek tool_call_id for tool messages, nullable
+  toolCalls: jsonb("tool_calls"), // raw tool calls array from the model provider, nullable
+  toolCallId: text("tool_call_id"), // provider tool_call_id for tool messages, nullable
   metadata: jsonb("metadata"), // optional field for future extension
   createdAt: timestamp("created_at", { withTimezone: true }).notNull().defaultNow(),
 }, (table) => [

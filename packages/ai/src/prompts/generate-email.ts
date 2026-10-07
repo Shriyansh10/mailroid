@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import { detectSensitive } from "../security/detector.ts";
@@ -361,9 +361,9 @@ export async function generateEmailContent(
 
   // 4. Single generation call.
   const response = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: [
         { role: "system", content: buildSystemPrompt(hasSignature, tokenizedDraft !== null) },
         { role: "user", content: buildUserMessage(input, scrubbedContext, tokenizedDraft) },

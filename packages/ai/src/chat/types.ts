@@ -48,9 +48,9 @@ export interface ApprovalRequiredResponse {
     args: Record<string, unknown>;
     preview: string;
     /**
-     * The DeepSeek assistant message's `reasoning_content` from the turn
+     * The assistant message's `reasoning_content` from the turn
      * that requested the tool call. Must be passed back verbatim on the
-     * synthetic assistant message when resuming — DeepSeek thinking mode
+     * synthetic assistant message when resuming — reasoning-mode models
      * rejects null/fabricated values.
      */
     reasoningContent: string | null;

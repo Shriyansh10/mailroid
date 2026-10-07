@@ -55,7 +55,7 @@ export interface UsageMeta {
 /**
  * Single point of contact with the SDK's (pseudo-private, underscored)
  * request-id field, so there is exactly one place to update if a future SDK
- * version changes how this is exposed. DeepSeek, OpenRouter, and the Gemini
+ * version changes how this is exposed. Most providers, OpenRouter and the Gemini
  * compatibility endpoint don't all populate it — callers must treat the
  * result as optional.
  */

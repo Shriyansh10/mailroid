@@ -15,13 +15,13 @@ export class SecurityFirewall {
     return result.sanitized;
   }
 
-  /** Sanitize a user/system message before it reaches DeepSeek. */
+  /** Sanitize a user/system message before it reaches the model. */
   sanitizeMessage(content: string): string {
     return this.sanitizeText(content, "message");
   }
 
   /**
-   * Sanitize tool output before DeepSeek reads it.
+   * Sanitize tool output before the model reads it.
    * Recursively walks data and redacts sensitive fields.
    * Returns a cleaned copy — original data untouched.
    */

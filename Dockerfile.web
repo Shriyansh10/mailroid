@@ -47,9 +47,9 @@ ENV BETTER_AUTH_SECRET="build-time-placeholder-secret"
 ENV BETTER_AUTH_URL="http://localhost:8000"
 ENV GOOGLE_CLIENT_ID="build-time-placeholder"
 ENV GOOGLE_CLIENT_SECRET="build-time-placeholder"
-# packages/ai's deepseek chat client and embeddings client both construct an
-# OpenAI SDK instance at module scope too, which throws on a falsy apiKey
-ENV DEEPSEEK_API_KEY="build-time-placeholder"
+# packages/ai's chat client and embeddings client both construct an OpenAI-SDK
+# instance at module scope too, which throws on a falsy apiKey
+ENV AI_API_KEY="build-time-placeholder"
 ENV EMBEDDINGS_API_KEY="build-time-placeholder"
 # @repo/services and @repo/trpc (both deps of web) pull in @repo/corsair,
 # which eagerly constructs a corsair client at module scope from these

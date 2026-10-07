@@ -1,11 +1,30 @@
 import OpenAI from "openai";
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion, tagClientProvider } from "../usage/track.ts";
 
-// Constructed once per process, not per call, so it isn't re-tagged (and its
-// connection pool isn't rebuilt) on every evaluateFeedback() invocation.
-const openaiClient = process.env.OPENAI_API_KEY
-  ? tagClientProvider(new OpenAI({ apiKey: process.env.OPENAI_API_KEY }), "openai")
+/**
+ * An optional second client, just for feedback evaluation.
+ *
+ * This exists because feedback evaluation is an adversarial, security-shaped
+ * job (see the injection patterns below) and is worth being able to point at a
+ * different — usually stronger — model than the one serving the rest of the
+ * product, without changing anything else.
+ *
+ * Entirely opt-in: set FEEDBACK_API_KEY to enable it. Unset, evaluation runs
+ * on the main client and model, which is the normal deployment.
+ *
+ * Constructed once per process, not per call, so it isn't re-tagged (and its
+ * connection pool isn't rebuilt) on every evaluateFeedback() invocation.
+ */
+const feedbackApiKey = (process.env.FEEDBACK_API_KEY ?? "").trim();
+const feedbackClient = feedbackApiKey
+  ? tagClientProvider(
+      new OpenAI({
+        apiKey: feedbackApiKey,
+        baseURL: (process.env.FEEDBACK_BASE_URL ?? "").trim() || undefined,
+      }),
+      (process.env.FEEDBACK_PROVIDER ?? process.env.AI_PROVIDER ?? "").trim() || "unconfigured",
+    )
   : null;
 
 export interface FeedbackEvaluationResult {
@@ -47,8 +66,8 @@ export async function evaluateFeedback(feedbackText: string): Promise<FeedbackEv
   }
 
   // Select client & model
-  const client = openaiClient ?? deepseek;
-  const model = openaiClient ? "gpt-4o-mini" : DEEPSEEK_CHAT_MODEL;
+  const client = feedbackClient ?? aiClient;
+  const model = (feedbackClient && (process.env.FEEDBACK_MODEL ?? "").trim()) || AI_CHAT_MODEL;
 
   const systemPrompt = [
     `You are a strict Feedback Evaluation Model for Mailroid, a fullstack email/calendar productivity app currently in BETA.`,

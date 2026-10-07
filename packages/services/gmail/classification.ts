@@ -480,7 +480,25 @@ export async function startClassificationJob(
     return { started: false, reason: "no_credits" };
   }
 
+  // An empty window still spends the one-time classification. Returning
+  // without a job row would leave hasClassified false forever (it is derived
+  // from these rows, not a flag), so the priority tab would keep offering the
+  // scope buttons — and the sidebar would keep nudging — to a user who has
+  // already clicked Classify and been told there was nothing to do. The row
+  // is free: pendingCount 0 means cappedCount 0 and creditsToCharge 0, so
+  // nothing is charged and there is no batch to fire.
   if (estimate.pendingCount === 0) {
+    const emptyJob = await createClassificationJob(userId, scope, since, estimate);
+    if ("alreadyRunning" in emptyJob) {
+      // Nothing was charged, so nothing to refund — but this click did not
+      // get a job of its own, and saying otherwise would report someone
+      // else's in-flight run as this one's result.
+      return { started: false, reason: "already_running" };
+    }
+    await markJobComplete(emptyJob.id);
+    logger.info("[CLASSIFY] job window empty, recorded as spent", {
+      userId, scope, jobId: emptyJob.id,
+    });
     return { started: true, jobId: null, totalCount: 0, capped: false, cappedCount: 0, creditsCharged: 0 };
   }
 

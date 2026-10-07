@@ -59,7 +59,7 @@ async function classifyWithRetryTranslation(
       const retryAfterHeader = (err as { headers?: { get?: (name: string) => string | null } })
         ?.headers?.get?.("retry-after");
       const retryAfterMs = retryAfterHeader ? Number(retryAfterHeader) * 1000 : 30_000;
-      throw new RetryAfterError("DeepSeek rate limited", retryAfterMs, { cause: err });
+      throw new RetryAfterError("Model provider rate limited", retryAfterMs, { cause: err });
     }
     throw err;
   }

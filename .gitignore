@@ -67,6 +67,6 @@ graphify*
 #
 # NOTE: notes/incidents/ can contain raw mailbox addresses and message
 # metadata. It is ignored on purpose and must stay that way.
-notes/
-
+notes/*
+docs/*
 CLAUDE*
