@@ -78,7 +78,16 @@ export const adminJobsRouter = router({
         note ??= e.note;
       }
 
-      return { targets: targets.length, rows, units, note, per };
+      // A per-mailbox note alongside summed totals reads as a contradiction —
+      // "550 rows" next to "59 messages to re-fetch" is the first mailbox's
+      // note wearing the aggregate's numbers. For a fan-out, say something
+      // true of the whole run instead.
+      const aggregateNote =
+        targets.length > 1
+          ? `${rows} row${rows === 1 ? "" : "s"} across ${targets.length} mailboxes, ~${units.toLocaleString()} quota units in total. Gmail's limit is per-mailbox, so these do not contend with each other — expect roughly ${Math.ceil(units / Math.max(targets.length, 1) / 75)}s of pacing per mailbox.`
+          : note;
+
+      return { targets: targets.length, rows, units, note: aggregateNote, per };
     }),
 
   /** Queue the job. Returns immediately; the work happens on Inngest. */
