@@ -107,7 +107,21 @@
     "./gmail/message-id": "./gmail/message-id.ts",
     "./gmail/message-id.js": "./gmail/message-id.ts",
     "./calendar/guest-links": "./calendar/guest-links.ts",
-    "./calendar/guest-links.js": "./calendar/guest-links.ts"
+    "./calendar/guest-links.js": "./calendar/guest-links.ts",
+    "./admin-jobs/index": "./admin-jobs/index.ts",
+    "./admin-jobs/index.js": "./admin-jobs/index.ts",
+    "./admin-jobs/registry": "./admin-jobs/registry.ts",
+    "./admin-jobs/registry.js": "./admin-jobs/registry.ts",
+    "./admin-jobs/runs": "./admin-jobs/runs.ts",
+    "./admin-jobs/runs.js": "./admin-jobs/runs.ts",
+    "./admin-jobs/recipient-backfill": "./admin-jobs/recipient-backfill.ts",
+    "./admin-jobs/recipient-backfill.js": "./admin-jobs/recipient-backfill.ts",
+    "./admin-jobs/job-worker": "./admin-jobs/job-worker.ts",
+    "./admin-jobs/job-worker.js": "./admin-jobs/job-worker.ts",
+    "./admin-jobs/watch-renewal": "./admin-jobs/watch-renewal.ts",
+    "./admin-jobs/watch-renewal.js": "./admin-jobs/watch-renewal.ts",
+    "./admin-jobs/credential-check": "./admin-jobs/credential-check.ts",
+    "./admin-jobs/credential-check.js": "./admin-jobs/credential-check.ts"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

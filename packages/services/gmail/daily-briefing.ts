@@ -2,7 +2,7 @@ import { db, eq, and, or, gte, lte, gt } from "@repo/database";
 import { dailyBriefs } from "@repo/database/models/daily-briefs";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { calendarEvents } from "@repo/database/models/calendar-events";
-import { deepseek, DEEPSEEK_CHAT_MODEL, chatCompletion, withAiUsage } from "@repo/ai";
+import { aiClient, AI_CHAT_MODEL, chatCompletion, withAiUsage } from "@repo/ai";
 import { matchProtectedSender, matchProtectedKeyword } from "@repo/shared";
 import { logger } from "@repo/logger";
 import { getProtectedConfig } from "../profile/index.ts";
@@ -343,11 +343,11 @@ ${calendarString || "No upcoming calendar events."}
 ${emailsString || "No critical emails."}
 `;
 
-  // ── 5. Call DeepSeek ──────────────────────────────────────────────
+  // ── 5. Call the model ─────────────────────────────────────────────
   const completion = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: [
         { role: "system", content: systemPrompt },
         { role: "user", content: userPrompt },
@@ -363,7 +363,7 @@ ${emailsString || "No critical emails."}
   try {
     brief = JSON.parse(rawJson);
   } catch (error) {
-    logger.error("[daily-briefing] Failed to parse DeepSeek JSON response, fallback to empty briefing", { rawJson });
+    logger.error("[daily-briefing] Failed to parse model JSON response, fallback to empty briefing", { rawJson });
     brief = {
       scheduleSummary: [],
       actionTimeline: [],

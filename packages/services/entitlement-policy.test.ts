@@ -75,8 +75,17 @@ test("the expiry warning covers the final day and nothing earlier", () => {
 });
 
 test("the feedback unlock raises FREE and leaves paid plans alone", () => {
-  assert.equal(limitFor("FREE", false), 10);
-  assert.equal(limitFor("FREE", true), 20);
+  // Asserted against PLAN_LIMITS rather than literals: the FREE cap is a
+  // product decision that moves (10 -> 50 during beta testing), and a test
+  // that pins the number fails on every such change without any rule being
+  // broken. What must hold is the relationship.
+  assert.equal(limitFor("FREE", false), PLAN_LIMITS.FREE.dailyActions);
+  assert.equal(
+    limitFor("FREE", true),
+    PLAN_LIMITS.FREE.dailyActions + PLAN_LIMITS.FREE.unlockedBonus,
+  );
+  // The unlock has to be worth filing feedback for, or the offer is a lie.
+  assert.ok(PLAN_LIMITS.FREE.unlockedBonus > 0);
   // A paying user should never have to file feedback to get what they paid for.
   assert.equal(limitFor("PRO", false), limitFor("PRO", true));
   assert.equal(limitFor("ULTIMATE", false), limitFor("ULTIMATE", true));

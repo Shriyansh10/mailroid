@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 import type { ChatMessage } from "./types.ts";
 import type { AgentResponse } from "./types.ts";
@@ -17,7 +17,7 @@ import type OpenAI from "openai";
  *
  * The public `ChatMessage` only has `{ role, content }`. Internally we need
  * to represent assistant messages with `tool_calls` and tool-result messages
- * with `tool_call_id` so DeepSeek can correlate calls to results.
+ * with `tool_call_id` so the model can correlate calls to results.
  */
 type AgentMessage =
   | { role: "system" | "user"; content: string }
@@ -49,7 +49,7 @@ function toolCallIdOf(msg: HealMessage): string | undefined {
 }
 
 /**
- * Normalize a conversation so it complies with OpenAI/DeepSeek's strict tool
+ * Normalize a conversation so it complies with the OpenAI-format strict tool
  * protocol: every `tool` message must sit immediately after the `assistant`
  * message whose `tool_calls` include its id, and every requested tool call must
  * have a response. Operates on an in-memory copy only — DB rows are never
@@ -152,7 +152,7 @@ export interface RunAgentLoopOptions {
   /** Tool registry to convert into OpenAI tool definitions. */
   registry: ToolRegistry;
   /**
-   * Execution callback — called whenever DeepSeek requests a tool.
+   * Execution callback — called whenever the model requests a tool.
    * The route wires this to `ToolOrchestrator.executeTool()`.
    */
   execute: (name: string, args: Record<string, unknown>) => Promise<ToolResult>;
@@ -201,13 +201,13 @@ function getFunction(tc: {
 
 /**
  * Pure tool-calling loop. No dependency on specific tools, services,
- * or routes — only DeepSeek, a tool registry, and an execution callback.
+ * or routes — only the model, a tool registry, and an execution callback.
  *
  * Flow:
  *   1. Convert `registry` → OpenAI `tools` definitions
- *   2. Call DeepSeek with messages + tools
- *   3. If DeepSeek returns content (no tool calls) → return it
- *   4. If DeepSeek returns tool_calls → execute each via callback,
+ *   2. Call the model with messages + tools
+ *   3. If the model returns content (no tool calls) → return it
+ *   4. If the model returns tool_calls → execute each via callback,
  *      feed result back into messages, loop
  *   5. Safety limit prevents infinite loops
  */
@@ -223,9 +223,9 @@ export interface AgentLoopResult {
   response: AgentResponse;
   newMessages: AgentLoopNewMessage[];
   /**
-   * Approx. character length of the conversation actually sent to DeepSeek
+   * Approx. character length of the conversation actually sent to the model
    * on the last iteration — the same rough proxy already logged as
-   * `[agent:deepseek:request] approxChars`. Powers the assistant UI's
+   * `[agent:model:request] approxChars`. Powers the assistant UI's
    * context-window indicator; not an exact token count (~4 chars/token is
    * the standard rough-estimate ratio for English text).
    */
@@ -272,7 +272,7 @@ export async function runAgentLoop(
 
   const conversation = healConversation(rawConversation);
 
-  // ── Security: sanitize user messages before DeepSeek sees them ────
+  // ── Security: sanitize user messages before the model sees them ──
   for (const msg of conversation) {
     if (msg.role === "user") {
       msg.content = firewall.sanitizeMessage(msg.content);
@@ -295,7 +295,7 @@ export async function runAgentLoop(
   }
 
   const start = Date.now();
-  // Tracks the size of the last thing actually sent to DeepSeek, so every
+  // Tracks the size of the last thing actually sent to the model, so every
   // return path below can report it as contextChars regardless of which
   // branch it returns from.
   let lastApproxChars = 0;
@@ -306,7 +306,7 @@ export async function runAgentLoop(
     // Build request params — use the non-streaming overload explicitly
     // so `completion.choices` is typed as `ChatCompletion` not a union with Stream.
     const params: OpenAI.Chat.Completions.ChatCompletionCreateParamsNonStreaming = {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: conversation as unknown as OpenAI.Chat.Completions.ChatCompletionMessageParam[],
       stream: false,
       ...(toolDefs.length > 0
@@ -316,21 +316,21 @@ export async function runAgentLoop(
 
     const approxChars = JSON.stringify(conversation).length;
     lastApproxChars = approxChars;
-    console.log("[agent:deepseek:request]", { iteration, approxChars });
+    console.log("[agent:model:request]", { iteration, approxChars });
 
     let completion;
     try {
-      completion = await chatCompletion(deepseek, params, {
+      completion = await chatCompletion(aiClient, params, {
         feature: "chat:agent",
         metadata: { iteration },
       });
     } catch (err) {
-      console.error("[agent:deepseek:error]", {
+      console.error("[agent:model:error]", {
         iteration,
         approxChars,
         status: (err as { status?: number })?.status,
         message: err instanceof Error ? err.message : String(err),
-        // DeepSeek's SDK error puts the API's JSON body here — this is where
+        // The SDK error puts the API's JSON body here — this is where
         // "context length exceeded" / rate-limit reasons actually show up.
         body: (err as { error?: unknown })?.error,
       });
@@ -340,7 +340,7 @@ export async function runAgentLoop(
     const choice = completion.choices[0];
     if (!choice) {
       console.error("[agent:error]", { reason: "No choices in response" });
-      throw new Error("No choices in DeepSeek response");
+      throw new Error("No choices in model response");
     }
 
     const msg = choice.message;
@@ -409,7 +409,7 @@ export async function runAgentLoop(
           break;
         }
 
-        // ── Security: sanitize tool output before DeepSeek sees it ──
+        // ── Security: sanitize tool output before the model sees it ──
         const safeResult = {
           ...result,
           data: firewall.sanitizeToolOutput(toolName, result.data),
@@ -449,7 +449,7 @@ export async function runAgentLoop(
         return { response: approvalResponse, newMessages, contextChars: lastApproxChars };
       }
 
-      // Loop again — DeepSeek will process the tool results
+      // Loop again — the model will process the tool results
       continue;
     }
 

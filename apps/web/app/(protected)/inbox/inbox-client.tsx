@@ -22,7 +22,13 @@ import { ComposeDialog } from "@web/components/inbox/compose-dialog";
 import type { ComposePrefill } from "@web/components/inbox/compose-dialog";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@web/components/ui/collapsible";
 import { authClient, useSession } from "@web/lib/auth-client";
-import { useAiReadiness, useCategoryCounts, useInboxSync } from "@web/hooks/api/gmail";
+import {
+  useAiReadiness,
+  useCategoryCounts,
+  useClassificationJobStatus,
+  useClassifyControlsStatus,
+  useInboxSync,
+} from "@web/hooks/api/gmail";
 import { useCalendarSync } from "@web/hooks/api/calendar";
 import { frontendLogger } from "@web/lib/frontend-logger";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
@@ -98,6 +104,31 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
   // so this only ever disables these for a user's first-ever setup window.
   const { data: aiReadiness } = useAiReadiness();
   const aiReady = aiReadiness?.ready ?? false;
+
+  /*
+    Fresh out of onboarding, the one thing the user has to do next lives in the
+    priority tab (the one-time Classify Last Week / Last Month choice), and
+    nothing in the sidebar said so — a plain nav row among five others. So the
+    Priority row wears the nudge until the job exists.
+
+    Both halves are server truth, never a local "seen" flag: hasClassified
+    flips the moment a scoped job is running or complete, which is exactly the
+    click on Classify, so the nudge retires itself and cannot resurrect on
+    another device. The jobRunning check only covers the window before
+    classifyControlsStatus refetches.
+
+    Suppressed while the user is actually ON the priority tab: the row is
+    already the active one there, and FirstClassifyBanner below is the real
+    call to action. Leaving without classifying brings the nudge back, because
+    the step is still genuinely undone.
+  */
+  const { data: classifyControls } = useClassifyControlsStatus();
+  const { data: classificationJob } = useClassificationJobStatus();
+  const needsClassify =
+    !!classifyControls &&
+    !classifyControls.hasClassified &&
+    classificationJob?.status !== "running";
+  const showPriorityNudge = needsClassify && category !== "PRIORITY";
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -176,7 +207,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
           break;
         case "e":
           e.preventDefault();
-          window.dispatchEvent(new CustomEvent("mailroid-archive-selected"));
+          window.dispatchEvent(new CustomEvent("mailroid-bin-selected"));
           break;
         case "c":
           e.preventDefault();
@@ -241,12 +272,32 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
 
           <button
             onClick={() => navigateTo({ category: "PRIORITY", q: undefined })}
+            title={
+              showPriorityNudge
+                ? "Start here — classify your recent emails to switch priority triage on"
+                : undefined
+            }
             className={`w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium transition-colors ${
-              category === "PRIORITY" ? "bg-accent text-foreground" : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
+              category === "PRIORITY"
+                ? "bg-accent text-foreground"
+                : showPriorityNudge
+                  ? "bg-[#b08d57]/10 text-[#b08d57] ring-1 ring-[#b08d57]/30 hover:bg-[#b08d57]/20"
+                  : "text-muted-foreground hover:bg-accent/50 hover:text-foreground"
             }`}
           >
             <SparklesIcon className="size-4" />
             <span className="flex-1 text-left">Priority</span>
+            {showPriorityNudge && (
+              <span className="flex items-center gap-1.5">
+                <span className="text-[10px] font-semibold uppercase tracking-wider">
+                  Start here
+                </span>
+                <span className="relative flex size-1.5">
+                  <span className="absolute inline-flex h-full w-full rounded-full bg-[#b08d57] opacity-75 motion-safe:animate-ping" />
+                  <span className="relative inline-flex size-1.5 rounded-full bg-[#b08d57]" />
+                </span>
+              </span>
+            )}
           </button>
 
           <button

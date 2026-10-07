@@ -324,21 +324,44 @@ export async function resolveThreadMeetings(
   userId: string,
   threadId: string,
 ): Promise<{ meetings: ThreadMeeting[]; resolution: GuestResolution }> {
-  const links = await db
+  // Every link for this thread, ACTIVE or not. The status filter used to live
+  // in SQL, which meant the closed rows were invisible here — and a closed row
+  // is exactly what the guest lookup below has to be checked against.
+  const allLinks = await db
     .select({
       eventId: threadCalendarEvents.eventId,
       calendarId: threadCalendarEvents.calendarId,
       role: threadCalendarEvents.role,
+      status: threadCalendarEvents.status,
     })
     .from(threadCalendarEvents)
     .where(
       and(
         eq(threadCalendarEvents.userId, userId),
         eq(threadCalendarEvents.threadId, threadId),
-        eq(threadCalendarEvents.status, "ACTIVE"),
       ),
     )
     .orderBy(desc(threadCalendarEvents.createdAt));
+
+  const links = allLinks
+    .filter((l) => l.status === "ACTIVE")
+    .map(({ status: _status, ...rest }) => rest);
+
+  /**
+   * Event ids this user has already closed on this thread.
+   *
+   * The guest lookup must never hand one of these back. A cancelled meeting
+   * that reappears is bad enough; it reappears with role GUEST, which takes the
+   * Cancel and Reschedule buttons away from the organiser who just cancelled
+   * it, leaving them no way to remove it at all.
+   *
+   * Safe because an event id is never reused for a different meeting (see the
+   * status note on `threadCalendarEvents`), so suppressing a closed id cannot
+   * hide a genuinely new one.
+   */
+  const closedEventIds = new Set(
+    allLinks.filter((l) => l.status !== "ACTIVE").map((l) => l.eventId),
+  );
 
   // An ORGANISER's links are complete by construction: a row is written at
   // creation for every meeting they schedule, so there is nothing a join could
@@ -361,6 +384,8 @@ export async function resolveThreadMeetings(
   const known = new Map(links.map((l) => [l.eventId, l]));
   for (const eventId of guest.eventIds) {
     if (known.has(eventId)) continue;
+    // Closed here deliberately — do not revive it. See `closedEventIds`.
+    if (closedEventIds.has(eventId)) continue;
     known.set(eventId, {
       eventId,
       calendarId: DEFAULT_CALENDAR_ID,

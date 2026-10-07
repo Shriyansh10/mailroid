@@ -14,6 +14,7 @@ import gmailStatus from "./commands/gmail-status.ts";
 import gmailResyncCategories from "./commands/gmail-resync-categories.ts";
 import gmailResync from "./commands/gmail-resync.ts";
 import gmailBackfillMessageIds from "./commands/gmail-backfill-message-ids.ts";
+import gmailBackfillRecipients from "./commands/gmail-backfill-recipients.ts";
 import gmailBackfillPriority from "./commands/gmail-backfill-priority.ts";
 import gmailRenewWatch from "./commands/gmail-renew-watch.ts";
 import gmailReleaseWatch from "./commands/gmail-release-watch.ts";
@@ -36,6 +37,7 @@ export const commands: Command[] = [
   gmailResyncCategories,
   gmailResync,
   gmailBackfillMessageIds,
+  gmailBackfillRecipients,
   gmailBackfillPriority,
   // Read-only status above; these act on a live mailbox (P-2/P-9) and are
   // ordered last within this group so the safe commands are always seen first.

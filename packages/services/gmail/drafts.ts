@@ -96,6 +96,7 @@ function buildDraftRow(userId: string, draft: RawDraft): MetadataInput | null {
     // read like every other view.
     category: "DRAFT",
     sender: getHeader(headers, "From"),
+    recipient: getHeader(headers, "To"),
     subject: getHeader(headers, "Subject"),
     snippet: msg.snippet ?? "",
     // A draft is your own unsent text: never unread, never in the inbox.

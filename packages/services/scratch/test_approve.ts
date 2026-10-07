@@ -5,8 +5,8 @@ import {
   PermissionService,
   ConsoleAuditLogger,
   ToolOrchestrator,
-  deepseek,
-  DEEPSEEK_CHAT_MODEL,
+  aiClient,
+  AI_CHAT_MODEL,
   toOpenAiToolDefs,
   healConversation,
 } from "@repo/ai";
@@ -106,8 +106,8 @@ async function main() {
   );
   console.log("Tool execution result:", result);
 
-  // Resume DeepSeek
-  console.log("Resuming DeepSeek...");
+  // Resume the model
+  console.log("Resuming the model...");
   const rawConversation: any[] = [
     ...apiMessages,
     {
@@ -135,21 +135,21 @@ async function main() {
   ];
 
   const conversation = healConversation(rawConversation);
-  console.log("Conversation sent to DeepSeek:", JSON.stringify(conversation, null, 2));
+  console.log("Conversation sent to the model:", JSON.stringify(conversation, null, 2));
 
   try {
     const toolDefs = toOpenAiToolDefs(registry);
-    const completion = await deepseek.chat.completions.create({
-      model: DEEPSEEK_CHAT_MODEL,
+    const completion = await aiClient.chat.completions.create({
+      model: AI_CHAT_MODEL,
       messages: conversation,
       stream: false as const,
       ...(toolDefs.length > 0 ? { tools: toolDefs } : {}),
     } as any);
 
     const msg = completion.choices[0]?.message;
-    console.log("DeepSeek completion message:", JSON.stringify(msg, null, 2));
+    console.log("Model completion message:", JSON.stringify(msg, null, 2));
   } catch (err: any) {
-    console.error("DeepSeek resumption failed with error:", err);
+    console.error("Model resumption failed with error:", err);
   }
 }
 

@@ -32,7 +32,8 @@
     "./models/ai-setup-status": "./models/ai-setup-status.ts",
     "./models/mail-templates": "./models/mail-templates.ts",
     "./models/user-usage": "./models/user-usage.ts",
-    "./models/ai-usage": "./models/ai-usage.ts"
+    "./models/ai-usage": "./models/ai-usage.ts",
+    "./models/developer-job-runs": "./models/developer-job-runs.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

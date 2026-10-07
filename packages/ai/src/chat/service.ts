@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion, streamChatCompletion } from "../usage/track.ts";
 import type {
   ChatMessage,
@@ -7,7 +7,7 @@ import type {
 } from "./types.ts";
 
 /**
- * Send a non-streaming chat request to DeepSeek.
+ * Send a non-streaming chat request to the configured model.
  *
  * @param messages - Array of chat messages (system, user, assistant)
  * @returns A ChatResponse containing the assistant's reply
@@ -17,13 +17,13 @@ export async function sendChat(
 ): Promise<ChatResponse> {
   const start = Date.now();
 
-  console.log("[chat:request]", { model: DEEPSEEK_CHAT_MODEL, messageCount: messages.length });
+  console.log("[chat:request]", { model: AI_CHAT_MODEL, messageCount: messages.length });
 
   try {
     const completion = await chatCompletion(
-      deepseek,
+      aiClient,
       {
-        model: DEEPSEEK_CHAT_MODEL,
+        model: AI_CHAT_MODEL,
         messages: messages.map((m) => {
           if (m.role === "assistant") {
             return {
@@ -50,17 +50,17 @@ export async function sendChat(
 
     const content = completion.choices[0]?.message?.content ?? "";
 
-    console.log("[chat:response]", { model: DEEPSEEK_CHAT_MODEL, durationMs: Date.now() - start, contentLength: content.length });
+    console.log("[chat:response]", { model: AI_CHAT_MODEL, durationMs: Date.now() - start, contentLength: content.length });
 
     return { role: "assistant" as const, content };
   } catch (error) {
-    console.error("[chat:error]", { model: DEEPSEEK_CHAT_MODEL, durationMs: Date.now() - start, error: error instanceof Error ? error.message : String(error) });
+    console.error("[chat:error]", { model: AI_CHAT_MODEL, durationMs: Date.now() - start, error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
 }
 
 /**
- * Send a streaming chat request to DeepSeek.
+ * Send a streaming chat request to the configured model.
  * Returns an async iterable that yields chunks as they arrive.
  *
  * @param messages - Array of chat messages (system, user, assistant)
@@ -71,13 +71,13 @@ export async function* streamChat(
 ): AsyncIterable<ChatStreamChunk> {
   const start = Date.now();
 
-  console.log("[chat:stream:request]", { model: DEEPSEEK_CHAT_MODEL, messageCount: messages.length });
+  console.log("[chat:stream:request]", { model: AI_CHAT_MODEL, messageCount: messages.length });
 
   try {
     const stream = streamChatCompletion(
-      deepseek,
+      aiClient,
       {
-        model: DEEPSEEK_CHAT_MODEL,
+        model: AI_CHAT_MODEL,
         messages: messages.map((m) => {
           if (m.role === "assistant") {
             return {
@@ -116,9 +116,9 @@ export async function* streamChat(
     // Signal completion
     yield { content: "", done: true };
 
-    console.log("[chat:stream:complete]", { model: DEEPSEEK_CHAT_MODEL, durationMs: Date.now() - start, totalContentLength: totalContent.length });
+    console.log("[chat:stream:complete]", { model: AI_CHAT_MODEL, durationMs: Date.now() - start, totalContentLength: totalContent.length });
   } catch (error) {
-    console.error("[chat:stream:error]", { model: DEEPSEEK_CHAT_MODEL, durationMs: Date.now() - start, error: error instanceof Error ? error.message : String(error) });
+    console.error("[chat:stream:error]", { model: AI_CHAT_MODEL, durationMs: Date.now() - start, error: error instanceof Error ? error.message : String(error) });
     throw error;
   }
 }

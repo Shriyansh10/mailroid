@@ -32,7 +32,7 @@ export interface PlanLimits {
  * is a platform role, not something anyone buys.
  */
 export const PLAN_LIMITS: Record<Plan, PlanLimits> = {
-  FREE: { dailyActions: 10, unlockedBonus: 10 },
+  FREE: { dailyActions: 50, unlockedBonus: 10 },
   PRO: { dailyActions: 100, unlockedBonus: 0 },
   ULTIMATE: { dailyActions: 1000, unlockedBonus: 0 },
 };

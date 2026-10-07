@@ -324,6 +324,11 @@ export const useStartClassificationJob = () => {
   const result = trpc.gmail.startClassificationJob.useMutation({
     onSuccess: () => {
       void utils.gmail.classificationJobStatus.invalidate();
+      // hasClassified flips server-side the instant this job exists, and two
+      // pieces of UI retire on it — the classify banner and the sidebar's
+      // "Start here" nudge. Without this the cached status (staleTime 30s)
+      // keeps nudging someone who has already clicked Classify.
+      void utils.gmail.classifyControlsStatus.invalidate();
     },
   });
 

@@ -17,15 +17,20 @@ export interface ModelPrice {
 }
 
 /**
- * Keyed by the exact model string sent to the provider (DEEPSEEK_CHAT_MODEL,
+ * Keyed by the exact model string sent to the provider (AI_CHAT_MODEL,
  * EMBEDDINGS_MODEL, etc.), not a display name.
+ *
+ * This is the one place a model name legitimately appears in source, because
+ * a price is a fact about a specific model and cannot be abstracted away. Any
+ * model configured without an entry here still works — cost tracking just
+ * records pricing_known=false for it. So adding a row is how you start
+ * costing a new model, not a prerequisite for using one.
  *
  * These figures are a starting point — verify against the provider's current
  * pricing page before relying on cost totals for anything financial, and
  * bump PRICING_VERSION when you change them.
  */
 export const MODEL_PRICING: Record<string, ModelPrice> = {
-  "deepseek-chat": { inputPerMTok: 0.27, cachedInputPerMTok: 0.07, outputPerMTok: 1.1 },
   "gpt-4o-mini": { inputPerMTok: 0.15, cachedInputPerMTok: 0.075, outputPerMTok: 0.6 },
   "text-embedding-3-small": { inputPerMTok: 0.02, cachedInputPerMTok: 0.02, outputPerMTok: 0 },
   "text-embedding-3-large": { inputPerMTok: 0.13, cachedInputPerMTok: 0.13, outputPerMTok: 0 },

@@ -1,7 +1,7 @@
 export { createEmbedding, createEmbeddingsBatch } from "./embeddings/generate.ts";
 export { embedSearchQuery } from "./embeddings/search.ts";
 
-export { deepseek, DEEPSEEK_CHAT_MODEL, MODEL_CONTEXT_WINDOW_TOKENS } from "./client.ts";
+export { aiClient, AI_CHAT_MODEL, AI_PROVIDER, MODEL_CONTEXT_WINDOW_TOKENS } from "./client.ts";
 
 // ── AI usage tracking ────────────────────────────────────────────────
 export { withAiUsage, currentAiUsage } from "./usage/context.ts";

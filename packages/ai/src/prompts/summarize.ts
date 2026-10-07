@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 import type { UsageMetadataTag } from "../usage/track.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
@@ -313,9 +313,9 @@ async function callModel(
   stage: UsageMetadataTag,
 ): Promise<string> {
   const response = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages,
       temperature: 0.2,
       max_tokens: maxTokens,

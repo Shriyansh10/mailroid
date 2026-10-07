@@ -36,7 +36,7 @@ export interface UsageCheckResult {
 /** Sentinel reported for accounts that are not metered at all. */
 const UNMETERED = 9999;
 
-export { limitFor };
+export { limitFor, PLAN_LIMITS };
 
 function todayIn(userTimeZone: string | undefined): string {
   return new Date().toLocaleDateString("en-CA", { timeZone: userTimeZone ?? "UTC" });

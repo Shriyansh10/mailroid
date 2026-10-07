@@ -20,6 +20,8 @@ interface UsageStats {
   remaining: number;
   unlocked: boolean;
   feedbackUnlocks: number;
+  /** Extra actions the feedback unlock grants. 0 when there is no such offer. */
+  unlockedBonus: number;
 }
 
 export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
@@ -95,7 +97,9 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
         setErrorMsg(data.error || "Failed to submit feedback.");
       } else {
         if (data.approved) {
-          setSuccessMsg("✨ Thank you! Your feedback was approved. Daily limit extended to 20 actions!");
+          setSuccessMsg(
+            `✨ Thank you! Your feedback was approved. Daily limit extended to ${stats ? stats.limit + stats.unlockedBonus : ""} actions!`,
+          );
           setFeedbackText("");
           // Refetch usage stats
           fetchUsage();
@@ -137,7 +141,12 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
     );
   }
 
-  const { actionCount, limit, remaining, unlocked } = stats;
+  const { actionCount, limit, remaining, unlocked, unlockedBonus } = stats;
+  // Both prompts key off the cap actually in force, never a literal. They used
+  // to hardcode 10 and 20, which silently became wrong the moment PLAN_LIMITS
+  // moved — the feedback offer fired at 10 of 50 and the sign-off at 20 of 50.
+  const atCap = actionCount >= limit;
+  const canUnlockMore = !unlocked && unlockedBonus > 0;
   const progressPercent = Math.min(100, (actionCount / limit) * 100);
 
   return (
@@ -170,8 +179,8 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
         </div>
       </div>
 
-      {/* Beta feedback prompt at 10/10 limit */}
-      {actionCount >= 10 && !unlocked && (
+      {/* Feedback offer: base cap spent, bonus still available. */}
+      {atCap && canUnlockMore && (
         <div className={`p-4 rounded-xl border border-dashed flex flex-col gap-2.5 ${
           dark
             ? "border-[#4D4D4F] bg-[#2A2B32] text-slate-300"
@@ -182,7 +191,7 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
             🎯 You&apos;re helping shape Mailroid
           </div>
           <p className="text-[11px] leading-relaxed">
-            You&apos;ve used your first 10 assistant actions today. Share a bug report, feature request, or product suggestion to unlock 10 more assistant actions.
+            You&apos;ve used your first {limit} assistant actions today. Share a bug report, feature request, or product suggestion to unlock {unlockedBonus} more assistant actions.
           </p>
           <div className="text-[10px] space-y-0.5 opacity-90 pl-1.5 border-l-2 border-indigo-400">
             <div>• Something confusing in the UI</div>
@@ -204,8 +213,8 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
         </div>
       )}
 
-      {/* Thank you message at 20/20 limit */}
-      {actionCount >= 20 && (
+      {/* Nothing left to unlock — the day is genuinely over. */}
+      {atCap && !canUnlockMore && (
         <div className={`p-6 rounded-xl border border-dashed text-center flex flex-col gap-3 ${
           dark
             ? "border-emerald-800 bg-emerald-950/20 text-emerald-300"
@@ -218,7 +227,7 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
             Thank you for testing out Mailroid! I hope you had a great time.
           </p>
           <p className="text-[11px] text-muted-foreground font-mono leading-relaxed">
-            Please note: This product is currently in beta. Your daily limit of 20 actions resets at 12:00 AM (midnight) local time. See you tomorrow!
+            Please note: This product is currently in beta. Your daily limit of {limit} actions resets at 12:00 AM (midnight) local time. See you tomorrow!
           </p>
         </div>
       )}
@@ -229,7 +238,7 @@ export function DailyUsageWidget({ dark = false }: { dark?: boolean }) {
           <DialogHeader>
             <DialogTitle>Share Beta Feedback</DialogTitle>
             <DialogDescription>
-              Help us improve Mailroid. Submit constructive feedback, bugs, feature requests, or UI observations to unlock 10 additional assistant actions for today.
+              Help us improve Mailroid. Submit constructive feedback, bugs, feature requests, or UI observations to unlock {unlockedBonus} additional assistant actions for today.
             </DialogDescription>
           </DialogHeader>
 

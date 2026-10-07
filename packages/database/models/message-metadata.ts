@@ -118,6 +118,18 @@ export const messageMetadata = pgTable(
     >(),
 
     sender: text("sender"),
+    /**
+     * The `To` header. Captured alongside `sender` on every sync path, because
+     * the Sent and Draft views are all from the user and the From header tells
+     * the reader nothing there.
+     *
+     * NULL on rows imported before this column existed — the bulk metadata walk
+     * never read the header, and re-reading it for an existing mailbox means
+     * re-fetching every message from Gmail. See the backfill command rather
+     * than inventing a fallback: showing the sender on a Sent row would print
+     * the user's own address as though it were the other party.
+     */
+    recipient: text("recipient"),
 subject: text("subject"),
 snippet: text("snippet"),
 

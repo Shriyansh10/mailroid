@@ -146,10 +146,14 @@ function AssistantPageInner() {
   // window this conversation is now using. Cleared whenever the active
   // conversation changes, so a stale reading from a different chat never
   // lingers on screen.
+  //
+  // percentUsed is null when the deployment hasn't been told how big the
+  // model's context window is (AI_CONTEXT_WINDOW_TOKENS). The indicator hides
+  // itself in that case rather than showing a number derived from a guess.
   const [contextUsage, setContextUsage] = useState<{
     usedTokens: number;
     maxTokens: number;
-    percentUsed: number;
+    percentUsed: number | null;
   } | null>(null);
   const abortRef = useRef<AbortController | null>(null);
   // Which ?conversationId= has already been consumed, so re-navigating to
@@ -758,7 +762,7 @@ function AssistantPageInner() {
     // /api/approvals/approve rebuilds history and the system prompt
     // server-side (same helpers /api/chat uses) — this only needs to name
     // which approval to resume and pass along reasoningContent, which is
-    // ephemeral client-held state (DeepSeek's reasoning_content from the
+    // ephemeral client-held state (the model's reasoning_content from the
     // turn that requested the tool call) not persisted anywhere server-side.
     try {
       const userTimeZone = Intl.DateTimeFormat().resolvedOptions().timeZone;
@@ -1425,7 +1429,7 @@ function AssistantPageInner() {
               className="w-full bg-transparent border-none outline-none resize-none text-[14px] text-foreground placeholder:text-muted-foreground/60 py-2 px-1"
             />
             <div className="flex items-center justify-between mt-1">
-              {contextUsage ? (
+              {contextUsage && contextUsage.percentUsed !== null ? (
                 <Tooltip>
                   <TooltipTrigger asChild>
                     <div className="flex items-center gap-1.5 cursor-default">

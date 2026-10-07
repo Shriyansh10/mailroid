@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 
 // ── Stage 1: document understanding ────────────────────────────────────
@@ -91,9 +91,9 @@ export async function analyzeDocument(input: {
 
   try {
     const response = await chatCompletion(
-      deepseek,
+      aiClient,
       {
-        model: DEEPSEEK_CHAT_MODEL,
+        model: AI_CHAT_MODEL,
         messages: [
           { role: "system", content: SYSTEM_PROMPT },
           {

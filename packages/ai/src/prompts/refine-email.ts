@@ -1,4 +1,4 @@
-import { deepseek, DEEPSEEK_CHAT_MODEL } from "../client.ts";
+import { aiClient, AI_CHAT_MODEL } from "../client.ts";
 import { chatCompletion } from "../usage/track.ts";
 import { detectSensitive } from "../security/detector.ts";
 import { sanitizeText, neutralizeContentLinks } from "../security/sanitizer.ts";
@@ -107,9 +107,9 @@ export async function refineEmailBody(
   // 2. Single rewrite call. Temperature matches generate-email's 0.4 — this
   //    is the same writing task, and a looser sample is what invents facts.
   const response = await chatCompletion(
-    deepseek,
+    aiClient,
     {
-      model: DEEPSEEK_CHAT_MODEL,
+      model: AI_CHAT_MODEL,
       messages: [
         { role: "system", content: REFINE_SYSTEM_PROMPT },
         { role: "user", content: userMessage },

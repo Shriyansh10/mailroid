@@ -45,7 +45,7 @@ test("computeCost: unknown model falls back to zero cost and pricingKnown=false"
 });
 
 test("computeCost: zero tokens is zero cost for a known model", () => {
-  const result = computeCost("deepseek-chat", {
+  const result = computeCost("text-embedding-3-small", {
     promptTokens: 0,
     cachedPromptTokens: 0,
     completionTokens: 0,

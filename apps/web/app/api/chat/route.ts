@@ -11,8 +11,8 @@ import {
   runAgentLoop,
   detectPromptInjection,
   AuditEventType,
-  deepseek,
-  DEEPSEEK_CHAT_MODEL,
+  aiClient,
+  AI_CHAT_MODEL,
   MODEL_CONTEXT_WINDOW_TOKENS,
   chatCompletion,
   withAiUsage,
@@ -280,7 +280,7 @@ export async function POST(request: Request) {
       })),
     ];
 
-    // ── Run agent loop (DeepSeek + tool calling) ───────────────────
+    // ── Run agent loop (model + tool calling) ─────────────────────
     // Wrapped in withAiUsage so every AI call the loop makes (and any tool
     // it invokes that itself calls out to @repo/ai) is attributed to this
     // user without threading userId through every function signature.
@@ -337,18 +337,25 @@ export async function POST(request: Request) {
     );
 
     // ── Context-window usage, for the assistant UI's indicator ─────
-    // Measured against the model's real context window (gpt-4o-mini, 128K
-    // tokens — see MODEL_CONTEXT_WINDOW_TOKENS). Note this is much larger
-    // than the ~60K-char budget trimHistoryForModel actually enforces, so
-    // this bar will usually read low even when older turns have already
-    // started getting trimmed from what the model sees — it answers "how
-    // full is the model's real window", not "has trimming kicked in yet".
+    // Measured against the configured model's real context window (see
+    // AI_CONTEXT_WINDOW_TOKENS). Note this is much larger than the ~60K-char
+    // budget trimHistoryForModel actually enforces, so this bar will usually
+    // read low even when older turns have already started getting trimmed
+    // from what the model sees — it answers "how full is the model's real
+    // window", not "has trimming kicked in yet".
     // ~4 chars/token is the standard rough estimate for English text.
+    //
+    // percentUsed is null when the window size isn't configured. Dividing by
+    // zero would pin the gauge at 100% and tell the user their context is
+    // full when nothing is known about it at all.
     const contextUsedTokens = Math.ceil(contextChars / 4);
     const contextUsage = {
       usedTokens: contextUsedTokens,
       maxTokens: MODEL_CONTEXT_WINDOW_TOKENS,
-      percentUsed: Math.min(100, Math.round((contextUsedTokens / MODEL_CONTEXT_WINDOW_TOKENS) * 100)),
+      percentUsed:
+        MODEL_CONTEXT_WINDOW_TOKENS > 0
+          ? Math.min(100, Math.round((contextUsedTokens / MODEL_CONTEXT_WINDOW_TOKENS) * 100))
+          : null,
     };
 
     // ── Beautification pass: convert raw tables to natural language ──
@@ -445,7 +452,7 @@ export async function POST(request: Request) {
       durationMs: Date.now() - start,
       error: error instanceof Error ? error.message : String(error),
       stack: error instanceof Error ? error.stack : undefined,
-      // DeepSeek/OpenAI SDK errors carry the real reason (context length,
+      // The SDK's errors carry the real reason (context length,
       // rate limit, etc.) in these fields, not in `.message`.
       status: (error as { status?: number })?.status,
       body: (error as { error?: unknown })?.error,
@@ -477,9 +484,9 @@ async function beautifyResponse(rawContent: string): Promise<string> {
 
   try {
     const completion = await chatCompletion(
-      deepseek,
+      aiClient,
       {
-        model: DEEPSEEK_CHAT_MODEL,
+        model: AI_CHAT_MODEL,
         messages: [
           {
             role: "system",

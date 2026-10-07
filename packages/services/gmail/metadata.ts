@@ -1,5 +1,6 @@
 import { db, eq, and, sql, desc, inArray, notInArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
+import { emails } from "@repo/database/models/emails";
 import { logger } from "@repo/logger";
 import type { ThreadSummary } from "./model.ts";
 
@@ -144,6 +145,19 @@ export async function getEmailsByCategory(
     isImportant: messageMetadata.isImportant,
     category: messageMetadata.category,
     draftId: messageMetadata.draftId,
+    // Sent and Draft rows are all from the user, so "from" tells the reader
+    // nothing — these views show who it went to instead.
+    //
+    // COALESCE, not one source: `message_metadata.recipient` is the real home
+    // and every sync path now fills it, but rows imported before that column
+    // existed are NULL. The `emails` row carries the same header and is already
+    // present for anything hydrated, so it covers part of the backlog for free.
+    // Rows with neither stay NULL and render as unknown rather than guessing.
+    // `.as` is required, not cosmetic: a raw SQL field selected out of a
+    // subquery has no name for the outer query to reference without it.
+    recipient: sql<string | null>`COALESCE(${messageMetadata.recipient}, ${emails.to})`.as(
+      "recipient",
+    ),
     rn: sql<number>`
       ROW_NUMBER() OVER(
         PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -152,6 +166,9 @@ export async function getEmailsByCategory(
     `.as("rn"),
   })
   .from(messageMetadata)
+  // LEFT, not inner: a metadata row whose emails row has not been hydrated yet
+  // must still list. It simply has no recipient to show.
+  .leftJoin(emails, eq(emails.gmailMessageId, messageMetadata.entityId))
   .where(and(visibilityFilter(userId), viewFilter))
   .as("sq");
 
@@ -173,6 +190,7 @@ export async function getEmailsByCategory(
     isImportant: sq.isImportant,
     category: sq.category,
     draftId: sq.draftId,
+    recipient: sq.recipient,
   })
   .from(sq)
   .where(eq(sq.rn, 1))
@@ -197,6 +215,7 @@ export async function getEmailsByCategory(
   isStarred: row.isStarred,
   isImportant: row.isImportant,
   category: row.category ?? undefined,
+  recipient: row.recipient ?? undefined,
   // Carried so a Draft row can be reopened for editing without a second
   // round trip to resolve its Gmail draft id.
   draftId: row.draftId ?? undefined,

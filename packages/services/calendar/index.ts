@@ -1,8 +1,10 @@
 import { createHash } from "node:crypto";
 
 import { corsair } from "@repo/corsair";
-import { db, eq } from "@repo/database";
+import { db, and, eq } from "@repo/database";
+import { calendarEvents } from "@repo/database/models/calendar-events";
 import { corsairConnectionEmails } from "@repo/database/models/corsair-connections";
+import { clearThreadMeetingLookups } from "./guest-links.ts";
 import type {
   CalendarEvent,
   GetEventsInput,
@@ -899,4 +901,29 @@ export async function deleteEvent(
     id: eventId,
     sendUpdates: "all",
   });
+
+  // Close the sync-cache row in the same breath as the event itself.
+  //
+  // Leaving it live is what let a cancelled meeting come back: the thread's
+  // only link is now CANCELLED, so `resolveThreadMeetings` finds no ACTIVE link
+  // and falls through to the guest lookup, which reads this cache, filters on
+  // `status <> 'cancelled'`, matches this very row and re-links the event as
+  // role GUEST — stripping the organiser of the Cancel button for a meeting
+  // they had just cancelled.
+  //
+  // This lives here rather than in the tRPC route so the agent tool and the
+  // executors get it too, not only the one path the UI happens to use.
+  const [cached] = await db
+    .update(calendarEvents)
+    .set({ status: "cancelled", updatedAt: new Date() })
+    .where(
+      and(eq(calendarEvents.userId, tenantId), eq(calendarEvents.eventId, eventId)),
+    )
+    .returning({ threadMessageId: calendarEvents.threadMessageId });
+
+  // The negative "no meeting on this thread" marker is now wrong in the other
+  // direction. Cleared for the whole user because the cache row carries a
+  // hashed Message-ID, not a Gmail thread id — over-clearing a negative cache
+  // costs one lookup and nothing else. It swallows its own errors.
+  if (cached?.threadMessageId) await clearThreadMeetingLookups(tenantId);
 }

@@ -7,6 +7,10 @@ export const threadSummaryOutputModel = z.object({
   /** Gmail message id for this row — needed by row-level actions. */
   entityId: z.string().optional(),
   sender: z.string(),
+  /** The `To` header of the message this row represents. Only meaningful in
+      the Sent and Draft views, where every row is from the user and the sender
+      says nothing — those views show this instead. */
+  recipient: z.string().optional(),
   subject: z.string(),
   date: z.string(),
   snippet: z.string(),

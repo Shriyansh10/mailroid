@@ -173,7 +173,7 @@ export interface ToolResult {
   approvalId?: string;
   /** Human-readable summary of the pending action */
   preview?: string;
-  /** DeepSeek tool_call.id — needed to resume the conversation on approve */
+  /** The provider's tool_call.id — needed to resume the conversation on approve */
   toolCallId?: string;
   /** Metadata from the tool execution (sensitive flags, source, etc.) */
   metadata?: {

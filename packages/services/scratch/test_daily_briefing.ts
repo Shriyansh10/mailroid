@@ -29,7 +29,7 @@ async function main() {
     .where(and(eq(dailyBriefs.userId, userId), eq(dailyBriefs.briefingDate, localDate)));
 
   // ── 3. Call getOrGenerateBrief (Cache Miss) ───────────────────────
-  console.log("⏳ Generating briefing (this will call DeepSeek)...");
+  console.log("⏳ Generating briefing (this will call the model provider)...");
   const startMiss = Date.now();
   const brief1 = await getOrGenerateBrief(userId, localDate);
   const durationMiss = Date.now() - startMiss;
