@@ -10,6 +10,7 @@
     "./schema": "./schema.ts",
     "./models/auth": "./models/auth.ts",
     "./models/billing": "./models/billing.ts",
+    "./models/organization": "./models/organization.ts",
     "./models/corsair-connections": "./models/corsair-connections.ts",
     "./models/corsair": "./models/corsair.ts",
     "./models/emails": "./models/emails.ts",

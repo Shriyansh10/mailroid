@@ -195,6 +195,7 @@ function AssistantPageInner() {
     if (name === "getEmailDetail") return "Looking up that detail...";
     if (name === "replyToEmail") return "Sending reply...";
     if (name === "forwardEmail") return "Forwarding email...";
+    if (name === "getCommunicationMetrics") return "Reading communication metrics...";
     return `Executing tool ${name}...`;
   };
 
@@ -208,6 +209,7 @@ function AssistantPageInner() {
     if (name === "getEmailDetail") return "✓ Found the detail";
     if (name === "replyToEmail") return "✓ Reply sent";
     if (name === "forwardEmail") return "✓ Email forwarded";
+    if (name === "getCommunicationMetrics") return "✓ Communication metrics read";
     return `✓ Executed tool ${name}`;
   };
 

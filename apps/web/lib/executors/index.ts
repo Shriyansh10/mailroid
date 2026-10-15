@@ -1,4 +1,6 @@
 import type { ToolRegistry, ToolExecutionContext } from "@repo/ai";
+import { OrganizationMetricsExecutor } from "./organization";
+import type { CommunicationMetricsInput } from "./organization";
 import {
   CorsairSearchEmailsExecutor,
   CorsairSendEmailExecutor,
@@ -77,6 +79,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
   const createExec = new CorsairCreateEventExecutor();
   const briefExec = new CorsairGenerateBriefExecutor();
   const summarizeExec = new CorsairSummarizeEmailExecutor();
+  const orgMetricsExec = new OrganizationMetricsExecutor();
   const emailDetailExec = new GetEmailDetailExecutor();
   const replyExec = new ReplyToEmailExecutor();
   const forwardExec = new ForwardEmailExecutor();
@@ -286,6 +289,24 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ summarizeEmail replaced with guardrailed executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ summarizeEmail NOT found in registry — mock still active");
+  }
+
+  // Replace getCommunicationMetrics with the scope-checked executor.
+  // Until this runs, the tool returns found:false — it never returns data
+  // without authorization, because the seeded stub has none to give.
+  const orgMetricsDef = registry.get("getCommunicationMetrics");
+  if (orgMetricsDef) {
+    registry.register({
+      ...orgMetricsDef,
+      execute: (args, ctx) =>
+        orgMetricsExec.execute(
+          args as CommunicationMetricsInput,
+          ctx as ToolExecutionContext,
+        ),
+    });
+    console.log("[registerProductionExecutors] ✅ getCommunicationMetrics replaced with scope-checked executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ getCommunicationMetrics NOT found in registry — mock still active");
   }
 
   // Replace getEmailDetail with the guardrailed, embedding-backed executor

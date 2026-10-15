@@ -564,6 +564,51 @@ export class ToolRegistry {
       execute: async () => ({ rules: [] }),
     });
 
+    // ── getCommunicationMetrics ─────────────────────────────────────
+    this.register({
+      name: "getCommunicationMetrics",
+      description:
+        "Communication metrics for the user's organization — their own numbers, " +
+        "their team's, or one person who reports to them. Use for 'how is my " +
+        "team doing', 'who has threads waiting', 'am I replying fast enough', " +
+        "'how did we do this month'. Returns counts and durations only: mail " +
+        "received and sent, how many threads expected a reply, how many were " +
+        "answered within the response target, and what is still waiting. " +
+        "Never returns mail content — no subjects, no senders, no message text " +
+        "— because the organization reporting layer cannot read them. " +
+        "Omit subjectEmail for the user's own scope; supply it only for a named " +
+        "colleague. There is no performance score and no ranking of people: " +
+        "report the numbers and let the user interpret them.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        subjectEmail: z
+          .string()
+          .optional()
+          .describe(
+            "One person to report on. The server independently checks they are " +
+              "visible to the caller and refuses otherwise.",
+          ),
+        days: z
+          .union([z.literal(7), z.literal(30), z.literal(90)])
+          .optional()
+          .describe("Reporting period. Defaults to 30."),
+      }),
+      outputSchema: z.object({
+        found: z.boolean(),
+        message: z.string().optional(),
+        window: z.object({ from: z.string(), to: z.string() }).optional(),
+        policy: z.record(z.string(), z.unknown()).optional(),
+        totals: z.record(z.string(), z.unknown()).optional(),
+        people: z.array(z.record(z.string(), z.unknown())).optional(),
+      }),
+      execute: async () => ({
+        found: false,
+        message: "getCommunicationMetrics executor not registered",
+      }),
+    });
+
     // ── upsertSchedulingRule ────────────────────────────────────────
     this.register({
       name: "upsertSchedulingRule",
