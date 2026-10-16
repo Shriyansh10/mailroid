@@ -2,7 +2,6 @@
 
 import Link from "next/link";
 
-import { Badge } from "@web/components/ui/badge";
 import {
   Table,
   TableBody,
@@ -12,7 +11,8 @@ import {
   TableRow,
 } from "@web/components/ui/table";
 
-import { outOf } from "./stat";
+import { Avatar, StatusTag } from "./bento/bento";
+import { STATUS_FILL, displayName } from "./bento/lib";
 
 type Coverage = "COVERED" | "NO_ACCOUNT" | "NO_GMAIL" | "GMAIL_ERROR" | "MAILBOX_MISMATCH";
 
@@ -25,6 +25,8 @@ export type AdherenceStatus =
 
 export interface Row {
   email: string;
+  /** Display name; null without an account. Only ever for someone in scope. */
+  name: string | null;
   managerEmail: string | null;
   coverage: Coverage;
   metrics: {
@@ -50,22 +52,6 @@ const COVERAGE_LABEL: Record<Exclude<Coverage, "COVERED">, string> = {
   MAILBOX_MISMATCH: "Connected Gmail doesn't match work email",
 };
 
-const STATUS_LABEL: Record<AdherenceStatus, string> = {
-  ON_TARGET: "On target",
-  SLIPPING: "Slipping",
-  OFF_TARGET: "Off target",
-  NO_DATA: "No data",
-  NOT_COVERED: "Not connected",
-};
-
-const STATUS_VARIANT: Record<AdherenceStatus, "default" | "secondary" | "destructive" | "outline"> =
-  {
-    ON_TARGET: "default",
-    SLIPPING: "secondary",
-    OFF_TARGET: "destructive",
-    NO_DATA: "outline",
-    NOT_COVERED: "outline",
-  };
 
 /**
  * The columns a manager may sort by.
@@ -123,7 +109,7 @@ export function formatDuration(seconds: number | null): string {
   const hours = Math.floor(minutes / 60);
   const rest = minutes % 60;
   if (hours < 24) return rest ? `${hours}h ${rest}m` : `${hours}h`;
-  return `${Math.floor(hours / 24)}d ${hours % 24}h`;
+  return hours % 24 ? `${Math.floor(hours / 24)}d ${hours % 24}h` : `${Math.floor(hours / 24)}d`;
 }
 
 interface Column {
@@ -159,12 +145,23 @@ export function ReportTable({
   rows,
   sort,
   onSortChange,
+  goal,
+  viewerEmail,
 }: {
   rows: Row[];
   sort?: { key: SortKey; direction: SortDirection };
   onSortChange?: (key: SortKey, direction: SortDirection) => void;
+  /** Where the goal sits on each within-target meter (policy.onTargetAtOrAbove). */
+  goal?: number;
+  /** "Reports to you" reads better than your own name. */
+  viewerEmail?: string;
 }) {
   const sortable = Boolean(onSortChange);
+  // Every row's manager is the viewer or someone in scope, so their name is
+  // already among the rows — no second, wider lookup is ever needed.
+  const nameOf = new Map(rows.map((r) => [r.email, displayName(r.email, r.name)]));
+  const managerLabel = (email: string | null) =>
+    email == null ? "—" : email === viewerEmail ? "you" : (nameOf.get(email) ?? email);
 
   const headerFor = (column: Column) => {
     const active = sort?.key === column.key;
@@ -194,72 +191,129 @@ export function ReportTable({
     sort?.key === key ? (sort.direction === "asc" ? "ascending" : "descending") : "none";
 
   return (
-    <Table>
+    <Table className="min-w-[820px] text-[13px]">
       <TableHeader>
-        <TableRow>
-          <TableHead aria-sort={ariaSort("email")}>Person</TableHead>
-          <TableHead>Reports to</TableHead>
+        <TableRow className="border-(--ob-line) hover:bg-transparent">
+          <TableHead aria-sort={ariaSort("email")} className="text-xs font-bold text-(--ob-muted)">
+            Person
+          </TableHead>
+          <TableHead className="text-xs font-bold text-(--ob-muted)">Status</TableHead>
           {COLUMNS.map((column) => (
-            <TableHead key={column.key} className="text-right" aria-sort={ariaSort(column.key)}>
+            <TableHead
+              key={column.key}
+              className="text-right text-xs font-bold text-(--ob-muted)"
+              aria-sort={ariaSort(column.key)}
+            >
               {headerFor(column)}
             </TableHead>
           ))}
-          <TableHead className="text-right">Status</TableHead>
         </TableRow>
       </TableHeader>
       <TableBody>
-        {rows.map((row) => (
-          <TableRow key={row.email}>
-            <TableCell className="font-medium">
-              <Link
-                href={`/organization/people/${encodeURIComponent(row.email)}`}
-                className="hover:underline"
-              >
-                {row.email}
-              </Link>
-            </TableCell>
-            <TableCell className="text-muted-foreground">{row.managerEmail ?? "—"}</TableCell>
-            {row.metrics ? (
-              <>
-                <TableCell className="text-right tabular-nums">{row.metrics.received}</TableCell>
-                <TableCell className="text-right tabular-nums">{row.metrics.sent}</TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {formatDuration(row.metrics.medianResponseSeconds)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {outOf(row.metrics.threadsAnsweredWithinTarget, row.metrics.threadsRespondable)}
-                </TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {row.metrics.threadsAwaitingReply}
-                </TableCell>
-                {/*
-                  Past target is its own column rather than something to derive
-                  from the two beside it. It is the number a manager came for,
-                  and making them subtract for it is how a table gets ignored.
-                */}
-                <TableCell className="text-right tabular-nums">{row.metrics.threadsOverdue}</TableCell>
-                <TableCell className="text-right tabular-nums">
-                  {formatDuration(row.metrics.oldestWaitingSeconds)}
-                </TableCell>
-              </>
-            ) : (
-              // Spans every metric column. This count must follow COLUMNS, or
-              // the table visibly breaks for exactly the people whose absence
-              // the row exists to show.
-              <TableCell colSpan={COLUMNS.length} className="text-right">
-                <Badge variant="secondary">
-                  {COVERAGE_LABEL[row.coverage as Exclude<Coverage, "COVERED">]}
-                </Badge>
+        {rows.map((row) => {
+          const label = displayName(row.email, row.name);
+          return (
+            <TableRow key={row.email} className="border-(--ob-line) hover:bg-(--ob-canvas)">
+              <TableCell>
+                <Link
+                  href={`/organization/people/${encodeURIComponent(row.email)}`}
+                  className="flex items-center gap-2.5"
+                >
+                  <Avatar email={row.email} label={label} size={34} />
+                  <span className="min-w-0">
+                    <b className="block truncate font-bold hover:underline">{label}</b>
+                    <small className="text-xs text-(--ob-muted)">
+                      Reports to {managerLabel(row.managerEmail)}
+                    </small>
+                  </span>
+                </Link>
               </TableCell>
-            )}
-            <TableCell className="text-right">
-              <Badge variant={STATUS_VARIANT[row.status.status]} title={row.status.reason}>
-                {STATUS_LABEL[row.status.status]}
-              </Badge>
-            </TableCell>
-          </TableRow>
-        ))}
+              <TableCell>
+                <StatusTag status={row.status.status} title={row.status.reason} />
+              </TableCell>
+              {row.metrics ? (
+                <>
+                  <TableCell className="text-right tabular-nums">{row.metrics.received}</TableCell>
+                  <TableCell className="text-right tabular-nums">{row.metrics.sent}</TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatDuration(row.metrics.medianResponseSeconds)}
+                  </TableCell>
+                  <TableCell className="text-right">
+                    <WithinMeter
+                      within={row.metrics.threadsAnsweredWithinTarget}
+                      respondable={row.metrics.threadsRespondable}
+                      color={STATUS_FILL[row.status.status]}
+                      goal={goal}
+                      reason={row.status.reason}
+                    />
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {row.metrics.threadsAwaitingReply}
+                  </TableCell>
+                  {/*
+                    Past target is its own column rather than something to derive
+                    from the two beside it. It is the number a manager came for,
+                    and making them subtract for it is how a table gets ignored.
+                  */}
+                  <TableCell className="text-right tabular-nums">
+                    {row.metrics.threadsOverdue ? (
+                      <span className="font-bold text-(--ob-off-ink)">{row.metrics.threadsOverdue}</span>
+                    ) : (
+                      0
+                    )}
+                  </TableCell>
+                  <TableCell className="text-right tabular-nums">
+                    {formatDuration(row.metrics.oldestWaitingSeconds)}
+                  </TableCell>
+                </>
+              ) : (
+                // Spans every metric column. This count must follow COLUMNS, or
+                // the table visibly breaks for exactly the people whose absence
+                // the row exists to show.
+                <TableCell colSpan={COLUMNS.length} className="text-(--ob-muted)">
+                  {COVERAGE_LABEL[row.coverage as Exclude<Coverage, "COVERED">]}
+                </TableCell>
+              )}
+            </TableRow>
+          );
+        })}
       </TableBody>
     </Table>
+  );
+}
+
+/**
+ * "X/Y" with a bar behind it. The counts are the reading; the bar is a
+ * picture of them, with a tick where the goal sits. Never a percentage.
+ */
+function WithinMeter({
+  within,
+  respondable,
+  color,
+  goal,
+  reason,
+}: {
+  within: number;
+  respondable: number;
+  color: string;
+  goal?: number;
+  reason: string;
+}) {
+  if (respondable === 0) return <span className="text-(--ob-muted)">Nothing to measure</span>;
+  return (
+    <span className="ml-auto flex w-[150px] items-center gap-2" title={reason}>
+      <span className="relative h-2 min-w-[50px] flex-1 overflow-hidden rounded-full bg-(--ob-track)">
+        <span
+          className="absolute inset-y-0 left-0 rounded-full"
+          style={{ width: `${(100 * within) / respondable}%`, background: color }}
+        />
+        {goal != null ? (
+          <i className="absolute inset-y-0 w-0.5 bg-(--ob-ink)" style={{ left: `${goal * 100}%` }} />
+        ) : null}
+      </span>
+      <span className="whitespace-nowrap text-xs font-bold tabular-nums text-(--ob-ink-2)">
+        {within}/{respondable}
+      </span>
+    </span>
   );
 }

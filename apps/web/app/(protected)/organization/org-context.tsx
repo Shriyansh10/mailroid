@@ -9,6 +9,11 @@ export interface ActiveOrg {
   name: string;
   role: OrgRole;
   isOwner: boolean;
+  /**
+   * More than themselves in scope — decided by the server (`mine`), so the nav
+   * and the Overview page always agree on team view vs personal view.
+   */
+  canViewTeam: boolean;
 }
 
 const OrgContext = createContext<ActiveOrg | null>(null);

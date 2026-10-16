@@ -6,10 +6,12 @@
  */
 
 export {
+  audienceFor,
   normalizeOrgEmail,
   resolveSubtree,
   visibleEmailsFor,
   wouldCreateCycle,
+  type AudienceEntry,
   type OrgRole,
   type ReportingEdge,
 } from "./scope-policy.ts";
@@ -42,6 +44,8 @@ export {
 export {
   FIRST_RESPONSE_TARGET_SECONDS,
   MAILROID_DEFAULT_SLA_POLICY,
+  ON_TARGET_AT_OR_ABOVE,
+  SLIPPING_AT_OR_ABOVE,
   PENDING_BACKLOG_THREADS,
   STALE_AFTER_SECONDS,
   adherenceStatus,
@@ -52,6 +56,7 @@ export {
   isStale,
   isWithinTarget,
   trafficClassById,
+  withinTargetNeeded,
   type Adherence,
   type AdherenceStatus,
   type SlaPolicy,
@@ -71,7 +76,13 @@ export {
 
 export { getSlaPolicy } from "./sla.ts";
 
-export { canViewMember, resolveViewerScope, type ViewerScope } from "./scope.ts";
+export {
+  canViewMember,
+  resolveAudience,
+  resolveViewerScope,
+  type Audience,
+  type ViewerScope,
+} from "./scope.ts";
 export {
   computeAggregateMetrics,
   computeMetrics,

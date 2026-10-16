@@ -110,6 +110,83 @@ export function visibleEmailsFor(input: {
   return visible;
 }
 
+export interface AudienceEntry {
+  email: string;
+  /** MANAGER: above the person on the chart. OWNER: administers the org. */
+  relation: "MANAGER" | "OWNER";
+  /** Levels above the person for a MANAGER (1 = their manager); null for an OWNER. */
+  depth: number | null;
+}
+
+/**
+ * Everyone, other than the person, who may read the person's metrics.
+ *
+ * Defined as the exact inverse of `visibleEmailsFor`, and tested as one: for
+ * any two distinct current members v and s, v is in `audienceFor(s)` exactly
+ * when s is in `visibleEmailsFor(v)`. So it walks the same edges the other
+ * way — including through ex-members, since `resolveSubtree` does — and keeps
+ * only current members, under the same depth bound.
+ *
+ * Exists so an employee can be told who sees their numbers without being sent
+ * the org chart to work it out for themselves.
+ */
+export function audienceFor(input: {
+  subjectEmail: string;
+  members: { email: string; role: OrgRole }[];
+  edges: ReportingEdge[];
+}): AudienceEntry[] {
+  const person = normalizeOrgEmail(input.subjectEmail);
+  const roleOf = new Map(input.members.map((m) => [normalizeOrgEmail(m.email), m.role]));
+
+  const managersOf = new Map<string, string[]>();
+  for (const edge of input.edges) {
+    const subordinate = normalizeOrgEmail(edge.subordinateEmail);
+    const manager = normalizeOrgEmail(edge.managerEmail);
+    const existing = managersOf.get(subordinate);
+    if (existing) existing.push(manager);
+    else managersOf.set(subordinate, [manager]);
+  }
+
+  // Breadth-first upward, so each ancestor gets its shortest distance — the
+  // same distance at which the downward walk would find the person.
+  const distance = new Map<string, number>();
+  let frontier = [person];
+  let depth = 0;
+  while (frontier.length > 0 && depth < MAX_DEPTH) {
+    const next: string[] = [];
+    for (const node of frontier) {
+      for (const manager of managersOf.get(node) ?? []) {
+        if (manager === person || distance.has(manager)) continue;
+        distance.set(manager, depth + 1);
+        next.push(manager);
+      }
+    }
+    frontier = next;
+    depth += 1;
+  }
+
+  const out: AudienceEntry[] = [];
+  for (const [email, d] of distance) {
+    const role = roleOf.get(email);
+    // An edge can outlive a membership: an ex-member passes visibility along
+    // the chain but is not in the audience.
+    if (!role) continue;
+    // An owner above the person is described by the closer relationship.
+    out.push({ email, relation: "MANAGER", depth: d });
+  }
+  for (const [email, role] of roleOf) {
+    if (role === "OWNER" && email !== person && !distance.has(email)) {
+      out.push({ email, relation: "OWNER", depth: null });
+    }
+  }
+
+  return out.sort(
+    (a, b) =>
+      (a.depth ?? Number.MAX_SAFE_INTEGER) - (b.depth ?? Number.MAX_SAFE_INTEGER) ||
+      a.email.localeCompare(b.email),
+  );
+}
+
 /**
  * Would adding this edge create a cycle? Checked before the write, because an
  * adjacency list cannot express the constraint and a cycle that reaches the

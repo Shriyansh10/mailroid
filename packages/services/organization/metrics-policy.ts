@@ -54,6 +54,11 @@ export interface MemberCoverage {
   state: CoverageState;
   /** NULL unless the member has a Mailroid account. */
   userId: string | null;
+  /**
+   * The account's display name, for labelling a row the viewer may already
+   * see. NULL without an account — the UI falls back to the email.
+   */
+  name: string | null;
 }
 
 export function isCovered(coverage: MemberCoverage): boolean {

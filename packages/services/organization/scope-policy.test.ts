@@ -18,10 +18,12 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import {
+  audienceFor,
   normalizeOrgEmail,
   resolveSubtree,
   visibleEmailsFor,
   wouldCreateCycle,
+  type OrgRole,
   type ReportingEdge,
 } from "./scope-policy.ts";
 
@@ -144,4 +146,83 @@ test("cycles are refused before they reach the database", () => {
   assert.equal(wouldCreateCycle(TREE, "owner@acme.com", "amit@acme.com"), true);
   // A legitimate move: priya from raj to maya.
   assert.equal(wouldCreateCycle(TREE, "priya@acme.com", "maya@acme.com"), false);
+});
+
+/**
+ * `audienceFor` is the inverse of `visibleEmailsFor`, over distinct members.
+ * `visibleEmailsFor(v)` always contains v; the audience never contains the
+ * subject. So the property is stated for v != s only, and self-exclusion is
+ * asserted separately.
+ */
+function assertInverse(members: { email: string; role: OrgRole }[], edges: ReportingEdge[]) {
+  const emails = members.map((m) => m.email);
+  for (const s of emails) {
+    const audience = new Set(audienceFor({ subjectEmail: s, members, edges }).map((a) => a.email));
+    assert.equal(audience.has(s), false, `${s} is in their own audience`);
+    for (const v of members) {
+      if (v.email === s) continue;
+      const sees = visibleEmailsFor({
+        viewerEmail: v.email,
+        viewerRole: v.role,
+        memberEmails: emails,
+        edges,
+      }).has(s);
+      assert.equal(audience.has(v.email), sees, `${v.email} -> ${s}: audience ${audience.has(v.email)}, scope ${sees}`);
+    }
+  }
+}
+
+const member = (email: string, role: OrgRole = "MEMBER") => ({ email, role });
+
+test("who sees someone is exactly the inverse of whom they see", () => {
+  const members = ALL.map((email) => member(email, email === "owner@acme.com" ? "OWNER" : "MEMBER"));
+  assertInverse(members, TREE);
+});
+
+test("the audience is the chain upward plus owners, nearest first", () => {
+  const members = [
+    ...ALL.filter((e) => e !== "owner@acme.com").map((e) => member(e)),
+    member("owner@acme.com", "OWNER"),
+    member("admin@acme.com", "OWNER"),
+  ];
+  const audience = audienceFor({ subjectEmail: "amit@acme.com", members, edges: TREE });
+  assert.deepEqual(audience, [
+    { email: "maya@acme.com", relation: "MANAGER", depth: 1 },
+    // An owner above the subject is described by the closer relationship.
+    { email: "owner@acme.com", relation: "MANAGER", depth: 2 },
+    { email: "admin@acme.com", relation: "OWNER", depth: null },
+  ]);
+  for (const other of ["neha@acme.com", "raj@acme.com", "priya@acme.com"]) {
+    assert.ok(!audience.some((a) => a.email === other), `${other} should not see amit`);
+  }
+  assertInverse(members, TREE);
+});
+
+test("an ex-member passes visibility along the chain but is not in the audience", () => {
+  // lead@ left; the edges through them remain, as they can in the table.
+  const edges = [edge("amit@acme.com", "lead@acme.com"), edge("lead@acme.com", "maya@acme.com")];
+  const members = [member("amit@acme.com"), member("maya@acme.com")];
+  const audience = audienceFor({ subjectEmail: "amit@acme.com", members, edges });
+  assert.deepEqual(audience.map((a) => a.email), ["maya@acme.com"]);
+  assertInverse(members, edges);
+});
+
+test("a detached member is seen only by owners, and casing never matters", () => {
+  const members = [member("solo@acme.com"), member("maya@acme.com"), member("boss@acme.com", "OWNER")];
+  const edges = [edge("maya@acme.com", "boss@acme.com")];
+  assert.deepEqual(
+    audienceFor({ subjectEmail: "SOLO@acme.com", members, edges }).map((a) => a.email),
+    ["boss@acme.com"],
+  );
+  assertInverse(members, edges);
+});
+
+test("a deep chain and a cycle still give the inverse of scope", () => {
+  const chain = Array.from({ length: 12 }, (_, i) => `p${i}@acme.com`);
+  const edges = chain.slice(1).map((e, i) => edge(e, chain[i]!));
+  edges.push(edge("x@acme.com", "y@acme.com"), edge("y@acme.com", "x@acme.com"));
+  const members = [...chain, "x@acme.com", "y@acme.com"].map((email, i) =>
+    member(email, i === 3 ? "OWNER" : "MEMBER"),
+  );
+  assertInverse(members, edges);
 });

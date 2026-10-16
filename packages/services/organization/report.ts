@@ -4,8 +4,11 @@ import { resolveCoverage, computeMetrics, computeAggregateMetrics } from "./metr
 import { normalizeOrgEmail } from "./scope-policy.ts";
 import { getSlaPolicy } from "./sla.ts";
 import {
+  ON_TARGET_AT_OR_ABOVE,
+  SLIPPING_AT_OR_ABOVE,
   adherenceStatus,
   defaultTrafficClass,
+  withinTargetNeeded,
   type Adherence,
   type SlaPolicy,
 } from "./sla-policy.ts";
@@ -30,6 +33,8 @@ import type { AggregateMetrics, MemberMetrics, MetricWindow } from "./types.ts";
 
 export interface ReportRow {
   email: string;
+  /** Account display name; NULL without an account. Only ever for someone already in scope. */
+  name: string | null;
   managerEmail: string | null;
   coverage: CoverageState;
   /** NULL for anyone not covered — absent data, not zero. */
@@ -39,9 +44,20 @@ export interface ReportRow {
    * behind it. `NOT_COVERED` when there are no numbers at all — a coverage
    * state and an adherence state are different things, combined only here.
    */
-  status: { status: Adherence["status"] | "NOT_COVERED"; reason: string };
+  status: {
+    status: Adherence["status"] | "NOT_COVERED";
+    reason: string;
+    /**
+     * How many more threads answered within target would have reached
+     * ON_TARGET this period. From `withinTargetNeeded`, never recomputed by a
+     * client; null when on target, unmeasured or not covered.
+     */
+    withinTargetNeeded: number | null;
+  };
   /** Everything outside target, each carrying its own evidence. Never summed. */
   exceptions: ExceptionFlag[];
+  /** One line per exception, same order — `recommendationsFor(exceptions)`. */
+  recommendations: Recommendation[];
 }
 
 /** What a response target is, travelling with the numbers it judges. */
@@ -49,6 +65,13 @@ export interface ReportPolicy {
   trafficClass: { id: string; label: string };
   firstResponseTargetSeconds: number;
   staleAfterSeconds: number;
+  /**
+   * The status boundaries, inclusive, as shares of the cohort. Configuration,
+   * not a measurement of anyone — shipped so a screen drawing the goal line
+   * never hardcodes a number the server might change.
+   */
+  onTargetAtOrAbove: number;
+  slippingAtOrAbove: number;
 }
 
 export interface OrganizationReport {
@@ -68,6 +91,8 @@ function describePolicy(policy: SlaPolicy): ReportPolicy {
     trafficClass: { id: klass.id, label: klass.label },
     firstResponseTargetSeconds: klass.target.firstResponseSeconds,
     staleAfterSeconds: klass.target.staleAfterSeconds,
+    onTargetAtOrAbove: ON_TARGET_AT_OR_ABOVE,
+    slippingAtOrAbove: SLIPPING_AT_OR_ABOVE,
   };
 }
 
@@ -84,13 +109,18 @@ function statusFor(
   policy: SlaPolicy,
 ): ReportRow["status"] {
   if (coverage !== "COVERED" || !metrics) {
-    return { status: "NOT_COVERED", reason: "This mailbox is not connected to Mailroid" };
+    return {
+      status: "NOT_COVERED",
+      reason: "This mailbox is not connected to Mailroid",
+      withinTargetNeeded: null,
+    };
   }
-  return adherenceStatus({
+  const counts = {
     threadsRespondable: metrics.threadsRespondable,
     threadsAnsweredWithinTarget: metrics.threadsAnsweredWithinTarget,
     target: defaultTrafficClass(policy).target,
-  });
+  };
+  return { ...adherenceStatus(counts), withinTargetNeeded: withinTargetNeeded(counts) };
 }
 
 export async function buildReport(input: {
@@ -126,13 +156,18 @@ export async function buildReport(input: {
 
   const rows: ReportRow[] = coverage.map((c) => {
     const row = metrics.get(c.email) ?? null;
+    const exceptions = exceptionsFor({ metrics: row, coverage: c.state }, policy);
     return {
       email: c.email,
+      name: c.name,
       managerEmail: managerOf.get(c.email) ?? null,
       coverage: c.state,
       metrics: row,
       status: statusFor(row, c.state, policy),
-      exceptions: exceptionsFor({ metrics: row, coverage: c.state }, policy),
+      exceptions,
+      // Paired here, per row and per period. The drill-down used to borrow the
+      // daily summary's advice, which describes a different window.
+      recommendations: recommendationsFor(exceptions),
     };
   });
 

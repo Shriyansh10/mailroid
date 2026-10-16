@@ -42,8 +42,8 @@ export function OrgShell({ children }: { children: React.ReactNode }) {
   const active = licensed[0] ?? null;
 
   return (
-    <div className="min-h-screen bg-background text-foreground px-6 py-10">
-      <div className="mx-auto flex max-w-4xl flex-col gap-6">
+    <div className="org-bento min-h-screen bg-(--ob-canvas) px-4 py-8 text-(--ob-ink) sm:px-6">
+      <div className="mx-auto flex max-w-7xl flex-col gap-6">
         <Button
           variant="ghost"
           size="sm"
@@ -55,15 +55,22 @@ export function OrgShell({ children }: { children: React.ReactNode }) {
         </Button>
 
         <div className="flex items-center gap-3">
-          <div className="flex size-10 items-center justify-center rounded-lg bg-muted">
+          <div className="flex size-10 items-center justify-center rounded-[13px] bg-linear-to-br from-[#8a73f7] to-[#5235d6] text-white">
             <BuildingIcon className="size-5" />
           </div>
           <div>
-            <h1 className="text-xl font-semibold tracking-tight">
+            <h1 className="text-2xl font-extrabold tracking-tight">
               {active?.name ?? "Organization"}
             </h1>
-            <p className="text-sm text-muted-foreground">
-              Communication metrics for your team. Never anyone&apos;s mail.
+            <p className="flex flex-wrap items-center gap-2 text-sm text-(--ob-ink-2)">
+              {active ? (
+                <span className="rounded-full bg-(--ob-accent-soft) px-2.5 py-0.5 text-xs font-bold text-(--ob-accent-ink)">
+                  {active.role === "OWNER" ? "Owner" : active.canViewTeam ? "Manager" : "Member"}
+                </span>
+              ) : null}
+              {active?.canViewTeam
+                ? "Communication metrics for your team. Never anyone's mail."
+                : "Your own communication metrics. Never anyone's mail."}
             </p>
           </div>
         </div>
@@ -147,6 +154,7 @@ export function OrgShell({ children }: { children: React.ReactNode }) {
               name: active.name,
               role: active.role,
               isOwner: active.role === "OWNER",
+              canViewTeam: active.canViewTeam,
             }}
           >
             <OrgNav />

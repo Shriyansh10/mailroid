@@ -25,6 +25,7 @@ import {
   isStale,
   isWithinTarget,
   trafficClassById,
+  withinTargetNeeded,
   type SlaPolicy,
   type SlaTarget,
 } from "./sla-policy.ts";
@@ -147,5 +148,50 @@ test("this module exports no score, rating, rank or grade", () => {
   // exactly what this feature reports.
   for (const name of Object.keys(slaPolicy)) {
     assert.doesNotMatch(name, /score|rating|rank|grade/i, `${name} is a ranking concept`);
+  }
+});
+
+test("the goal gap agrees with the badge exactly at the boundary", () => {
+  const gap = (within: number, respondable: number) =>
+    withinTargetNeeded({ threadsRespondable: respondable, threadsAnsweredWithinTarget: within, target });
+
+  // 0.9 * 70 is 63.00000000000001 in floating point, so ceil() says 64. The
+  // badge says 63 of 70 is on target; the gap must say the same.
+  assert.equal(
+    adherenceStatus({ threadsRespondable: 70, threadsAnsweredWithinTarget: 63, target }).status,
+    "ON_TARGET",
+  );
+  assert.equal(gap(63, 70), null);
+  assert.equal(gap(62, 70), 1);
+  assert.equal(gap(9, 10), null);
+  assert.equal(gap(8, 10), 1);
+  assert.equal(gap(74, 100), 16);
+  // Crossing the SLIPPING boundary does not move the ON_TARGET gap.
+  assert.equal(gap(75, 100), 15);
+  assert.equal(gap(0, 3), 3);
+});
+
+test("no gap is reported for an empty cohort or one already on target", () => {
+  assert.equal(withinTargetNeeded({ threadsRespondable: 0, threadsAnsweredWithinTarget: 0, target }), null);
+  assert.equal(withinTargetNeeded({ threadsRespondable: 12, threadsAnsweredWithinTarget: 12, target }), null);
+});
+
+test("the goal gap is minimal, and bounded by the threads not answered within target", () => {
+  for (let respondable = 1; respondable <= 300; respondable++) {
+    for (let within = 0; within <= respondable; within++) {
+      const n = withinTargetNeeded({ threadsRespondable: respondable, threadsAnsweredWithinTarget: within, target });
+      const statusAt = (w: number) =>
+        adherenceStatus({ threadsRespondable: respondable, threadsAnsweredWithinTarget: w, target }).status;
+      if (n === null) {
+        assert.equal(statusAt(within), "ON_TARGET", `${within}/${respondable} has no gap but is not on target`);
+        continue;
+      }
+      assert.ok(n >= 1);
+      // Late answers can never become within-target, so the bound is
+      // respondable - within, not the count of threads still unanswered.
+      assert.ok(n <= respondable - within, `${within}/${respondable}: gap ${n} exceeds what is possible`);
+      assert.equal(statusAt(within + n), "ON_TARGET", `${within}/${respondable} + ${n}`);
+      assert.notEqual(statusAt(within + n - 1), "ON_TARGET", `${within}/${respondable}: ${n} is not minimal`);
+    }
   }
 });

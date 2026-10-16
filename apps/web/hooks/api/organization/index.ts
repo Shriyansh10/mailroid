@@ -54,6 +54,13 @@ export const useMyOrgDailySummary = (organizationId: string | null) =>
     { enabled: Boolean(organizationId) },
   );
 
+/** Who can read the caller's own numbers — their chain upward and the owners. */
+export const useMyOrgAudience = (organizationId: string | null) =>
+  trpc.organization.myAudience.useQuery(
+    { organizationId: organizationId ?? "" },
+    { enabled: Boolean(organizationId) },
+  );
+
 /**
  * Every mutation invalidates every read: changing the chart changes who appears
  * in the report, the trend and the daily card, and a stale table after an edit
@@ -73,6 +80,7 @@ function useOrgInvalidation() {
     void utils.organization.myReport.invalidate();
     void utils.organization.myTrend.invalidate();
     void utils.organization.myDailySummary.invalidate();
+    void utils.organization.myAudience.invalidate();
     void utils.organization.mine.invalidate();
   };
 }

@@ -183,3 +183,38 @@ test("the nested counts can never contradict each other on screen", () => {
   assert.ok(metrics.threadsAnsweredWithinTarget <= metrics.threadsAnswered);
   assert.ok(metrics.threadsAnswered <= metrics.threadsRespondable);
 });
+
+test("each recommendation belongs to its own exception, with that exception's number", () => {
+  // Every performance kind at once: late, unanswered, overdue, stale, backlog.
+  const metrics = row({
+    threadsRespondable: 30,
+    threadsAnswered: 24,
+    threadsAnsweredWithinTarget: 17,
+    threadsAwaitingReply: 13,
+    threadsOverdue: 5,
+    threadsStale: 3,
+    oldestWaitingSeconds: 4 * 24 * 60 * 60,
+  });
+  const flags = exceptionsFor({ metrics, coverage: "COVERED" }, policy);
+  assert.deepEqual(
+    flags.map((f) => f.kind).sort(),
+    ["ANSWERED_LATE", "OVERDUE_WAITING", "PENDING_BACKLOG", "STALE_WAITING", "UNANSWERED"],
+  );
+  // Each kind at most once, so pairing by position is unambiguous.
+  assert.equal(new Set(flags.map((f) => f.kind)).size, flags.length);
+
+  const advice = recommendationsFor(flags);
+  assert.equal(advice.length, flags.length);
+  for (const [index, flag] of flags.entries()) {
+    const line = advice[index]!;
+    assert.equal(line.forKind, flag.kind);
+    assert.ok(line.text.includes(String(flag.observed)), `${flag.kind}: "${line.text}" lacks ${flag.observed}`);
+  }
+});
+
+test("an unconnected mailbox gets exactly one paired line", () => {
+  const flags = exceptionsFor({ metrics: null, coverage: "NO_GMAIL" }, policy);
+  const advice = recommendationsFor(flags);
+  assert.deepEqual(flags.map((f) => f.kind), ["NOT_COVERED"]);
+  assert.deepEqual(advice.map((a) => a.forKind), ["NOT_COVERED"]);
+});

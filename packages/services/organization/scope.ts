@@ -1,9 +1,12 @@
-import { db, eq, and, isNull } from "@repo/database";
+import { db, eq, and, isNull, inArray } from "@repo/database";
 import { orgMembership, orgReportingEdge } from "@repo/database/models/organization";
+import { user } from "@repo/database/models/auth";
 
 import {
+  audienceFor,
   normalizeOrgEmail,
   visibleEmailsFor,
+  type AudienceEntry,
   type OrgRole,
   type ReportingEdge,
 } from "./scope-policy.ts";
@@ -36,7 +39,27 @@ export async function resolveViewerScope(
   viewerEmail: string,
 ): Promise<ViewerScope | null> {
   const email = normalizeOrgEmail(viewerEmail);
+  const { memberships, edges } = await loadChart(organizationId);
 
+  const viewer = memberships.find((m) => m.email === email);
+  if (!viewer) return null;
+
+  const visible = visibleEmailsFor({
+    viewerEmail: email,
+    viewerRole: viewer.role as OrgRole,
+    memberEmails: memberships.map((m) => m.email),
+    edges: edges as ReportingEdge[],
+  });
+
+  return {
+    viewerEmail: email,
+    role: viewer.role as OrgRole,
+    visibleEmails: [...visible],
+  };
+}
+
+/** One organization's current memberships and current edges, in one round trip. */
+async function loadChart(organizationId: string) {
   const [memberships, edges] = await Promise.all([
     db
       .select({ email: orgMembership.email, role: orgMembership.role })
@@ -60,22 +83,44 @@ export async function resolveViewerScope(
         ),
       ),
   ]);
+  return { memberships, edges };
+}
 
-  const viewer = memberships.find((m) => m.email === email);
-  if (!viewer) return null;
+export interface Audience extends AudienceEntry {
+  /** Account display name; NULL when the person has no Mailroid account. */
+  name: string | null;
+}
 
-  const visible = visibleEmailsFor({
-    viewerEmail: email,
-    viewerRole: viewer.role as OrgRole,
-    memberEmails: memberships.map((m) => m.email),
+/**
+ * Who can read this member's numbers — their chain upward plus the owners.
+ *
+ * Only ever called for the caller themselves (`organization.myAudience` takes
+ * no email), so it tells someone about the people who can see them and nothing
+ * about anyone else's position on the chart. Null when the person is not a
+ * current member, for the same reason `resolveViewerScope` returns null.
+ */
+export async function resolveAudience(
+  organizationId: string,
+  subjectEmail: string,
+): Promise<Audience[] | null> {
+  const person = normalizeOrgEmail(subjectEmail);
+  const { memberships, edges } = await loadChart(organizationId);
+  if (!memberships.some((m) => m.email === person)) return null;
+
+  const entries = audienceFor({
+    subjectEmail: person,
+    members: memberships.map((m) => ({ email: m.email, role: m.role as OrgRole })),
     edges: edges as ReportingEdge[],
   });
+  if (entries.length === 0) return [];
 
-  return {
-    viewerEmail: email,
-    role: viewer.role as OrgRole,
-    visibleEmails: [...visible],
-  };
+  const accounts = await db
+    .select({ email: user.email, name: user.name })
+    .from(user)
+    .where(inArray(user.email, entries.map((e) => e.email)));
+  const nameOf = new Map(accounts.map((a) => [a.email.toLowerCase(), a.name || null]));
+
+  return entries.map((e) => ({ ...e, name: nameOf.get(e.email) ?? null }));
 }
 
 /**

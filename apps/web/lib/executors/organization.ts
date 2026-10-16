@@ -115,6 +115,8 @@ export class OrganizationMetricsExecutor {
       },
       people: report.rows.map((row) => ({
         email: row.email,
+        // Only ever someone already in scope — the rows are the scope.
+        name: row.name ?? undefined,
         connected: row.coverage === "COVERED",
         status: row.status.status,
         statusReason: row.status.reason,
@@ -132,9 +134,12 @@ export class OrganizationMetricsExecutor {
               oldestWaitSeconds: row.metrics.oldestWaitingSeconds,
             }
           : {}),
-        exceptions: row.exceptions.map((flag) => ({
+        // Paired by index, which `recommendationsFor` guarantees — so the
+        // assistant can say what to do about each one, not only what is wrong.
+        exceptions: row.exceptions.map((flag, i) => ({
           severity: flag.severity,
           reason: flag.reason,
+          nextStep: row.recommendations[i]?.text,
         })),
       })),
     };

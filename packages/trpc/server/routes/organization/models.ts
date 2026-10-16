@@ -56,6 +56,13 @@ export const myOrganizationsOutputModel = z.array(
     name: z.string(),
     role: orgRoleModel,
     licensed: z.boolean(),
+    /**
+     * Whether this person's reporting scope holds anyone besides themselves —
+     * the one switch between the team dashboard and the personal one. Decided
+     * here, from the same scope every report uses, so the nav and the page can
+     * never disagree about which one somebody gets.
+     */
+    canViewTeam: z.boolean(),
   }),
 );
 
@@ -113,6 +120,13 @@ export const slaPolicyModel = z.object({
   trafficClass: z.object({ id: z.string(), label: z.string() }),
   firstResponseTargetSeconds: z.number(),
   staleAfterSeconds: z.number(),
+  /**
+   * The status boundaries, inclusive. Configuration constants, not a ratio
+   * about anyone — the "no ratio on the wire" rule is about measurements of
+   * people, and these measure nobody.
+   */
+  onTargetAtOrAbove: z.number(),
+  slippingAtOrAbove: z.number(),
 });
 
 export const adherenceStatusModel = z.enum([
@@ -129,6 +143,13 @@ export const adherenceStatusModel = z.enum([
 export const statusModel = z.object({
   status: adherenceStatusModel,
   reason: z.string(),
+  /**
+   * More threads answered within target that would have reached ON_TARGET this
+   * period — a count, from the same comparison as `status`. Retrospective:
+   * late answers cannot be re-answered, so this is never "threads to go and
+   * answer". Null when on target, unmeasured or not covered. Not sortable.
+   */
+  withinTargetNeeded: z.number().nullable(),
 });
 
 export const exceptionFlagModel = z.object({
@@ -174,6 +195,8 @@ export const reportOutputModel = z.object({
   rows: z.array(
     z.object({
       email: z.string(),
+      /** Display name — only ever for someone already in the viewer's scope. */
+      name: z.string().nullable(),
       managerEmail: z.string().nullable(),
       coverage: coverageStateModel,
       metrics: memberMetricsModel.nullable(),
@@ -183,6 +206,8 @@ export const reportOutputModel = z.object({
        * list; never counted into a total, which would be a ranking.
        */
       exceptions: z.array(exceptionFlagModel),
+      /** One per exception, same order and period. */
+      recommendations: z.array(recommendationModel),
     }),
   ),
   policy: slaPolicyModel,
@@ -280,3 +305,17 @@ export const dailySummaryOutputModel = z.object({
   recommendations: z.array(recommendationModel),
   policy: slaPolicyModel,
 });
+
+export const myAudienceInputModel = z.object({
+  organizationId: z.string().uuid(),
+});
+
+/** Who can read the caller's own numbers. Never anyone else's. */
+export const myAudienceOutputModel = z.array(
+  z.object({
+    email: z.string(),
+    name: z.string().nullable(),
+    relation: z.enum(["MANAGER", "OWNER"]),
+    depth: z.number().nullable(),
+  }),
+);

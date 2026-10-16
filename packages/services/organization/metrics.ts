@@ -59,11 +59,12 @@ export async function resolveCoverage(emails: string[]): Promise<MemberCoverage[
   if (normalized.length === 0) return [];
 
   const accounts = await db
-    .select({ id: user.id, email: user.email })
+    .select({ id: user.id, email: user.email, name: user.name })
     .from(user)
     .where(inArray(user.email, normalized));
 
   const userIdByEmail = new Map(accounts.map((a) => [a.email.toLowerCase(), a.id]));
+  const nameByEmail = new Map(accounts.map((a) => [a.email.toLowerCase(), a.name || null]));
   const userIds = accounts.map((a) => a.id);
 
   const [connections, brokenRows, connectedEmailRows] = await Promise.all([
@@ -102,9 +103,10 @@ export async function resolveCoverage(emails: string[]): Promise<MemberCoverage[
 
   return normalized.map((email) => {
     const userId = userIdByEmail.get(email) ?? null;
-    if (!userId) return { email, userId: null, state: "NO_ACCOUNT" as const };
-    if (broken.has(userId)) return { email, userId, state: "GMAIL_ERROR" as const };
-    if (!gmailByUserId.get(userId)) return { email, userId, state: "NO_GMAIL" as const };
+    const name = nameByEmail.get(email) ?? null;
+    if (!userId) return { email, name, userId: null, state: "NO_ACCOUNT" as const };
+    if (broken.has(userId)) return { email, name, userId, state: "GMAIL_ERROR" as const };
+    if (!gmailByUserId.get(userId)) return { email, name, userId, state: "NO_GMAIL" as const };
     // The account has *a* Gmail mailbox connected, but org membership is
     // keyed on the person's work identity — confirm it's the SAME mailbox,
     // not merely that some mailbox exists. Without this, someone whose
@@ -113,9 +115,9 @@ export async function resolveCoverage(emails: string[]): Promise<MemberCoverage[
     // reported under their work identity.
     const connectedGmail = connectedGmailByUserId.get(userId);
     if (!connectedGmail || normalizeOrgEmail(connectedGmail) !== email) {
-      return { email, userId, state: "MAILBOX_MISMATCH" as const };
+      return { email, name, userId, state: "MAILBOX_MISMATCH" as const };
     }
-    return { email, userId, state: "COVERED" as const };
+    return { email, name, userId, state: "COVERED" as const };
   });
 }
 

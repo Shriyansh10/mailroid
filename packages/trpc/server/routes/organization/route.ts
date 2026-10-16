@@ -17,6 +17,7 @@ import {
   listMembers,
   organizationsForEmail,
   removeMember,
+  resolveAudience,
   resolveViewerScope,
   setManager,
   windowForDays,
@@ -33,6 +34,8 @@ import {
   dailySummaryInputModel,
   dailySummaryOutputModel,
   memberOutputModel,
+  myAudienceInputModel,
+  myAudienceOutputModel,
   myDailySummaryInputModel,
   myOrganizationsOutputModel,
   myReportInputModel,
@@ -166,17 +169,32 @@ export const organizationRouter = router({
     .query(async ({ ctx }) => {
       const orgs = await organizationsForEmail(ctx.user!.email);
       return Promise.all(
-        orgs.map(async (o) => ({
-          ...o,
-          licensed: await isOrganizationLicensed(o.organizationId),
-        })),
+        orgs.map(async (o) => {
+          const [licensed, scope] = await Promise.all([
+            isOrganizationLicensed(o.organizationId),
+            resolveViewerScope(o.organizationId, ctx.user!.email),
+          ]);
+          // Same condition as the team aggregates' `excludeViewer`: more than
+          // just themselves in scope. An owner sees everyone, so an owner with
+          // no direct reports still gets the team view once anyone else joins.
+          return { ...o, licensed, canViewTeam: (scope?.visibleEmails.length ?? 0) > 1 };
+        }),
       );
     }),
 
+  /**
+   * The whole chart — every member, role and reporting line. Owners only: it
+   * backs the Manage screen, and a member's scope to read their own numbers is
+   * not a licence to read everyone's position in the organization. Report rows
+   * carry the names a non-owner may see; `myAudience` answers who sees them.
+   */
   members: orgProcedure
     .input(organizationIdInputModel)
     .output(z.array(memberOutputModel))
-    .query(async ({ ctx }) => listMembers(ctx.organizationId)),
+    .query(async ({ ctx }) => {
+      requireOwner(ctx.orgRole);
+      return listMembers(ctx.organizationId);
+    }),
 
   addMember: orgProcedure
     .input(addMemberInputModel)
@@ -393,6 +411,20 @@ export const organizationRouter = router({
       });
       if (!summary) throw new TRPCError({ code: "NOT_FOUND" });
       return summary;
+    }),
+
+  /**
+   * Who can read the caller's numbers: their chain upward and the owners.
+   * Takes no email — "me" is the session — so it can't be pointed at someone
+   * else to learn where they sit on the chart.
+   */
+  myAudience: orgProcedure
+    .input(myAudienceInputModel)
+    .output(myAudienceOutputModel)
+    .query(async ({ ctx }) => {
+      const audience = await resolveAudience(ctx.organizationId, ctx.user!.email);
+      if (!audience) throw new TRPCError({ code: "NOT_FOUND" });
+      return audience;
     }),
 
   /** The employee's own. Resolves "me" from the session, like `myReport`. */

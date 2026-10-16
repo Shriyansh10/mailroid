@@ -246,3 +246,87 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ═══════════════════════════════════════════════════════════════════════
+   ORGANIZATION REPORTING — the bento dashboard under /organization.
+
+   Scoped to `.org-bento` so nothing here leaks into the app's neutral
+   tokens. Unlike the marketing block above, this one follows the theme:
+   every colour is redefined under `.dark`, because the dashboard lives
+   inside the app and must read in both.
+
+   Status hues match the design file (design/organization-reporting) and are
+   never the only signal — every status also renders as a labelled tag.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.org-bento {
+  --ob-canvas: #f3f3f6;
+  --ob-surface: #ffffff;
+  --ob-ink: #17152b;
+  --ob-ink-2: #5d5a74;
+  --ob-muted: #8a87a0;
+  --ob-line: #ececf2;
+  --ob-track: #f1f0f6;
+  --ob-accent: #6c4cf5;
+  --ob-accent-soft: #ede8ff;
+  --ob-accent-ink: #3d2aa6;
+
+  --ob-received: #6c4cf5;
+  --ob-sent: #ff7a59;
+  --ob-on: #1f7fd1;
+  --ob-slip: #e8a600;
+  --ob-off: #e5486b;
+  --ob-nd: #c9c7d6;
+  --ob-q1: #8a73f7;
+  --ob-q2: #e8a600;
+  --ob-q3: #e5486b;
+
+  --ob-on-bg: #e5f0fb;   --ob-on-ink: #14599a;
+  --ob-slip-bg: #fdf3d6; --ob-slip-ink: #855f00;
+  --ob-off-bg: #fde8ee;  --ob-off-ink: #a82346;
+  --ob-nd-bg: #f1f0f6;   --ob-nd-ink: #6f6c85;
+  --ob-good-bg: #e6f6ee; --ob-good-ink: #11724a;
+
+  --ob-hero-from: #241b55;
+  --ob-hero-mid: #3a2a8f;
+  --ob-hero-to: #6c4cf5;
+  --ob-day-from: #fff6f2;
+  --ob-day-to: #f4efff;
+  --ob-shadow: 0 1px 2px rgb(23 21 43 / 0.04);
+}
+
+.dark .org-bento {
+  --ob-canvas: #0f0e17;
+  --ob-surface: #191726;
+  --ob-ink: #ecebf5;
+  --ob-ink-2: #b4b1c8;
+  --ob-muted: #8784a0;
+  --ob-line: #2a2740;
+  --ob-track: #24213a;
+  --ob-accent: #9d87ff;
+  --ob-accent-soft: #2a2350;
+  --ob-accent-ink: #cfc3ff;
+
+  --ob-received: #9d87ff;
+  --ob-sent: #ff936f;
+  --ob-on: #5aa9ec;
+  --ob-slip: #f0bb2f;
+  --ob-off: #f26d8b;
+  --ob-nd: #4a4763;
+  --ob-q1: #9d87ff;
+  --ob-q2: #f0bb2f;
+  --ob-q3: #f26d8b;
+
+  --ob-on-bg: #15304a;   --ob-on-ink: #9fd0ff;
+  --ob-slip-bg: #3a2f0c; --ob-slip-ink: #ffd36b;
+  --ob-off-bg: #44182a;  --ob-off-ink: #ffb3c4;
+  --ob-nd-bg: #262338;   --ob-nd-ink: #b4b1c8;
+  --ob-good-bg: #12352a; --ob-good-ink: #8be0b8;
+
+  --ob-hero-from: #1a1440;
+  --ob-hero-mid: #2b2070;
+  --ob-hero-to: #5539d6;
+  --ob-day-from: #241a26;
+  --ob-day-to: #1d1938;
+  --ob-shadow: 0 1px 2px rgb(0 0 0 / 0.3);
+}

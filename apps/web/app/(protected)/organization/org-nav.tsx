@@ -6,24 +6,33 @@ import { usePathname } from "next/navigation";
 import { cn } from "@web/lib/utils";
 import { useOrg } from "./org-context";
 
-const TABS = [
-  { href: "/organization", label: "Overview" },
-  { href: "/organization/people", label: "People" },
-] as const;
-
 /**
- * Overview / People / Manage. Manage only appears for an OWNER — this is
- * the discoverability fix: a manager should meet every screen the moment
- * they land, not scroll past everything stacked on one page.
+ * Overview / People / My numbers / Manage — the discoverability fix: a manager
+ * should meet every screen the moment they land, not scroll past everything
+ * stacked on one page.
+ *
+ * Two separate capabilities decide it. `canViewTeam` (from the server, the same
+ * flag the Overview page renders by) adds People and My numbers; for someone
+ * with nobody in scope, Overview already *is* their numbers. `isOwner` adds
+ * Manage, because administering is not the same thing as having reports.
  */
 export function OrgNav() {
   const org = useOrg();
   const pathname = usePathname();
 
-  const tabs = org.isOwner ? [...TABS, { href: "/organization/manage", label: "Manage" }] : TABS;
+  const tabs = [
+    { href: "/organization", label: "Overview" },
+    ...(org.canViewTeam
+      ? [
+          { href: "/organization/people", label: "People" },
+          { href: "/organization/me", label: "My numbers" },
+        ]
+      : []),
+    ...(org.isOwner ? [{ href: "/organization/manage", label: "Manage" }] : []),
+  ];
 
   return (
-    <nav className="flex gap-1 border-b">
+    <nav className="flex gap-1 overflow-x-auto border-b border-(--ob-line)">
       {tabs.map((tab) => {
         // People's drill-down route (/organization/people/[email]) should
         // still highlight the People tab.
@@ -36,10 +45,10 @@ export function OrgNav() {
             key={tab.href}
             href={tab.href}
             className={cn(
-              "px-3 py-2 text-sm font-medium border-b-2 -mb-px transition-colors",
+              "-mb-px whitespace-nowrap border-b-2 px-3 py-2 text-sm font-semibold transition-colors",
               active
-                ? "border-foreground text-foreground"
-                : "border-transparent text-muted-foreground hover:text-foreground",
+                ? "border-(--ob-accent) text-(--ob-ink)"
+                : "border-transparent text-(--ob-muted) hover:text-(--ob-ink)",
             )}
           >
             {tab.label}

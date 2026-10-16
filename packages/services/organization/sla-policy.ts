@@ -229,6 +229,39 @@ export function adherenceStatus(input: {
   return { status: "OFF_TARGET", reason };
 }
 
+/**
+ * How many more threads answered within target would have made this cohort
+ * ON_TARGET — the smallest such count, or null when there is no gap (already
+ * on target) or nothing to measure (NO_DATA).
+ *
+ * Found by asking `adherenceStatus` itself rather than by arithmetic.
+ * `Math.ceil(0.9 * 70)` is 64, not 63, because `0.9 * 70` is
+ * 63.00000000000001 — a formula would disagree with the badge beside it at
+ * exactly the boundary people look at. Reusing the comparison makes the two
+ * agree by construction.
+ *
+ * Retrospective, and bounded by `respondable - within`: a thread answered late
+ * can never become "within target", so this is not a count of threads anyone
+ * can still go and answer, and the UI must not phrase it as one.
+ */
+export function withinTargetNeeded(input: {
+  threadsRespondable: number;
+  threadsAnsweredWithinTarget: number;
+  target: SlaTarget;
+}): number | null {
+  const { threadsRespondable, threadsAnsweredWithinTarget, target } = input;
+  if (threadsRespondable === 0) return null;
+  for (let n = 0; threadsAnsweredWithinTarget + n <= threadsRespondable; n++) {
+    const status = adherenceStatus({
+      threadsRespondable,
+      threadsAnsweredWithinTarget: threadsAnsweredWithinTarget + n,
+      target,
+    }).status;
+    if (status === "ON_TARGET") return n === 0 ? null : n;
+  }
+  return null;
+}
+
 /** "4h", "30m", "1h 30m" — for reason strings, which are read by people. */
 export function formatTargetHours(seconds: number): string {
   const hours = Math.floor(seconds / 3600);

@@ -578,7 +578,9 @@ export class ToolRegistry {
         "— because the organization reporting layer cannot read them. " +
         "Omit subjectEmail for the user's own scope; supply it only for a named " +
         "colleague. There is no performance score and no ranking of people: " +
-        "report the numbers and let the user interpret them.",
+        "report the numbers and let the user interpret them. Each exception " +
+        "carries a nextStep — when you mention what needs attention, say the " +
+        "next step with it, without being asked.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
