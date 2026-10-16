@@ -57,6 +57,17 @@ ENV EMBEDDINGS_API_KEY="build-time-placeholder"
 ENV CORSAIR_KEK="AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA="
 ENV CORSAIR_DEV_KEY="build-time-placeholder"
 ENV CORSAIR_INSTANCE_ID="build-time-placeholder"
+# @repo/services/env.ts parses MAILROID_ENV at import time with no default (on
+# purpose — see that file). The assistant's tool executors reach it through
+# the organization metrics executor, and /api/approvals/* imports those
+# executors, so page-data collection needs a valid value. "local" is inert at
+# build time and never reaches the runner stage, which is a fresh FROM; the
+# real value comes from ~/mailroid/.env at `docker run`.
+ENV MAILROID_ENV="local"
+# The same module then requires exactly one of ALLOWLIST / DENYLIST to be
+# *present*. An empty allowlist is the most inert choice: this environment
+# owns no mailboxes. Build-time only, like the rest of this block.
+ENV MAILROID_MAILBOX_ALLOWLIST=""
 
 # builds packages/* first (turbo's ^build dependency graph), then web
 RUN pnpm turbo build --filter=web
