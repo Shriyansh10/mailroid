@@ -12,7 +12,7 @@ import {
   Dialog, DialogContent, DialogDescription, DialogHeader,
   DialogTitle, DialogTrigger,
 } from "@web/components/ui/dialog";
-import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon, CalendarClockIcon, TerminalIcon } from "lucide-react";
+import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon, CalendarClockIcon, TerminalIcon, BuildingIcon } from "lucide-react";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 
 import { Input } from "@web/components/ui/input";
@@ -30,6 +30,7 @@ import {
   useInboxSync,
 } from "@web/hooks/api/gmail";
 import { useCalendarSync } from "@web/hooks/api/calendar";
+import { useMyOrganizations } from "@web/hooks/api/organization";
 import { frontendLogger } from "@web/lib/frontend-logger";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
 
@@ -129,6 +130,18 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     !classifyControls.hasClassified &&
     classificationJob?.status !== "running";
   const showPriorityNudge = needsClassify && category !== "PRIORITY";
+
+  // The Organization entry appears only for someone whose company holds a
+  // licence. Absence of an entry is not the paywall — every organization
+  // procedure re-checks licence and membership server-side.
+  const { data: myOrganizations } = useMyOrganizations();
+  const hasLicensedOrg = (myOrganizations ?? []).some((o) => o.licensed);
+  // Platform staff need the entry even with no membership: provisioning the
+  // first organization lives behind this link, so gating purely on membership
+  // makes the screen that creates organizations reachable only by typing the
+  // URL. The server still enforces everything — this is the door, not the lock.
+  const canSeeOrganization =
+    hasLicensedOrg || session?.user?.platformRole === "DEVELOPER";
 
   const initials = useMemo(() => {
     const name = session?.user?.name;
@@ -358,6 +371,19 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
             <CalendarDaysIcon className="size-4" />
             <span className="flex-1 text-left">Calendar</span>
           </button>
+
+          {/* Only for someone whose company holds a licence. Hiding it is a
+              convenience, not the boundary — every organization procedure
+              re-checks licence and membership server-side. */}
+          {canSeeOrganization && (
+            <button
+              onClick={() => router.push("/organization")}
+              className="w-full flex items-center gap-3 px-3 py-2 rounded-lg text-sm font-medium text-muted-foreground hover:bg-accent/50 hover:text-foreground transition-colors"
+            >
+              <BuildingIcon className="size-4" />
+              <span className="flex-1 text-left">Organization</span>
+            </button>
+          )}
 
           <button
             onClick={() => { if (aiReady) router.push("/assistant"); }}

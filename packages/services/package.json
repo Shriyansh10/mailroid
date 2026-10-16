@@ -10,6 +10,10 @@
     "./usage-limits.js": "./usage-limits.ts",
     "./entitlements": "./entitlements.ts",
     "./entitlements.js": "./entitlements.ts",
+    "./entitlement-policy": "./entitlement-policy.ts",
+    "./entitlement-policy.js": "./entitlement-policy.ts",
+    "./organization/index": "./organization/index.ts",
+    "./organization/index.js": "./organization/index.ts",
     "./gmail/index": "./gmail/index.ts",
     "./gmail/index.js": "./gmail/index.ts",
     "./gmail/quota-limiter": "./gmail/quota-limiter.ts",
@@ -146,6 +150,6 @@
     "zod": "^4.3.5"
   },
   "scripts": {
-    "test": "node --import tsx --test *.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts"
+    "test": "node --import tsx --test *.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts organization/*.test.ts"
   }
 }
