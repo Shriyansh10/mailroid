@@ -68,6 +68,10 @@ ENV MAILROID_ENV="local"
 # *present*. An empty allowlist is the most inert choice: this environment
 # owns no mailboxes. Build-time only, like the rest of this block.
 ENV MAILROID_MAILBOX_ALLOWLIST=""
+# @repo/services/gmail/watch.ts throws at import when this is unset, rather
+# than fall back to a default topic. Same path into the build, same answer:
+# a placeholder that only has to exist.
+ENV GMAIL_PUBSUB_TOPIC="build-time-placeholder"
 
 # builds packages/* first (turbo's ^build dependency graph), then web
 RUN pnpm turbo build --filter=web
