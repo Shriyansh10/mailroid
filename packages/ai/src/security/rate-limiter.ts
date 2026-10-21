@@ -12,6 +12,18 @@ const LIMITS: Record<string, RateLimitConfig> = {
   createEvent: { maxAttempts: 50, windowMs: DEFAULT_WINDOW_MS },
   searchEmails: { maxAttempts: 200, windowMs: DEFAULT_WINDOW_MS },
   getEvents: { maxAttempts: 200, windowMs: DEFAULT_WINDOW_MS },
+  // Not an AI tool — the attachment route calls this directly. It belongs here
+  // anyway, because Gmail's messages.attachments.get costs 20 quota units
+  // against the PROJECT rather than the user, so one account downloading
+  // without bound degrades Gmail for everyone. As much a fairness control as an
+  // abuse one.
+  //
+  // 240 rather than a per-click 60, because the thread view renders image
+  // thumbnails: opening one mail with several small images spends several of
+  // these at once, so a budget sized for deliberate clicks would rate-limit
+  // ordinary reading. The thumbnail ceiling in attachment-list.tsx (images
+  // under 512 KB only, lazily loaded) is what keeps that bounded.
+  fetchAttachment: { maxAttempts: 240, windowMs: DEFAULT_WINDOW_MS },
 };
 
 const DEFAULT_LIMIT: RateLimitConfig = { maxAttempts: 100, windowMs: DEFAULT_WINDOW_MS };

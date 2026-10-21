@@ -119,6 +119,9 @@ export const GMAIL_TRIGGERS = [
   "send",
   "calendar",
   "oauth-callback",
+  // Attachment-manifest backfill: metadata-only structure reads for list tiles
+  // on mail nobody has opened. Background priority; never downloads bytes.
+  "manifest-backfill",
   "unknown",
 ] as const;
 

@@ -27,6 +27,7 @@ import {
   useReplyToEmail,
   useForwardEmail,
   useSaveDraft,
+  useDraftSaved,
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
@@ -46,6 +47,12 @@ import {
   type RecipientValues,
 } from "@web/components/inbox/recipient-fields";
 import { parseAddressList } from "@web/lib/email-addresses";
+import {
+  AttachmentPicker,
+  getAttachmentVerdict,
+  type ExistingAttachment,
+} from "@web/components/inbox/attachment-picker";
+import { sendWithAttachments } from "@web/lib/send-with-attachments";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -99,6 +106,8 @@ export interface InlineReplyBoxProps {
   initialCc?: string;
   initialBcc?: string;
   initialBody?: string;
+  /** Already attached to the draft being resumed. Absent for a fresh reply. */
+  initialAttachments?: ExistingAttachment[];
   onClose: () => void;
   onSent: () => void;
 }
@@ -174,12 +183,14 @@ export function InlineReplyBox({
   initialCc,
   initialBcc,
   initialBody,
+  initialAttachments,
   onClose,
   onSent,
 }: InlineReplyBoxProps) {
   const { replyToEmailAsync } = useReplyToEmail();
   const { forwardEmailAsync } = useForwardEmail();
   const { saveDraftAsync } = useSaveDraft();
+  const draftSaved = useDraftSaved();
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
@@ -201,6 +212,16 @@ export function InlineReplyBox({
   const [body, setBody] = useState(initialBody ?? "");
   const [submitting, setSubmitting] = useState(false);
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
+  // Two lists, never merged — see the note in compose-dialog.tsx. `files` are
+  // handles to things on the user disk; `existingAttachments` are already on
+  // the Gmail draft and have no disk to point at.
+  const [files, setFiles] = useState<File[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<ExistingAttachment[]>(
+    initialAttachments ?? [],
+  );
+  // See the note in compose-dialog.tsx: the same verdict AttachmentPicker
+  // renders, read here so Send and Save cannot stay live over an invalid set.
+  const attachmentVerdict = getAttachmentVerdict(files, existingAttachments);
   const [pendingApply, setPendingApply] = useState<null | {
     kind: "body" | "meeting";
     run: () => void;
@@ -378,6 +399,7 @@ export function InlineReplyBox({
     }
 
     const { to, cc, bcc } = recipients;
+    const hasAttachments = files.length > 0 || existingAttachments.length > 0;
     setSubmitting(true);
     try {
       if (draftId) {
@@ -385,14 +407,46 @@ export function InlineReplyBox({
         // id — local edits must be pushed first or they'd be silently dropped.
         // entityId/replyAll re-derive In-Reply-To/References on every push —
         // a draft opened here is always reply-shaped (see the comment below).
-        await saveDraftAsync({
-          to, cc, bcc, subject, body, threadId, draftId,
-          entityId, replyAll: mode === "replyAll",
-        });
+        //
+        // Attachments force that push through the multipart route: a File
+        // cannot travel through tRPC's JSON body. And because Gmail's draft
+        // update replaces the entire message, keepAttachmentIds has to restate
+        // everything the user chose to keep — silence there would strip it.
+        if (hasAttachments) {
+          await sendWithAttachments({
+            mode: "draft-update",
+            files,
+            to, cc, bcc, subject, body, threadId, draftId,
+            entityId,
+            replyAll: mode === "replyAll",
+            keepAttachmentIds: existingAttachments.map((a) => a.id),
+          });
+        } else {
+          await saveDraftAsync({
+            to, cc, bcc, subject, body, threadId, draftId,
+            entityId, replyAll: mode === "replyAll",
+          });
+        }
         await sendDraftAsync({ draftId });
       } else if (mode === "forward") {
-        await forwardEmailAsync({
-          entityId, to, cc, bcc, note: body.trim() || undefined,
+        if (hasAttachments) {
+          await sendWithAttachments({
+            mode: "forward",
+            files,
+            entityId, to, cc, bcc,
+            body: body.trim(),
+          });
+        } else {
+          await forwardEmailAsync({
+            entityId, to, cc, bcc, note: body.trim() || undefined,
+          });
+        }
+      } else if (hasAttachments) {
+        await sendWithAttachments({
+          mode: "reply",
+          files,
+          entityId, to, cc, bcc, body,
+          replyAll: mode === "replyAll",
         });
       } else {
         // to/cc/bcc are passed explicitly, so what the user sees on screen is
@@ -418,24 +472,42 @@ export function InlineReplyBox({
   }, [
     draftId, recipients, subject, body, threadId, mode, entityId,
     saveDraftAsync, sendDraftAsync, forwardEmailAsync, replyToEmailAsync,
-    onSent, onClose, fireMeeting,
+    onSent, onClose, fireMeeting, files, existingAttachments,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
     setSubmitting(true);
     try {
-      await saveDraftAsync({
-        to: recipients.to,
-        cc: recipients.cc,
-        bcc: recipients.bcc,
-        subject,
-        body,
-        threadId,
-        ...(draftId ? { draftId } : {}),
-        // Forward drafts have no "reply target" to derive headers from —
-        // isFreshForward is the only case with no entityId/reply semantics.
-        ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
-      });
+      if (files.length > 0 || existingAttachments.length > 0) {
+        await sendWithAttachments({
+          mode: draftId ? "draft-update" : "draft-create",
+          files,
+          to: recipients.to,
+          cc: recipients.cc,
+          bcc: recipients.bcc,
+          subject,
+          body,
+          threadId,
+          draftId,
+          keepAttachmentIds: existingAttachments.map((a) => a.id),
+          ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
+        });
+        // The multipart route has no mutation to invalidate for it.
+        draftSaved();
+      } else {
+        await saveDraftAsync({
+          to: recipients.to,
+          cc: recipients.cc,
+          bcc: recipients.bcc,
+          subject,
+          body,
+          threadId,
+          ...(draftId ? { draftId } : {}),
+          // Forward drafts have no "reply target" to derive headers from —
+          // isFreshForward is the only case with no entityId/reply semantics.
+          ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
+        });
+      }
       toast.success(draftId ? "Draft updated" : "Draft saved");
       onSent();
       onClose();
@@ -447,8 +519,8 @@ export function InlineReplyBox({
       setSubmitting(false);
     }
   }, [
-    saveDraftAsync, recipients, subject, body, threadId, draftId,
-    isFreshForward, entityId, mode, onClose, onSent,
+    saveDraftAsync, draftSaved, recipients, subject, body, threadId, draftId,
+    isFreshForward, entityId, mode, onClose, onSent, files, existingAttachments,
   ]);
 
   const handleDiscard = useCallback(async () => {
@@ -551,6 +623,16 @@ export function InlineReplyBox({
         onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
       />
 
+      <AttachmentPicker
+        files={files}
+        onChange={setFiles}
+        existing={existingAttachments}
+        onRemoveExisting={(id) =>
+          setExistingAttachments((prev) => prev.filter((a) => a.id !== id))
+        }
+        disabled={submitting}
+      />
+
       {/*
         Reply/Reply All (fresh or resumed-as-draft) get the collapsed
         toggle — a draft only ever reaches this box when it was created as a
@@ -564,11 +646,22 @@ export function InlineReplyBox({
           <Trash2Icon className="size-3.5" />
           Discard
         </Button>
-        <Button variant="outline" size="sm" onClick={handleSaveDraft} disabled={submitting}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSaveDraft}
+          disabled={submitting || !attachmentVerdict.ok}
+          title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
+        >
           <SaveIcon className="size-3.5" />
           {draftId ? "Update draft" : "Save as draft"}
         </Button>
-        <Button size="sm" onClick={handleSend} disabled={submitting}>
+        <Button
+          size="sm"
+          onClick={handleSend}
+          disabled={submitting || !attachmentVerdict.ok}
+          title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
+        >
           {submitting ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (

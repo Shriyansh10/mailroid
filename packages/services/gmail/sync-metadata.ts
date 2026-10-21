@@ -101,6 +101,41 @@ export function deriveFlags(labels: string[]): {
   return flags;
 }
 
+/**
+ * Guess whether a message has a real attachment, from its top-level
+ * Content-Type alone.
+ *
+ * `threads.get(format:"metadata")` returns headers but no MIME parts, so this
+ * is the only attachment signal available on the sync path that walks the bulk
+ * of a mailbox — and it costs nothing, because the header is already in the
+ * response we have.
+ *
+ * The MIME structure is what makes it work:
+ *
+ *   text/plain, text/html      → body only
+ *   multipart/alternative      → text + html, no attachment
+ *   multipart/related          → inline images (a signature logo)
+ *   multipart/mixed            → something is genuinely attached
+ *
+ * That last distinction is the whole reason this is preferred to Gmail's own
+ * `has:attachment` search, which would also be authoritative and would also
+ * cost an extra API call: `has:attachment` counts inline signature images, so
+ * it would put a paperclip on a large share of ordinary business mail — the
+ * exact false positive this indicator must not have.
+ *
+ * Returns null rather than false when there is no header to read. An absent
+ * answer and a negative answer are different things, and only `true` ever
+ * renders.
+ */
+export function deriveHasAttachment(contentType: string): boolean | null {
+  const type = contentType.split(";")[0]?.trim().toLowerCase() ?? "";
+  if (type.length === 0) return null;
+  if (type === "multipart/mixed") return true;
+  // Every other top-level type is a body shape. Known-negative, not unknown:
+  // a message that is text/plain cannot be hiding an attachment.
+  return false;
+}
+
 // ── Upsert ────────────────────────────────────────────────────────────
 
 export interface MetadataInput {
@@ -133,6 +168,8 @@ snippet?: string;
    * message of one thread by syncCategoryPage; nothing else should set this.
    */
   threadHistoryId?: string;
+  /** Heuristic attachment flag; null when unknown. See deriveHasAttachment. */
+  hasAttachment?: boolean | null;
 }
 
 export async function upsertMessageMetadata(input: MetadataInput): Promise<void> {
@@ -172,6 +209,7 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           draftId: input.draftId,
           rfc822MessageId: input.rfc822MessageId,
           threadHistoryId: input.threadHistoryId,
+          hasAttachment: input.hasAttachment ?? null,
         })),
       )
       .onConflictDoUpdate({
@@ -206,6 +244,23 @@ export async function upsertMessageMetadataBatch(inputs: MetadataInput[]): Promi
           // and nulling out a captured id silently un-links a guest's view of
           // an existing meeting.
           rfc822MessageId: sql`coalesce(excluded.rfc822_message_id, ${messageMetadata.rfc822MessageId})`,
+          // COALESCE with the EXISTING value first — note the argument order,
+          // which is the opposite of recipient's above and is the whole point.
+          //
+          // Two requirements pull in different directions. The value
+          // ingestMessage writes once a body is fetched is parsed truth, and a
+          // routine re-sync must never overwrite it with this header heuristic
+          // — that would reintroduce a paperclip on a message we had already
+          // confirmed has none. But omitting the column entirely (the previous
+          // approach) meant a row that predates it stayed NULL forever, because
+          // a re-sync only ever takes the UPDATE branch: the backfill could
+          // never happen.
+          //
+          // Existing-first satisfies both. A non-null value — true or false,
+          // exact or heuristic — is kept; only NULL is filled in. So a resync
+          // backfills every old row exactly once and can never regress a
+          // hydrated one.
+          hasAttachment: sql`coalesce(${messageMetadata.hasAttachment}, excluded.has_attachment)`,
           updatedAt: new Date(),
         },
       });
@@ -271,6 +326,7 @@ function buildMetadataInput(userId: string, msg: RawGmailMessage): MetadataInput
     threadId: msg.threadId,
     rfc822MessageId: rfc822MessageId || undefined,
     threadHistoryId: msg.threadHistoryId,
+    hasAttachment: deriveHasAttachment(extractHeader(raw, "Content-Type")),
   };
 }
 
@@ -494,6 +550,15 @@ export async function syncCategoryPage(
     );
 
   await processMessages(userId, messages);
+
+  // Attachment manifests for these messages are filled in by a separate,
+  // bounded background job — this sync makes no extra Gmail calls for them.
+  // Deduplicated per 15 minutes, so a many-page sync queues one run. Lazy
+  // import for the same reason triggerGmailSync's is.
+  if (messages.length > 0) {
+    const { requestManifestBackfill } = await import("./attachment-manifest-backfill.ts");
+    await requestManifestBackfill(userId);
+  }
 
   return {
     processed: messages.length,

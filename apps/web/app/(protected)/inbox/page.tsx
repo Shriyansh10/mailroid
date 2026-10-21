@@ -84,6 +84,7 @@ import {
   AlertDialogTitle,
 } from "@web/components/ui/alert-dialog";
 import { motion, AnimatePresence } from "framer-motion";
+import { InboxAttachmentChips } from "@web/components/attachment-list";
 
 const CATEGORIES = [
   { key: "PRIMARY", label: "Primary" },
@@ -476,8 +477,10 @@ function DossierLayout({
 
   const isBin = category === "TRASH";
   const isDraftView = category === "DRAFT";
-  const isSpamView = category === "SPAM";
+  // Sent and Drafts are the user's own mail, so both label rows by recipient
+  // rather than by a sender that is always the same person.
   const isSentView = category === "SENT";
+  const isSpamView = category === "SPAM";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
 
@@ -779,7 +782,9 @@ function DossierLayout({
   const handleEditDraft = async (thread: any) => {
     if (!thread.draftId) return;
     try {
-      const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId });
+      // staleTime 0: always Gmail's current copy. Under the global Infinity a
+      // reopen served the pre-save version, and saving it reverted the edit.
+      const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId }, { staleTime: 0 });
       if (draft.isReplyToExisting && draft.threadId) {
         router.push(buildThreadHref(draft.threadId, { draftId: draft.draftId }));
         return;
@@ -1016,24 +1021,35 @@ function DossierLayout({
                       >
                         {partyLabel}
                       </div>
-                      <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate text-[13px]">
-                        <span
-                          className={cn(
-                            "truncate shrink-0 max-w-[50%]",
-                            isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
-                          )}
-                        >
-                          {thread.subject || "(No Subject)"}
-                        </span>
-                        <span
-                          className={cn(
-                            "truncate font-normal",
-                            isUnread ? "text-muted-foreground" : "text-muted-foreground/70"
-                          )}
-                        >
-                          <span className="mr-1.5 opacity-50">-</span>
-                          {thread.snippet}
-                        </span>
+                      {/* Column, so attachment chips can sit on a second line
+                          under the subject the way Gmail does. Rows without
+                          attachments render exactly as before — the chip
+                          component returns null and the column collapses to a
+                          single line. */}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 min-w-0 truncate text-[13px]">
+                          <span
+                            className={cn(
+                              "truncate shrink-0 max-w-[50%]",
+                              isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
+                            )}
+                          >
+                            {thread.subject || "(No Subject)"}
+                          </span>
+                          <span
+                            className={cn(
+                              "truncate font-normal",
+                              isUnread ? "text-muted-foreground" : "text-muted-foreground/70"
+                            )}
+                          >
+                            <span className="mr-1.5 opacity-50">-</span>
+                            {thread.snippet}
+                          </span>
+                        </div>
+                        <InboxAttachmentChips
+                          attachments={thread.attachments}
+                          hasAttachment={thread.hasAttachment}
+                        />
                       </div>
                     </div>
 

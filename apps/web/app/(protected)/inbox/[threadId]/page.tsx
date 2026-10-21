@@ -527,18 +527,24 @@ export default function ThreadDetailPage() {
   // thread's own copy of a draft message has no Bcc line (message detail
   // deliberately doesn't carry one — Gmail strips Bcc from delivered mail), so
   // prefilling from it would quietly drop the Bcc off a draft that has one.
-  const { data: resumedDraft } = useDraft(resumeDraftId ?? trailingDraft?.draftId);
+  //
+  // Opened only once `draftFresh`: the box seeds its fields ONCE, at mount, so
+  // seeding from a cached copy (the pre-save version, served instantly) would
+  // put old text on screen — and saving it would write the old text back.
+  const { data: resumedDraft, isFetchedAfterMount: draftFresh } = useDraft(
+    resumeDraftId ?? trailingDraft?.draftId,
+  );
   const autoOpenedRef = useRef<string | null>(null);
 
   useEffect(() => {
-    if (resumeDraftId && resumedDraft && autoOpenedRef.current !== resumeDraftId) {
+    if (resumeDraftId && resumedDraft && draftFresh && autoOpenedRef.current !== resumeDraftId) {
       autoOpenedRef.current = resumeDraftId;
       // Any non-forward mode is correct here: a draft only ever reaches this
       // page when getDraft flagged it isReplyToExisting (see the Draft view's
       // click handler), so it is always reply-shaped, never a forward.
       setBox({ mode: "reply", draftId: resumeDraftId });
     }
-  }, [resumeDraftId, resumedDraft]);
+  }, [resumeDraftId, resumedDraft, draftFresh]);
 
   // Landing directly on a thread that already ends in a draft (e.g. via a
   // link, or a refresh) — open it the same way, without needing a
@@ -548,12 +554,14 @@ export default function ThreadDetailPage() {
     if (
       !resumeDraftId &&
       trailingDraft?.draftId &&
+      resumedDraft?.draftId === trailingDraft.draftId &&
+      draftFresh &&
       autoOpenedRef.current !== trailingDraft.draftId
     ) {
       autoOpenedRef.current = trailingDraft.draftId;
       setBox({ mode: "reply", draftId: trailingDraft.draftId });
     }
-  }, [resumeDraftId, trailingDraft]);
+  }, [resumeDraftId, trailingDraft, resumedDraft, draftFresh]);
 
   const closeBox = () => {
     setBox(null);
@@ -913,6 +921,10 @@ export default function ThreadDetailPage() {
             subject={boxSubject}
             {...prefillRecipients}
             initialBody={box.draftId ? activeDraft?.body : box.seedBody}
+            // Only for a resumed draft. A fresh reply has nothing attached yet,
+            // and seeding from `activeDraft` unguarded would carry a stale
+            // draft's attachments into an unrelated reply.
+            initialAttachments={box.draftId ? activeDraft?.attachments : undefined}
             onClose={closeBox}
             onSent={() => void refetchThread()}
           />

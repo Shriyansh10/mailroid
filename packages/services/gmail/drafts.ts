@@ -21,6 +21,50 @@ import type { MessagePart, PayloadHeader } from "./index.ts";
 import { mapWithConcurrency, upsertMessageMetadataBatch } from "./sync-metadata.ts";
 import type { MetadataInput } from "./sync-metadata.ts";
 import { withGmailRetry } from "./retry.ts";
+import { sendRawMessage } from "./send-raw.ts";
+import type { OutgoingAttachment } from "./mime.ts";
+import { validateOutgoingAttachments } from "./attachment-limits.ts";
+import { settleDraftAttachments, type OutgoingDraftFile } from "./draft-attachments.ts";
+import {
+  extractAttachments,
+  getAttachmentBytes,
+  listMessageAttachments,
+  replaceAttachmentManifest,
+  type ParsablePart,
+} from "../attachments/index.ts";
+
+/** What a draft currently holds, as the compose box needs to show it. */
+export interface DraftAttachment {
+  /** Our `message_attachments.id` — the handle for keeping or dropping it. */
+  id: string;
+  filename: string;
+  mimeType: string;
+  sizeBytes: number;
+}
+
+/**
+ * How a draft write treats the attachments already on the draft.
+ *
+ * THE `keep` LIST IS NOT AN OPTIMISATION. Gmail has no partial draft update —
+ * `drafts.update` REPLACES the entire message — so every write must restate
+ * every part the draft should still have. A caller that passes only its newly
+ * picked files silently strips whatever was already attached, and the user
+ * finds out when the recipient does.
+ *
+ * Making the kept set explicit is what turns "I edited the subject" and "I
+ * removed that PDF" into different requests instead of the same one.
+ */
+export interface DraftAttachmentOptions {
+  /** Files just picked in the browser, uploaded with this request. */
+  attachments?: OutgoingAttachment[];
+  /**
+   * Ids of attachments ALREADY on the draft that should survive this write.
+   * Omitted entirely (undefined) means "keep them all" — the safe reading for a
+   * caller that does not know about attachments, such as the AI draft tools.
+   * An empty array means "remove them all", which is a real thing to ask for.
+   */
+  keepAttachmentIds?: string[];
+}
 
 export interface DraftInput {
   to: string;
@@ -53,6 +97,16 @@ export interface DraftInput {
 export interface DraftDetail extends DraftInput {
   draftId: string;
   messageId: string;
+  /**
+   * What is already attached to this draft in Gmail.
+   *
+   * Distinct from the files a user has just picked in the browser, and the
+   * compose box has to hold both kinds separately: a `File` is a handle to
+   * something on disk, and these have no disk to point at. Conflating them is
+   * what makes "reopen a draft and edit the subject" either lose the
+   * attachments or round-trip them through the browser for no reason.
+   */
+  attachments: DraftAttachment[];
   /**
    * True when this draft was created as a reply/reply-all (its underlying
    * message carries an In-Reply-To header) rather than a fresh compose.
@@ -208,7 +262,102 @@ export async function getDraft(userId: string, draftId: string): Promise<DraftDe
     body: extractBody(msg?.payload),
     threadId: msg?.threadId,
     isReplyToExisting: Boolean(getHeader(headers, "In-Reply-To")),
+    attachments: await persistDraftAttachments(userId, msg),
   };
+}
+
+/**
+ * Parse the draft's own attachments and give them durable ids.
+ *
+ * `ingestDraft` reads `format: "metadata"` and therefore never sees a payload,
+ * so a draft has no attachment rows until something looks. This is that
+ * something: getDraft already fetches `format: "full"` for the body, so the
+ * parts are in hand and persisting them costs one write rather than a second
+ * Gmail round trip.
+ *
+ * The ids matter beyond display. They are what the compose box passes back as
+ * `keepAttachmentIds`, and what getAttachmentBytes resolves — through an
+ * ownership-scoped lookup, so a forged id from another account reads as absent
+ * rather than as someone else's file.
+ *
+ * Non-fatal: a draft that cannot be enriched still opens, with its text intact
+ * and no attachment chips. Failing the whole editor over a manifest write would
+ * trade a complete loss for a partial one.
+ */
+async function persistDraftAttachments(
+  userId: string,
+  msg: RawDraft["message"],
+): Promise<DraftAttachment[]> {
+  const messageId = msg?.id;
+  if (!messageId) return [];
+
+  try {
+    const parsed = extractAttachments(msg?.payload as ParsablePart | undefined);
+    await replaceAttachmentManifest(userId, messageId, msg?.threadId ?? null, parsed);
+
+    const rows = await listMessageAttachments(userId, messageId);
+    return rows
+      // Inline parts are body furniture — a signature logo is not something the
+      // compose box should offer to remove.
+      .filter((row) => !row.isInline)
+      .map((row) => ({
+        id: row.id,
+        filename: row.filename,
+        mimeType: row.mimeType,
+        sizeBytes: row.sizeBytes,
+      }));
+  } catch (err) {
+    logger.warn("[SERVICE] could not persist draft attachment manifest", {
+      userId,
+      messageId,
+      error: String(err),
+    });
+    return [];
+  }
+}
+
+/**
+ * Assemble the full part list for a draft write.
+ *
+ * Kept parts are read back through getAttachmentBytes, which means they pass
+ * the same ownership check as any download and are read from object storage.
+ * settleDraftAttachments carries each stored object onto Gmail's new records
+ * after every save, so an edit reads nothing from Gmail; only a part whose
+ * store failed (left unmarked) is fetched from Gmail, once.
+ *
+ * SEQUENTIAL, for the reason forwarding is: each fetch charges the shared
+ * in-flight byte budget and holds its Buffer until released, so fetching a
+ * draft's five attachments at once would charge all five against a budget
+ * shared with every download on the box.
+ */
+async function resolveDraftAttachments(
+  userId: string,
+  existing: DraftAttachment[],
+  options: DraftAttachmentOptions,
+): Promise<{ attachments: OutgoingAttachment[]; keptIds: string[] }> {
+  // undefined means "keep them all" — see DraftAttachmentOptions. Callers that
+  // know nothing about attachments must not strip them by staying silent.
+  const keepIds = options.keepAttachmentIds ?? existing.map((a) => a.id);
+  const keep = existing.filter((a) => keepIds.includes(a.id));
+
+  const carried: OutgoingAttachment[] = [];
+  for (const attachment of keep) {
+    const payload = await getAttachmentBytes(userId, attachment.id);
+    if (!payload) {
+      // The row is gone or was never ours. Refusing beats writing a draft that
+      // quietly lost a part the user believed was still on it.
+      throw new Error(`Attachment "${attachment.filename}" is no longer available.`);
+    }
+    // Always a stream from object storage; the MIME builder needs whole bytes.
+    const bytes = Buffer.from(await new Response(payload.body).arrayBuffer());
+    carried.push({
+      filename: attachment.filename,
+      mimeType: attachment.mimeType,
+      content: bytes,
+    });
+  }
+
+  return { attachments: [...carried, ...(options.attachments ?? [])], keptIds: keep.map((a) => a.id) };
 }
 
 /** Resolves In-Reply-To/References for a reply-shaped draft, when its target message is given. */
@@ -224,6 +373,7 @@ async function resolveDraftReplyHeaders(
 export async function createDraft(
   userId: string,
   input: DraftInput,
+  attachments?: OutgoingAttachment[],
 ): Promise<{ draftId: string }> {
   const tenant = corsair.withTenant(userId);
   const headers = await resolveDraftReplyHeaders(userId, input);
@@ -231,7 +381,37 @@ export async function createDraft(
     ...headers,
     cc: input.cc?.trim() || undefined,
     bcc: input.bcc?.trim() || undefined,
+    attachments,
   });
+
+  // With parts, through the upload endpoint — the plugin's drafts.create posts
+  // to the non-upload API capped at 5 MB. Without them, unchanged.
+  if (attachments?.length) {
+    const created = await sendRawMessage(userId, raw, {
+      asDraft: true,
+      threadId: input.threadId,
+    });
+    if (!created.id) throw new Error("Gmail did not return a draft id");
+    // Store the uploads now (we hold their bytes), so the first edit of this
+    // draft downloads nothing from Gmail. Never fails the save.
+    await settleDraftAttachments(
+      userId,
+      created.id,
+      [],
+      attachments.map((a) => ({ filename: a.filename, content: a.content, storedKey: null })),
+    ).catch((err: unknown) => {
+      logger.error("[SERVICE] could not settle the new draft's attachments", {
+        userId, draftId: created.id, error: String(err),
+      });
+    });
+    await ingestDraft(userId, created.id);
+    logger.info("[SERVICE] createDraft completed", {
+      userId,
+      draftId: created.id,
+      attachmentCount: attachments.length,
+    });
+    return { draftId: created.id };
+  }
 
   const draft = (await withGmailRetry<RawDraft>(
     "drafts.create",
@@ -253,24 +433,85 @@ export async function updateDraft(
   userId: string,
   draftId: string,
   input: DraftInput,
+  options: DraftAttachmentOptions = {},
 ): Promise<{ draftId: string }> {
   const tenant = corsair.withTenant(userId);
   const headers = await resolveDraftReplyHeaders(userId, input);
+
+  // READ BEFORE WRITE, and not for validation — for content.
+  //
+  // `drafts.update` replaces the whole message, so anything already attached
+  // has to be re-sent or it is gone: there is no API for "keep what is there".
+  // Kept files are read from object storage, and settleDraftAttachments (after
+  // the save) carries their stored objects onto Gmail's new records — so no
+  // edit after the first save downloads anything from Gmail.
+  const current = await getDraft(userId, draftId).catch(() => null);
+  const existing = current?.attachments ?? [];
+
+  const { attachments, keptIds } =
+    existing.length > 0 || options.attachments?.length
+      ? await resolveDraftAttachments(userId, existing, options)
+      : { attachments: [] as OutgoingAttachment[], keptIds: [] as string[] };
+
+  // The previous message's records, read AFTER the kept files were fetched so
+  // their storage pointers are current: which object each kept file came from.
+  const previousMessageId = current?.messageId;
+  const previousRows = previousMessageId ? await listMessageAttachments(userId, previousMessageId) : [];
+  const storedKeyById = new Map(previousRows.map((r) => [r.id, r.cacheStorageKey]));
+  const outgoingFiles: OutgoingDraftFile[] = attachments.map((a, i) => ({
+    filename: a.filename,
+    content: a.content,
+    storedKey: i < keptIds.length ? (storedKeyById.get(keptIds[i]!) ?? null) : null,
+  }));
+
+  // Validated on the COMBINED set, here rather than at the route.
+  //
+  // The route sees only the files just uploaded, so it cannot catch a 10 MB
+  // addition to a draft that already carries 15 MB — each half is fine and the
+  // total is not. This is the first point where every part's real size is
+  // known, which makes it the only place the check is authoritative.
+  if (attachments.length) {
+    const verdict = validateOutgoingAttachments(
+      attachments.map((a) => ({ filename: a.filename, sizeBytes: a.content.byteLength })),
+      Buffer.byteLength(input.body ?? "", "utf-8"),
+    );
+    if (!verdict.ok) throw new Error(verdict.reason);
+  }
+
   const raw = buildRawEmail(input.to, input.subject, input.body, {
     ...headers,
     cc: input.cc?.trim() || undefined,
     bcc: input.bcc?.trim() || undefined,
+    attachments,
   });
 
-  await withGmailRetry(
-    `drafts.update ${draftId}`,
-    () =>
-      tenant.gmail.api.drafts.update({
-        id: draftId,
-        draft: { message: { raw, threadId: input.threadId } },
-      }),
-    { tenantId: userId, trigger: "ui" },
-  );
+  if (attachments.length) {
+    await sendRawMessage(userId, raw, { draftId, threadId: input.threadId });
+  } else {
+    await withGmailRetry(
+      `drafts.update ${draftId}`,
+      () =>
+        tenant.gmail.api.drafts.update({
+          id: draftId,
+          draft: { message: { raw, threadId: input.threadId } },
+        }),
+      { tenantId: userId, trigger: "ui" },
+    );
+  }
+
+  // Gmail mints a NEW message id for the replaced draft, so the rows keyed to
+  // the old one describe a message that no longer exists. Settling writes the
+  // new message's records, carries each kept file's stored object onto them,
+  // stores new uploads, and removes the old records — deleting an old object
+  // only when nothing else references it (a failed delete is queued for the
+  // eviction sweep, never left orphaned). Never fails the save.
+  if (attachments.length || previousRows.length) {
+    await settleDraftAttachments(userId, draftId, previousRows, outgoingFiles).catch((err: unknown) => {
+      logger.error("[SERVICE] could not settle the saved draft's attachments", {
+        userId, draftId, error: String(err),
+      });
+    });
+  }
 
   await ingestDraft(userId, draftId);
   logger.info("[SERVICE] updateDraft completed", { userId, draftId });

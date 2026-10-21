@@ -761,6 +761,10 @@ when the branch is unparked.
 
 ### 12.5 The missing architecture: what "cached" has to mean
 
+> **Status 2026-10-21:** implemented as P-13 describes, one step further —
+> object storage is the only attachment read source, and Gmail is read only by
+> the API on a confirmed miss. See P-13 and §13.15.
+
 Everything above describes controls that make attachment traffic *survivable*.
 None of them removes the reason the traffic exists. That reason is architectural,
 and until 2026-09-03 this document did not state it:
@@ -1128,6 +1132,12 @@ looking for enforcement that was never built.
 
 ### P-6 · Fix the attachment retry multiplication
 
+> **Implemented 2026-10-21.** The fetch was rewritten rather than patched: it
+> runs on `gmailRequestWithAuthRecovery`, the 401/404 recovery state lives
+> outside the loop, and a counting `fetchImpl` throws at 5 network attempts
+> across retries and recovery combined. A 429 is never retried — it records a
+> cooldown, following retry.ts. `attachments/gmail-fetch.test.ts`.
+
 - **Problem** — B-4, ≈25 calls per logical fetch.
 - **Evidence** — `stash@{1}` `gmail-fetch.ts:131-212`, flags inside the closure.
 - **Change** — hoist `refreshedToken` / `refreshedId` outside the retried
@@ -1192,6 +1202,11 @@ looking for enforcement that was never built.
   so the existing code and this document now agree in writing.
 
 ### P-7 · Thumbnails are a presentation layer, not a cache
+
+> **Implemented 2026-10-21.** A thumbnail renders automatically only when its
+> image is already in object storage (`cached` on the attachment); otherwise
+> the tile offers "Load preview". `Cache-Control: private, max-age=28800`
+> (8 hours). `thumbnail` is no longer an interactive trigger.
 
 - **Problem** — auto-loading thumbnails are full downloads with no cache header.
 - **Evidence** — `attachment-list.tsx:104-125`; `route.ts:35`.
@@ -1459,6 +1474,23 @@ looking for enforcement that was never built.
 
 ### P-13 · Object storage is the attachment cache
 
+> **Implemented 2026-10-21** (`feat/attachments-r2-cache`), with two changes to
+> what is written below:
+>
+> 1. **Object storage is the only read source, not a cache in front of Gmail.**
+>    Every attachment byte is served from the store; Gmail is read only on a
+>    confirmed miss, and only by the API process (`ensureAttachmentStored`),
+>    under the shared pacer, mailbox semaphore and ledger. The web process asks
+>    the API over the private network (`POST /internal/attachments/ensure`,
+>    service secret + per-user ownership check) and never talks to Gmail for
+>    attachments. While an object is stored Gmail is never read for it; after
+>    the 90-day eviction, the next open fetches it once more.
+> 2. **Attachment manifests for unopened mail** come from a bounded background
+>    job (`attachment-manifest-backfill`), structure-only reads, so list rows
+>    can show tiles without any download.
+>
+> The §13.15 checklist carries the evidence per item.
+
 - **Problem** — §12.5. There is no durable attachment cache. Every control in
   P-5 through P-7 bounds the *rate* at which we re-download the same bytes from
   Gmail; none of them removes the re-download. And the one number we had for
@@ -1714,32 +1746,87 @@ below is decided **and implemented**, not merely agreed. The build order in §16
 puts these last for a reason; this is the checklist that closes it.
 
 ```
-[ ] U-5 answered — a backend is chosen and configured        P-13, §8.4
-[ ] object storage is the persistent attachment cache        P-13.1
-[ ] cache lookup happens before any Gmail client is built    P-13.1, P-6
-[ ] the actual bytes are in the store; the row is an index   P-13.2
-[ ] cached = true only after the store confirms the write    P-13.3
-[ ] a cache hit costs zero Gmail calls and zero units        P-13.1
-[ ] single-flight re-established around the new cache key    P-13.4
-[ ] attachment presence never triggers a download            P-13.5
-[ ] thumbnails share the one attachment path, no shortcut    P-7
-[ ] thumbnail loads are intentional (click / viewport)       P-7
-[ ] thumbnail demoted out of INTERACTIVE_TRIGGERS            P-7
-[ ] recovery flags hoisted out of the retried closure        P-6
-[ ] network_attempts capped at 5 and enforced by a throw     P-6
-[ ] network_attempts never increments on a cache hit         P-6
-[ ] Gmail → Mailroid bytes metered at the transport          P-5c
-[ ] no store configured = boot failure, not a fallthrough    P-13.6
-[ ] a storage FAILURE fails the request; only a confirmed
+[x] U-5 answered — a backend is chosen and configured        P-13, §8.4
+[x] object storage is the persistent attachment cache        P-13.1
+[x] cache lookup happens before any Gmail client is built    P-13.1, P-6
+[x] the actual bytes are in the store; the row is an index   P-13.2
+[x] cached = true only after the store confirms the write    P-13.3
+[x] a cache hit costs zero Gmail calls and zero units        P-13.1
+[x] single-flight re-established around the new cache key    P-13.4
+[x] attachment presence never triggers a download            P-13.5
+[x] thumbnails share the one attachment path, no shortcut    P-7
+[x] thumbnail loads are intentional (click / viewport)       P-7
+[x] thumbnail demoted out of INTERACTIVE_TRIGGERS            P-7
+[x] recovery flags hoisted out of the retried closure        P-6
+[x] network_attempts capped at 5 and enforced by a throw     P-6
+[x] network_attempts never increments on a cache hit         P-6
+[~] Gmail → Mailroid bytes metered at the transport          P-5c
+[~] no store configured = boot failure, not a fallthrough    P-13.6
+[x] a storage FAILURE fails the request; only a confirmed
     MISS may reach Gmail                                     P-13.7
-[ ] keys namespaced; one mailbox cannot resolve another's    P-13.8
-[ ] the attachment route stays dynamic AND sets Cache-Control  P-7
-[ ] the attachment route's existing behaviour has tests      —
+[x] keys namespaced; one mailbox cannot resolve another's    P-13.8
+[x] the attachment route stays dynamic AND sets Cache-Control  P-7
+[~] the attachment route's existing behaviour has tests      —
 ```
+
+**Status (2026-10-21), on branch `feat/attachments-r2-cache`.** `[x]` means
+implemented AND proven by a named test or a live check; `[~]` means met with a
+stated gap. Evidence, by line:
+
+- **Backend** — DigitalOcean Spaces, `mailroid-attachment-cache`, `sgp1`,
+  prefixes `dev`/`prod`. Live connection check passed: put/head/get/delete,
+  a missing key answers 404 (not 403), anonymous GET refused (private), no
+  lifecycle rule (checked in the DO panel).
+- **Persistent store; lookup first; bytes in the store; mark after confirm;
+  hit costs nothing** — `attachments/ensure-stored.ts`: head → (miss only)
+  Gmail → put → head verifies the stored size → `markCached`.
+  `ensure-stored.test.ts` (write/verify/mark, size mismatch never marked,
+  stored-but-unmarked reconciles without a re-download) and live: photo.png and
+  signature.png each caused exactly one `attachments.get`; reopen and refresh
+  caused none.
+- **Single-flight** — keyed on the storage key; `ensure-stored.test.ts`: 10
+  concurrent misses → 1 Gmail download.
+- **Presence never downloads** — list tiles and thread tiles are metadata;
+  `attachment-list.test.tsx` (no `<img>` of bytes in any list row; a thumbnail
+  only when stored). Manifests for unopened mail come from a background job
+  that asks Gmail for structure only (`fields` mask without `data`,
+  `structure.test.ts`). Live: inbox visits produced no `attachments.get`.
+- **Thumbnails** — same route; auto-render only when already stored, otherwise
+  "Load preview"; `thumbnail` removed from `INTERACTIVE_TRIGGERS`.
+- **P-6** — `gmail-fetch.ts` rewritten on `gmailRequestWithAuthRecovery`; the
+  cap is enforced by a counting `fetchImpl` that throws at 5 across retries AND
+  recovery; 429 is never retried (cooldown recorded). `gmail-fetch.test.ts`.
+- **Failure ≠ miss** — `getObject`/`headObject` return null only on
+  404/NoSuchKey/NotFound; everything else (403, timeouts, 5xx) is a 503.
+  Live outage test (endpoint pointed at an unresolvable host): both the
+  not-yet-stored and the stored attachment answered 503, zero `attachments.get`.
+- **Namespacing** — keys are `{prefix}/attachments/{userId}/{id}`; one user is
+  one mailbox (ADR 0007); every read checks ownership first (`findOwned`).
+- **Cache-Control** — `private, max-age=28800` (8 h, decided 2026-10-21).
+
+**The three `[~]`:**
+
+- **Bytes metered** — wired (`gmailRequestWithAuthRecovery` records
+  `Content-Length`), but observed live: Gmail's `attachments.get` responses
+  carry **no** `Content-Length`, so the ledger counts these calls and units but
+  not their bytes. Each download's decoded size IS logged
+  (`[ATTACHMENTS] stored after first access`, `sizeBytes`). Follow-up: meter
+  attachment bytes from the decoded size.
+- **Boot failure** — production (`NODE_ENV=production`) refuses to start
+  without object storage, in both containers. Development deliberately starts
+  without it and answers 503 "not configured" for bytes, so the rest of the app
+  is usable locally.
+- **Route tests** — the read path, the internal endpoint and its client are
+  unit-tested in services; the Next route handler itself has no test runner and
+  was exercised live instead.
 
 Retention, eviction and a hard byte ceiling are **not** on this list. They are
 deferred on purpose (P-13, P-5c) and are decided from the meter's output, once
-there is one.
+there is one. **Deletion of stored objects on account deletion or Gmail
+disconnect is also NOT implemented** — deferred to a separate feature
+(2026-10-21). Until it exists, cached attachments can remain in Spaces after an
+account is deleted or disconnected. That is an open production data-retention
+risk, not a satisfied requirement; see ADR 0025.
 
 ### Evaluated and rejected for now
 

@@ -317,8 +317,15 @@ export class ForwardEmailExecutor
 
 /**
  * Approval-preview builder for forwardEmail — surfaces the resolved subject
- * and warns explicitly when the original has attachments, since
- * buildRawEmail is text/plain only and never carries them over.
+ * and states what will travel with the message.
+ *
+ * This used to warn `⚠ N attachments will NOT be included`, because
+ * buildRawEmail was text/plain only. It now carries them, so the warning became
+ * a lie and was replaced rather than deleted: the approval card is the last
+ * thing a user reads before real mail leaves, and "3 attachments" versus
+ * silence is the difference between knowingly forwarding a contract and
+ * forwarding one by accident. Naming them is more informative than counting
+ * them, and the count alone was never enough to decide with.
  */
 export async function buildForwardPreview(
   args: Record<string, unknown>,
@@ -331,7 +338,9 @@ export async function buildForwardPreview(
     const target = await previewForward(ctx.userId, entityId);
     const lines = [`To: ${to}`, `Subject: ${target.subject}`];
     if (target.attachmentCount > 0) {
-      lines.push(`⚠ ${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} will NOT be included`);
+      lines.push(
+        `Includes ${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} from the original`,
+      );
     }
     return lines.join("\n");
   } catch (error) {

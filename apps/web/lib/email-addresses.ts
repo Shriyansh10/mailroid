@@ -102,6 +102,37 @@ function extractAddress(part: string): string {
   return (match ? match[1]! : part).replace(/"/g, "").trim();
 }
 
+/**
+ * The display name of the FIRST address in a header, for a one-line label.
+ *
+ * Separate from parseAddressList because that returns bare addresses — correct
+ * for sending, useless for a row label, which wants "VALORANT" and not
+ * "contact@valorant.com". Falls back to the address when there is no display
+ * name, and to the raw text when there is no address either.
+ *
+ * The lookahead in the split is doing real work: it ignores commas inside
+ * quotes, so `"Agarwal, Shriyansh" <a@b.com>` stays one recipient instead of
+ * having its surname rendered as the whole label.
+ */
+export function formatAddressName(value: string | undefined | null): string {
+  if (!value) return "";
+
+  const first = value.split(/,(?=(?:[^"]*"[^"]*")*[^"]*$)/)[0] ?? value;
+  const angled = first.match(/^\s*(.*?)\s*<([^>]+)>/);
+
+  if (angled) {
+    const name = angled[1]!.replace(/"/g, "").trim();
+    return name || angled[2]!.trim();
+  }
+  return first.replace(/"/g, "").trim();
+}
+
+/** How many recipients a header names. Uses the real parser, so quoted commas
+ *  and bare-address runs are counted the way the send path counts them. */
+export function countAddresses(value: string | undefined | null): number {
+  return parseAddressList(value).length;
+}
+
 /** Back to the comma-joined form the send/draft mutations expect. */
 export function joinAddresses(addresses: string[]): string {
   return addresses.join(", ");

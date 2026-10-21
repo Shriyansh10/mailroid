@@ -1,8 +1,75 @@
-import { db, eq, and, sql, desc, inArray, notInArray } from "@repo/database";
+import { db, eq, and, or, sql, desc, inArray, notInArray } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { emails } from "@repo/database/models/emails";
 import { logger } from "@repo/logger";
+import { listAttachmentsForThreads } from "../attachments/store.ts";
 import type { ThreadSummary } from "./model.ts";
+
+/**
+ * Attach chips to inbox rows, in place.
+ *
+ * These list functions are DB-only by design — they never call Gmail and never
+ * see a MIME payload — so attachments can only come from the manifest a prior
+ * hydration or thread read already stored. One indexed query for the whole
+ * page.
+ *
+ * Non-fatal by construction: chips are an enhancement to a row that is
+ * perfectly usable without them, and the inbox must never fail to render
+ * because a secondary lookup did.
+ *
+ * Shared by every list surface rather than inlined, because there are several
+ * (category, priority, and the live-Gmail path in index.ts) and the last time
+ * one of them was missed the chips silently appeared in some views and not
+ * others.
+ */
+export async function enrichWithAttachments(
+  userId: string,
+  threads: ThreadSummary[],
+): Promise<void> {
+  if (threads.length === 0) return;
+
+  try {
+    const byThread = await listAttachmentsForThreads(
+      userId,
+      threads.map((t) => t.threadId).filter(Boolean),
+    );
+
+    const awaitingManifest: string[] = [];
+    for (const thread of threads) {
+      const rows = byThread.get(thread.threadId);
+      if (!rows || rows.length === 0) {
+        // Flagged by the header heuristic but no manifest yet: the row keeps
+        // its paperclip, and the backfill is asked to do these threads first.
+        if (thread.hasAttachment === true && thread.threadId) awaitingManifest.push(thread.threadId);
+        continue;
+      }
+      thread.attachments = rows.map((row) => ({
+        id: row.id,
+        partId: row.partId,
+        filename: row.filename,
+        mimeType: row.mimeType,
+        sizeBytes: row.sizeBytes,
+        // Whether the bytes are already in object storage. Metadata, not a
+        // download: it lets the UI show a thumbnail only when it costs nothing.
+        cached: row.cacheStorageKey !== null,
+      }));
+    }
+
+    if (awaitingManifest.length > 0) {
+      // Fire-and-forget: the list response never waits for the backfill.
+      void import("./attachment-manifest-backfill.ts")
+        .then(({ requestManifestPriority }) => requestManifestPriority(userId, awaitingManifest))
+        .catch((err: unknown) => {
+          logger.warn("[ATTACHMENTS] could not request priority manifests", { userId, error: String(err) });
+        });
+    }
+  } catch (err) {
+    logger.warn("[ATTACHMENTS] could not enrich inbox rows", {
+      userId,
+      error: String(err),
+    });
+  }
+}
 
 // Everything the full-mailbox sync walks, in order. SPAM/TRASH/DRAFT are
 // listed by label id rather than a `category:` search term (see
@@ -51,11 +118,38 @@ export function extractHeader(msg: Record<string, unknown>, name: string): strin
 const PRIMARY_CATEGORIES = ["PRIMARY", "UPDATES"];
 
 /**
- * Resolve the category filter. When "PRIMARY" is requested, include UPDATES too.
+ * Row filter for the PRIMARY tab.
+ *
+ * The `category` column is a LOSSY projection of Gmail's label *set*: a message
+ * carries several labels at once and CATEGORY_PRECEDENCE (sync-metadata.ts)
+ * collapses them to one enum. For almost every message that is harmless,
+ * because the location labels it ranks highest — SENT/SPAM/TRASH/DRAFT — are
+ * mutually exclusive with being in the inbox.
+ *
+ * A message you send to YOURSELF is the one case where that is false. Gmail
+ * stores a single message resource labelled both `SENT` and `INBOX`, and shows
+ * it in both places. Precedence resolves the tie to SENT — which is correct,
+ * and must stay that way so the row still appears in the Sent view — so
+ * filtering the inbox on the category column alone hid the message completely:
+ * Gmail showed it in the Inbox, Mailroid showed it nowhere but Sent.
+ *
+ * `is_in_inbox` is the un-collapsed truth. deriveFlags reads the INBOX label
+ * directly on every ingest path and always has, so this needs no backfill and
+ * no resync — existing rows are already correct.
+ *
+ * Deliberately NOT fixed by reordering CATEGORY_PRECEDENCE to rank the tabs
+ * above SENT: that would file the message as PRIMARY and drop it out of the
+ * Sent view, trading one class of missing mail for another, and would break the
+ * location-label semantics the Spam and Bin views depend on.
  */
-function resolveCategories(category: string): string[] {
-  if (category === "PRIMARY") return PRIMARY_CATEGORIES;
-  return [category];
+function primaryViewFilter() {
+  return or(
+    inArray(messageMetadata.category, PRIMARY_CATEGORIES as any[]),
+    and(
+      eq(messageMetadata.category, "SENT" as any),
+      eq(messageMetadata.isInInbox, true),
+    ),
+  );
 }
 
 /**
@@ -110,17 +204,18 @@ export async function getEmailsByCategory(
     requestId, userId, category, limit, page, offset,
   });
 
-  const categories = resolveCategories(category);
-  const isStarredView = category === STARRED_VIEW;
-
-  // Starred filters on the flag across every real category; everything else
-  // filters on the category column itself.
-  const viewFilter = isStarredView
-    ? and(
-        eq(messageMetadata.isStarred, true),
-        notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
-      )
-    : inArray(messageMetadata.category, categories as any[]);
+  // Starred filters on the flag across every real category, Primary needs the
+  // is_in_inbox exception for self-sent mail (see primaryViewFilter), and every
+  // other view filters on the category column itself.
+  const viewFilter =
+    category === STARRED_VIEW
+      ? and(
+          eq(messageMetadata.isStarred, true),
+          notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT"] as any[]),
+        )
+      : category === "PRIMARY"
+        ? primaryViewFilter()
+        : eq(messageMetadata.category, category as any);
 
   // Browsing the inbox never triggers a sync — see docs/architecture-plan.md Stage 0.
   // The list is served straight from the local DB; missing history is only backfilled
@@ -158,6 +253,7 @@ export async function getEmailsByCategory(
     recipient: sql<string | null>`COALESCE(${messageMetadata.recipient}, ${emails.to})`.as(
       "recipient",
     ),
+    hasAttachment: messageMetadata.hasAttachment,
     rn: sql<number>`
       ROW_NUMBER() OVER(
         PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -191,6 +287,7 @@ export async function getEmailsByCategory(
     category: sq.category,
     draftId: sq.draftId,
     recipient: sq.recipient,
+    hasAttachment: sq.hasAttachment,
   })
   .from(sq)
   .where(eq(sq.rn, 1))
@@ -220,7 +317,10 @@ export async function getEmailsByCategory(
   // round trip to resolve its Gmail draft id.
   draftId: row.draftId ?? undefined,
   entityId: row.entityId,
+  hasAttachment: row.hasAttachment,
 }));
+
+await enrichWithAttachments(userId, validResults);
 
 // One argument, not two. `logger.info("[SERVICE]", "msg", { … })` passes the
 // message as splat, which winston's json format drops without splat() —
@@ -231,6 +331,7 @@ logger.info("[SERVICE] getEmailsByCategory completed", {
   category,
   requestedRows: rows.length,
   validResults: validResults.length,
+  rowsWithAttachments: validResults.filter((t) => t.attachments?.length).length,
 });
 
 return { threads: validResults };
@@ -287,16 +388,33 @@ export async function getCategoryCounts(
     .groupBy(messageMetadata.category);
 
   for (const row of rows) {
-    if (row.category === "UPDATES") {
-      // Merge UPDATES count into PRIMARY
-      counts["PRIMARY"] = (counts["PRIMARY"] ?? 0) + Number(row.count);
-    } else if (
+    // PRIMARY — and the UPDATES it absorbs — is counted by its own query below.
+    // Its view is no longer a plain category match (self-sent mail is filed
+    // SENT but belongs in the inbox), and summing the two group-by buckets was
+    // also wrong on its own terms: a thread holding both a PRIMARY and an
+    // UPDATES message was counted twice by a list that shows it once.
+    if (row.category === "PRIMARY" || row.category === "UPDATES") continue;
+    if (
       row.category &&
       Object.prototype.hasOwnProperty.call(counts, row.category)
     ) {
       counts[row.category] = Number(row.count);
     }
   }
+
+  // Must mirror getEmailsByCategory's viewFilter exactly, or the Primary badge
+  // promises rows the list itself refuses to show.
+  const primaryRows = await db
+    .select({ count: threadCount })
+    .from(messageMetadata)
+    .where(
+      and(
+        eq(messageMetadata.userId, userId),
+        eq(messageMetadata.isArchived, false),
+        primaryViewFilter(),
+      ),
+    );
+  counts["PRIMARY"] = Number(primaryRows[0]?.count ?? 0);
 
   // Starred cuts across categories, so it needs its own query rather than a
   // group-by bucket. Same exclusions as the Starred view itself.
@@ -377,6 +495,7 @@ export async function getPriorityEmails(
       threadId: messageMetadata.threadId,
       receivedAt: messageMetadata.receivedAt,
       sender: messageMetadata.sender,
+      recipient: messageMetadata.recipient,
       subject: messageMetadata.subject,
       snippet: messageMetadata.snippet,
       priority: messageMetadata.priority,
@@ -386,6 +505,7 @@ export async function getPriorityEmails(
       isActionRequired: messageMetadata.isActionRequired,
       isReplyNeeded: messageMetadata.isReplyNeeded,
       isUnread: messageMetadata.isUnread,
+      hasAttachment: messageMetadata.hasAttachment,
       rn: sql<number>`
         ROW_NUMBER() OVER(
           PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -403,6 +523,7 @@ export async function getPriorityEmails(
       threadId: sq.threadId,
       receivedAt: sq.receivedAt,
       sender: sq.sender,
+      recipient: sq.recipient,
       subject: sq.subject,
       snippet: sq.snippet,
       priority: sq.priority,
@@ -412,6 +533,7 @@ export async function getPriorityEmails(
       isActionRequired: sq.isActionRequired,
       isReplyNeeded: sq.isReplyNeeded,
       isUnread: sq.isUnread,
+      hasAttachment: sq.hasAttachment,
     })
     .from(sq)
     .where(eq(sq.rn, 1))
@@ -426,6 +548,7 @@ export async function getPriorityEmails(
   const threads: ThreadSummary[] = rows.map((row) => ({
     threadId: row.threadId || row.entityId,
     sender: row.sender ?? "",
+    recipient: row.recipient ?? undefined,
     subject: row.subject ?? "(no subject)",
     date: row.receivedAt?.toISOString() ?? "",
     snippet: row.snippet ?? "",
@@ -436,7 +559,10 @@ export async function getPriorityEmails(
     isActionRequired: row.isActionRequired,
     isReplyNeeded: row.isReplyNeeded,
     isUnread: row.isUnread,
+    hasAttachment: row.hasAttachment,
   }));
+
+  await enrichWithAttachments(userId, threads);
 
   return { threads };
 }

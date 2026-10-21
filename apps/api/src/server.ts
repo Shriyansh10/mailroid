@@ -35,6 +35,14 @@ import { gmailWebhookSync } from "@repo/services/gmail/webhook-inngest.js";
 import { gmailSyncFailuresRetry, gmailSyncFailuresSweep } from "@repo/services/gmail/sync-failures.js";
 import { adminJobWorker } from "@repo/services/admin-jobs/job-worker.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
+import { attachmentCacheEvictionCron } from "@repo/services/attachments/eviction-cron.js";
+import {
+  attachmentManifestBackfill,
+  attachmentManifestSweep,
+} from "@repo/services/gmail/attachment-manifest-backfill.js";
+import { setAttachmentMissHandler } from "@repo/services/attachments/index.js";
+import { ensureAttachmentStored } from "@repo/services/attachments/ensure-stored.js";
+import { handleInternalEnsure } from "@repo/services/attachments/internal-endpoint.js";
 import { calendarWatchRouter } from "./routes/calendar-watch.js";
 
 
@@ -144,6 +152,26 @@ app.use(async (req, res, next) => {
     since: maintenance.createdAt.toISOString(),
     until: maintenance.expiresAt?.toISOString() ?? null,
   });
+});
+
+// THE API IS THE ONLY GMAIL READER FOR ATTACHMENTS. In this process a confirmed
+// storage miss is populated in-process; the web process reaches the same
+// function through the internal endpoint below.
+setAttachmentMissHandler(async (userId, attachmentId) => {
+  const outcome = await ensureAttachmentStored(userId, attachmentId);
+  return outcome.status === "stored" ? { status: "stored", key: outcome.key } : { status: "not_found" };
+});
+
+// Server-to-server only. Caddy routes /api/*, /trpc/*, /openapi.json and /docs*
+// here and nothing else, so /internal/* is not reachable from the internet; the
+// web process calls it over the private network (API_INTERNAL_URL). The service
+// secret is a second lock, and ownership is still checked per request.
+app.post("/internal/attachments/ensure", async (req, res) => {
+  const result = await handleInternalEnsure({
+    secretHeader: req.get("x-internal-secret") ?? undefined,
+    body: req.body,
+  });
+  res.status(result.status).set(result.headers ?? {}).json(result.json);
 });
 
 // Corsair webhooks — single endpoint for all plugins
@@ -317,6 +345,9 @@ app.use(
       gmailSyncFailuresRetry,
       gmailSyncFailuresSweep,
       adminJobWorker,
+      attachmentCacheEvictionCron,
+      attachmentManifestBackfill,
+      attachmentManifestSweep,
     ],
   })
 );

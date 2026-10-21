@@ -4,6 +4,10 @@ import { app as expressApplication } from "./server.js";
 import { validateEmbeddingsApi } from "@repo/services/gmail/index.js";
 import { bootstrapGmailWatches } from "@repo/services/gmail/watch.js";
 import { logEgressProbe } from "./diagnostics/egress-probe.js";
+import {
+  assertAttachmentCacheConfig,
+  assertAttachmentStoreForProduction,
+} from "@repo/services/attachments/config.js";
 
 import { env } from "./env.js";
 
@@ -29,6 +33,25 @@ async function init() {
     logger.error("[LOGGER] telemetry is enabled but misconfigured — refusing to start", {
       ...errorFields(err),
     });
+    process.exit(1);
+  }
+
+  // BEFORE the socket opens, and deliberately fatal.
+  //
+  // The attachment cache is env-configured, and a half-configured cache is the
+  // one outcome worth refusing to run with: the failure it produces looks like a
+  // credentials error at the storage layer, hours after boot, on a request path
+  // nobody is watching. Better to exit here naming the missing variable.
+  //
+  // Its own try/catch rather than the one below, so the message says what is
+  // actually wrong instead of "Error creating http server".
+  try {
+    assertAttachmentCacheConfig();
+    // Object storage is the only attachment read source (ADR 0025): production
+    // without it cannot serve a single attachment, so it refuses to start.
+    assertAttachmentStoreForProduction();
+  } catch (err) {
+    logger.error(err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
 

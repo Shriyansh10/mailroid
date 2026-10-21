@@ -367,6 +367,23 @@ export const gmailRouter = router({
         body: z.string(),
         threadId: z.string().optional(),
         isReplyToExisting: z.boolean(),
+        /**
+         * What is already attached to this draft.
+         *
+         * Declared explicitly because `.output()` STRIPS undeclared fields
+         * without erroring: omit this and the compose box would reopen a draft
+         * showing no attachments, save it, and Gmail's replace-the-whole-message
+         * update would then genuinely remove them — a silent data loss with
+         * nothing anywhere reporting a failure.
+         */
+        attachments: z.array(
+          z.object({
+            id: z.string(),
+            filename: z.string(),
+            mimeType: z.string(),
+            sizeBytes: z.number(),
+          }),
+        ),
       }),
     )
     .query(async ({ ctx, input }) => {

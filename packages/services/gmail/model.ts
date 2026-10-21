@@ -1,5 +1,61 @@
 import { z } from "zod";
 
+// ── Attachment (shared by the inbox row and the thread view) ─────────
+
+/**
+ * One attachment. Metadata only — bytes are fetched separately, per request,
+ * through an authorized route.
+ *
+ * Declared before threadSummarySchema because both schemas reference it and a
+ * zod object is evaluated at module load: defined lower down, the first
+ * reference would hit the temporal dead zone and throw on import.
+ */
+export const messageAttachmentSchema = z.object({
+  /**
+   * Our own `message_attachments.id`, and the only attachment identifier the
+   * browser ever sees. Null when the manifest has been parsed live but not yet
+   * persisted, in which case the chip renders without a download action rather
+   * than inventing a URL that would 404.
+   */
+  id: z.string().nullable(),
+  partId: z.string(),
+  filename: z.string(),
+  mimeType: z.string(),
+  sizeBytes: z.number(),
+  /**
+   * The bytes are already in object storage. Metadata, never a download: it
+   * lets the UI render an image thumbnail only when that costs no Gmail call.
+   * Absent or false → show a placeholder with "Load preview".
+   */
+  cached: z.boolean().optional(),
+});
+
+export type MessageAttachment = z.infer<typeof messageAttachmentSchema>;
+
+/**
+ * One inline image, for resolving a `cid:` reference in an HTML body.
+ *
+ * A SEPARATE FIELD FROM `attachments`, deliberately, and the separation is the
+ * control rather than a convention. Inline parts are filtered out of the chip
+ * list at every producing site because a signature logo is body furniture, not
+ * a document — putting them back into that array so the renderer could reach
+ * them would restore the chips too, in several places at once, and only one of
+ * those would have to be missed for the regression to ship.
+ *
+ * Carries the two fields resolution needs and nothing else. Entries are emitted
+ * only when BOTH are known, so the renderer never has to reason about a
+ * half-resolvable image: an unpersisted manifest yields no entries and the
+ * `cid:` stays unresolved, exactly as it is today.
+ */
+export const inlineImageSchema = z.object({
+  /** `Content-ID`, angle brackets already stripped by parse.ts. */
+  contentId: z.string(),
+  /** Our `message_attachments.id` — what `/api/attachments/{id}` needs. */
+  id: z.string(),
+});
+
+export type InlineImage = z.infer<typeof inlineImageSchema>;
+
 // ── Thread summary (inbox row) ───────────────────────────────────────
 
 export const threadSummarySchema = z.object({
@@ -33,6 +89,23 @@ export const threadSummarySchema = z.object({
   category: z.string().optional(),
   /** Gmail draft resource id — present only on DRAFT rows, needed to reopen/send the draft. */
   draftId: z.string().optional(),
+  /**
+   * Attachment chips for the inbox row, from the persisted manifest.
+   *
+   * Unlike messageDetailSchema.attachments, absence here carries NO meaning:
+   * the list path never reads a payload, so an un-hydrated thread simply has
+   * nothing to show. The row makes no claim either way — see
+   * listAttachmentsForThreads.
+   */
+  attachments: z.array(messageAttachmentSchema).optional(),
+  /**
+   * "Something is attached here", for rows with no manifest yet.
+   *
+   * Three states, and only `true` renders: null means nothing has looked, and
+   * false means we looked and there is nothing. A row that has real chips
+   * ignores this — chips are strictly better information.
+   */
+  hasAttachment: z.boolean().nullable().optional(),
 });
 
 export type ThreadSummary = z.infer<typeof threadSummarySchema>;
@@ -71,6 +144,29 @@ export const messageDetailSchema = z.object({
   isDraft: z.boolean().optional(),
   /** Gmail draft resource id, present only when isDraft is true — needed to edit/send it. */
   draftId: z.string().optional(),
+  /**
+   * The message's attachments — and the absence of this field is meaningful.
+   *
+   *   an array (even empty) → authoritative. We read the full payload, or we
+   *                           hold a persisted manifest. `[]` means none.
+   *   null / absent         → UNKNOWN. The message was synced metadata-only, so
+   *                           there is no payload to parse and no manifest to
+   *                           read. It may well have attachments.
+   *
+   * The UI must render those two states differently. Collapsing "unknown" into
+   * "none" would tell a user their mail has no attachments when we simply never
+   * looked, which is the silent degradation this codebase keeps ruling out.
+   */
+  attachments: z.array(messageAttachmentSchema).nullable().optional(),
+  /**
+   * Inline images this message's HTML body can reference by `cid:`.
+   *
+   * Unlike `attachments`, absence here means nothing at all — an empty list and
+   * a missing field both mean "no `cid:` reference can be resolved", and the
+   * renderer treats them identically. There is no "unknown" state worth
+   * distinguishing, because the only consequence is whether an image renders.
+   */
+  inlineImages: z.array(inlineImageSchema).optional(),
 });
 
 export type MessageDetail = z.infer<typeof messageDetailSchema>;

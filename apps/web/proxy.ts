@@ -170,7 +170,30 @@ export async function proxy(request: NextRequest) {
  * Excluded: Next's own static/image pipelines and the favicon (never worth a DB
  * read), and /maintenance itself — matching it would rewrite the maintenance
  * page to itself forever.
+ *
+ * ALSO EXCLUDED: /api/compose/send, and this one is not an optimisation.
+ *
+ * Whenever proxy runs for a request, Next CLONES AND BUFFERS the request body
+ * so it can be read both here and in the route handler — capped at 10 MB by
+ * default (experimental.proxyClientMaxBodySize). Past that cap it does not
+ * fail: it silently keeps the first 10 MB and hands the route a TRUNCATED body.
+ * For a multipart upload that means the parser never reaches the closing
+ * boundary, and the send dies as "Failed to parse body as FormData" — a
+ * message that names neither the size nor the real limit. Every attachment
+ * over 10 MB failed this way, however correct the size gate upstream was.
+ *
+ * Excluding the route is preferred over raising the cap because proxy() never
+ * reads this body — it falls straight through to NextResponse.next() below —
+ * so buffering it is pure cost: a second ~26 MB copy alongside the one
+ * boundBody() already bounds, on a host with no swap, invisible to the
+ * attachment byte budget in packages/services/attachments/index.ts. It would
+ * also put the size limit in next.config.js, which cannot import
+ * MAX_UPLOAD_BYTES, leaving two numbers to drift apart.
+ *
+ * The cost of excluding it is that the maintenance gate above no longer covers
+ * this route, so the route performs that check itself — see the top of
+ * apps/web/app/api/compose/send/route.ts. Do not remove one without the other.
  */
 export const config = {
-  matcher: ["/((?!_next/static|_next/image|favicon.ico|maintenance).*)"],
+  matcher: ["/((?!_next/static|_next/image|favicon.ico|maintenance|api/compose/send).*)"],
 };
