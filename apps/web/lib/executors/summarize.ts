@@ -1,7 +1,8 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError } from "@repo/ai";
+import { ToolExecutionError, attachmentsForModel, type AttachmentForModel } from "@repo/ai";
 import { getOrCreateSummary, type EmailCandidate } from "@web/lib/summarize/get-or-create-summary";
 import { getActiveThreadMeetings } from "@repo/services/calendar/thread-links";
+import { getMessageAttachmentManifest } from "@repo/services/attachments/discovery";
 
 export interface SummarizeEmailInput {
   entityId?: string;
@@ -38,6 +39,29 @@ export interface SummarizeEmailOutput {
     end: string;
     attendees: string[];
   }>;
+  /** This email's files, by (masked) name. `null` = never checked, not "none". */
+  attachments?: AttachmentForModel[] | null;
+}
+
+/**
+ * The email's attachments, as the model may see them — names masked, unknown
+ * kept as null. Best-effort like the meetings: a failed lookup is "couldn't
+ * check" (null), which the model is told to say, never a failed summary.
+ */
+async function loadAttachments(
+  userId: string,
+  entityId: string | undefined,
+): Promise<AttachmentForModel[] | null> {
+  if (!entityId) return null;
+  try {
+    return attachmentsForModel(await getMessageAttachmentManifest(userId, entityId));
+  } catch (error) {
+    console.warn("[executor:summarizeEmail] attachment lookup failed", {
+      entityId,
+      error: String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -146,6 +170,8 @@ export class CorsairSummarizeEmailExecutor
           receivedAt: outcome.receivedAt,
           message: outcome.message,
           meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+          // An image-only mail is exactly where the files are the content.
+          attachments: await loadAttachments(ctx.userId, outcome.entityId),
         };
       }
 
@@ -174,6 +200,7 @@ export class CorsairSummarizeEmailExecutor
       overview: outcome.summary,
       guardrails: outcome.flags,
       meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+      attachments: await loadAttachments(ctx.userId, outcome.entityId),
     };
   }
 }

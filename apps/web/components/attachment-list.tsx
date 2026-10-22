@@ -12,6 +12,7 @@ import {
   HelpCircleIcon,
   PaperclipIcon,
 } from "lucide-react";
+import { fileFamily, type FileFamily } from "@repo/services/attachments/file-family";
 
 export interface MessageAttachment {
   /** Our attachment id. Null when parsed live but not yet persisted, in which
@@ -43,7 +44,7 @@ const MAX_THUMBNAIL_BYTES = 512 * 1024;
 /** Types the bytes route will render inline — kept in step with the allowlist in
  *  packages/services/attachments/headers.ts, so we never offer to open something
  *  that would silently download instead. */
-const PREVIEWABLE = new Set([
+export const PREVIEWABLE = new Set([
   "application/pdf",
   "image/png",
   "image/jpeg",
@@ -72,29 +73,21 @@ export function formatSize(bytes: number): string {
 }
 
 /** Icon and accent per family. The accent is the only colour on the card, so a
- *  row of mixed attachments stays scannable by type at a glance. */
-export function visualFor(mimeType: string, filename: string) {
-  const ext = filename.split(".").pop()?.toLowerCase() ?? "";
+ *  row of mixed attachments stays scannable by type at a glance. The family
+ *  itself comes from the shared rule Dobbie's file search also uses, so "a
+ *  spreadsheet" means the same thing on screen and in a search. */
+const FAMILY_VISUALS: Record<FileFamily, { Icon: typeof FileIcon; tint: string }> = {
+  image: { Icon: ImageIcon, tint: "text-blue-600 dark:text-blue-400" },
+  pdf: { Icon: FileTextIcon, tint: "text-red-600 dark:text-red-400" },
+  spreadsheet: { Icon: FileSpreadsheetIcon, tint: "text-green-600 dark:text-green-400" },
+  archive: { Icon: FileArchiveIcon, tint: "text-amber-600 dark:text-amber-400" },
+  code: { Icon: FileCodeIcon, tint: "text-purple-600 dark:text-purple-400" },
+  document: { Icon: FileTextIcon, tint: "text-sky-600 dark:text-sky-400" },
+};
 
-  if (mimeType.startsWith("image/")) {
-    return { Icon: ImageIcon, tint: "text-blue-600 dark:text-blue-400" };
-  }
-  if (mimeType === "application/pdf" || ext === "pdf") {
-    return { Icon: FileTextIcon, tint: "text-red-600 dark:text-red-400" };
-  }
-  if (["xlsx", "xls", "csv"].includes(ext)) {
-    return { Icon: FileSpreadsheetIcon, tint: "text-green-600 dark:text-green-400" };
-  }
-  if (["zip", "gz", "tar", "rar", "7z"].includes(ext)) {
-    return { Icon: FileArchiveIcon, tint: "text-amber-600 dark:text-amber-400" };
-  }
-  if (["html", "htm", "svg", "js", "json", "xml", "css"].includes(ext)) {
-    return { Icon: FileCodeIcon, tint: "text-purple-600 dark:text-purple-400" };
-  }
-  if (["doc", "docx", "txt", "md", "rtf"].includes(ext)) {
-    return { Icon: FileTextIcon, tint: "text-sky-600 dark:text-sky-400" };
-  }
-  return { Icon: FileIcon, tint: "text-muted-foreground" };
+export function visualFor(mimeType: string, filename: string) {
+  const family = fileFamily(mimeType, filename);
+  return family ? FAMILY_VISUALS[family] : { Icon: FileIcon, tint: "text-muted-foreground" };
 }
 
 function AttachmentCard({

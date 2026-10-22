@@ -15,6 +15,8 @@
     "./attachments/headers": "./attachments/headers.ts",
     "./attachments/headers.js": "./attachments/headers.ts",
     "./attachments/store": "./attachments/store.ts",
+    "./attachments/discovery": "./attachments/discovery.ts",
+    "./attachments/file-family": "./attachments/file-family.ts",
     "./attachments/store.js": "./attachments/store.ts",
     "./attachments/storage": "./attachments/storage.ts",
     "./attachments/storage.js": "./attachments/storage.ts",

@@ -74,6 +74,16 @@ export type {
 } from "./tools/index.ts";
 
 export { toOpenAiToolDefs } from "./tools/convert.ts";
+export {
+  attachmentsForModel,
+  maskForModel,
+  shapeFindAttachmentsResult,
+} from "./tools/attachment-results.ts";
+export type {
+  AttachmentForModel,
+  FindAttachmentsResult,
+  FoundAttachmentInput,
+} from "./tools/attachment-results.ts";
 export type { OpenAiToolDef } from "./tools/convert.ts";
 
 export type { PendingApprovalStore, PendingApproval } from "./tools/approval-store.ts";

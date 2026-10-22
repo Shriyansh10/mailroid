@@ -39,6 +39,7 @@ import { CorsairSummarizeEmailExecutor } from "./summarize";
 import type { SummarizeEmailInput } from "./summarize";
 import { GetEmailDetailExecutor } from "./email-detail";
 import type { GetEmailDetailInput } from "./email-detail";
+import { FindAttachmentsExecutor, type FindAttachmentsInput } from "./attachments";
 import {
   FindMeetingSlotsExecutor,
   RefineMeetingSlotsExecutor,
@@ -81,6 +82,7 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
   const summarizeExec = new CorsairSummarizeEmailExecutor();
   const orgMetricsExec = new OrganizationMetricsExecutor();
   const emailDetailExec = new GetEmailDetailExecutor();
+  const findAttachmentsExec = new FindAttachmentsExecutor();
   const replyExec = new ReplyToEmailExecutor();
   const forwardExec = new ForwardEmailExecutor();
 
@@ -307,6 +309,19 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ getCommunicationMetrics replaced with scope-checked executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ getCommunicationMetrics NOT found in registry — mock still active");
+  }
+
+  // Replace findAttachments with the metadata-only, user-scoped executor
+  const findAttachmentsDef = registry.get("findAttachments");
+  if (findAttachmentsDef) {
+    registry.register({
+      ...findAttachmentsDef,
+      execute: (args, ctx) =>
+        findAttachmentsExec.execute(args as FindAttachmentsInput, ctx as ToolExecutionContext),
+    });
+    console.log("[registerProductionExecutors] ✅ findAttachments replaced with metadata-only executor");
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ findAttachments NOT found in registry — mock still active");
   }
 
   // Replace getEmailDetail with the guardrailed, embedding-backed executor
