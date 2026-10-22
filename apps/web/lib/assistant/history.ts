@@ -176,14 +176,27 @@ interface Turn {
 // pattern can hit ids. Masking is idempotent, so a result stored after the
 // fix comes out byte-identical.
 
-// What the agent loop stores for a successful call (packages/ai/src/chat/agent.ts).
-const TOOL_RESULT_FRAME = /^<tool_result tool="(searchEmails|summarizeEmail)">\n([\s\S]*)\n<\/tool_result>$/;
+// What the agent loop stores for a call (packages/ai/src/chat/agent.ts): a
+// result, or an error carrying the upstream message.
+const TOOL_FRAME = /^<(tool_result|tool_error) tool="([A-Za-z]+)">\n([\s\S]*)\n<\/\1>$/;
 
 type Json = Record<string, unknown>;
 
 const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
 const maskText = (v: unknown) => (typeof v === "string" ? maskMailboxTextForModel(v) : v);
 const maskSender = (v: unknown) => (typeof v === "string" ? senderForModel(v) : v);
+// A stored attendee is a raw address (before the names-only change) or a
+// name (after). senderForModel turns the first into "[EMAIL]" and leaves the
+// second as it is; no names can be looked up here, so none are invented.
+const maskAttendees = (v: unknown) => (Array.isArray(v) ? v.map(maskSender) : v);
+
+function remaskMeeting(m: unknown): unknown {
+  if (!isObject(m)) return m;
+  const out: Json = { ...m, title: maskText(m.title), attendees: maskAttendees(m.attendees) };
+  if ("description" in m) out.description = maskText(m.description);
+  if ("location" in m) out.location = maskText(m.location);
+  return out;
+}
 
 function remaskSearchEmails(data: Json): Json {
   const out: Json = { ...data };
@@ -205,19 +218,50 @@ function remaskSummarizeEmail(data: Json): Json {
       isObject(c) ? { ...c, sender: maskSender(c.sender), subject: maskText(c.subject) } : c,
     );
   }
+  if (Array.isArray(data.meetings)) out.meetings = data.meetings.map(remaskMeeting);
   return out;
 }
 
+/** Old rows carried each colleague's address; it is dropped, and a missing name reads "[EMAIL]". */
+function remaskMetricsPeople(data: Json): Json {
+  if (!Array.isArray(data.people)) return data;
+  return {
+    ...data,
+    people: data.people.map((p) => {
+      if (!isObject(p) || !("email" in p)) return p;
+      const rest: Json = { ...p };
+      delete rest.email;
+      const name = typeof p.name === "string" && p.name.trim() ? maskMailboxTextForModel(p.name) : "[EMAIL]";
+      return { ...rest, name };
+    }),
+  };
+}
+
+const REMASK_RESULT: Record<string, (data: Json) => Json> = {
+  searchEmails: remaskSearchEmails,
+  summarizeEmail: remaskSummarizeEmail,
+  getEvents: (d) => (Array.isArray(d.events) ? { ...d, events: d.events.map(remaskMeeting) } : d),
+  getThreadMeetings: (d) => (Array.isArray(d.meetings) ? { ...d, meetings: d.meetings.map(remaskMeeting) } : d),
+  generateExecutiveBrief: (d) => ({ ...d, briefing: maskText(d.briefing) }),
+  getCommunicationMetrics: remaskMetricsPeople,
+};
+
 /**
  * The tool message with its known mailbox fields masked, or the message
- * unchanged when it isn't a searchEmails/summarizeEmail result. `unparseable`
- * is set when the frame matched but the JSON inside did not parse; the
- * content is then left exactly as stored.
+ * unchanged when it isn't one of the tools above (or an error from any tool,
+ * whose upstream message is masked). `unparseable` is set when the frame
+ * matched but the JSON inside did not parse; the content is then left
+ * exactly as stored.
  */
 export function remaskStoredToolResult(m: DbChatMessage): { message: DbChatMessage; unparseable: boolean } {
-  const match = m.content ? TOOL_RESULT_FRAME.exec(m.content) : null;
+  const match = m.content ? TOOL_FRAME.exec(m.content) : null;
   if (!match) return { message: m, unparseable: false };
-  const [, tool, body] = match;
+  const [, frame, tool, body] = match;
+  const remask =
+    frame === "tool_error"
+      ? (d: Json) => ({ ...d, error: maskText(d.error) })
+      : REMASK_RESULT[tool!];
+  if (!remask) return { message: m, unparseable: false };
 
   let data: unknown;
   try {
@@ -227,9 +271,8 @@ export function remaskStoredToolResult(m: DbChatMessage): { message: DbChatMessa
   }
   if (!isObject(data)) return { message: m, unparseable: false };
 
-  const masked = tool === "searchEmails" ? remaskSearchEmails(data) : remaskSummarizeEmail(data);
   // Keys whose value was undefined drop out of JSON, as they did when stored.
-  const content = `<tool_result tool="${tool}">\n${JSON.stringify(masked)}\n</tool_result>`;
+  const content = `<${frame} tool="${tool}">\n${JSON.stringify(remask(data))}\n</${frame}>`;
   return { message: content === m.content ? m : { ...m, content }, unparseable: false };
 }
 

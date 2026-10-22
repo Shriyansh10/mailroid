@@ -74,8 +74,23 @@ export type {
 } from "./tools/index.ts";
 
 export { toOpenAiToolDefs } from "./tools/convert.ts";
-export { maskForModel as maskMailboxTextForModel, senderForModel } from "./tools/model-masking.ts";
+export {
+  maskForModel as maskMailboxTextForModel,
+  senderForModel,
+  toolErrorForModel,
+} from "./tools/model-masking.ts";
 export { shapeSearchEmailsForModel } from "./tools/search-results.ts";
+export {
+  allAttendeeAddresses,
+  attendeesForModel,
+  eventForModel,
+  mergeAttendeeNames,
+} from "./tools/calendar-results.ts";
+export type { AttendeeNames } from "./tools/calendar-results.ts";
+export {
+  matchPeopleByName,
+  metricsPersonForModel,
+} from "./tools/metrics-results.ts";
 export {
   attachmentsForModel,
   maskForModel,

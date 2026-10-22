@@ -454,6 +454,33 @@ export async function resolveAttendeeRefs(
   };
 }
 
+/**
+ * Real display names already known for these addresses, keyed by normalized
+ * address. Read-only: nothing is recorded, so a read tool naming the people on
+ * a meeting leaves no trace. A name that is only the address's local part
+ * reshaped (nameFromEmail) is not a real name and is left out; it can carry
+ * whatever the local part carries, digits included.
+ */
+export async function knownDisplayNames(
+  userId: string,
+  addresses: string[],
+): Promise<Record<string, string>> {
+  const unique = [...new Set(addresses.map(normalizeEmail).filter(Boolean))];
+  if (unique.length === 0) return {};
+
+  const rows = await db
+    .select({ email: schedulingContacts.email, displayName: schedulingContacts.displayName })
+    .from(schedulingContacts)
+    .where(and(eq(schedulingContacts.userId, userId), inArray(schedulingContacts.email, unique)));
+
+  const names: Record<string, string> = {};
+  for (const row of rows) {
+    const name = row.displayName?.trim();
+    if (name && name !== nameFromEmail(row.email)) names[row.email] = name;
+  }
+  return names;
+}
+
 // ── Groups ───────────────────────────────────────────────────────────
 
 /** Every group name the given handles belong to — the join rule scopes use. */

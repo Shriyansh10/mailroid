@@ -2,12 +2,14 @@ import type { ToolExecutor } from "@repo/ai";
 import {
   ToolExecutionError,
   attachmentsForModel,
+  attendeesForModel,
   maskMailboxTextForModel,
   senderForModel,
   type AttachmentForModel,
 } from "@repo/ai";
 import { getOrCreateSummary, type EmailCandidate } from "@web/lib/summarize/get-or-create-summary";
 import { getActiveThreadMeetings } from "@repo/services/calendar/thread-links";
+import { attendeeNamesForModel } from "./calendar";
 import { getMessageAttachmentManifest } from "@repo/services/attachments/discovery";
 
 export interface SummarizeEmailInput {
@@ -80,16 +82,19 @@ async function loadAttachments(
 async function loadThreadMeetings(
   userId: string,
   threadId: string | undefined,
+  selfEmail: string | undefined,
 ): Promise<SummarizeEmailOutput["meetings"]> {
   if (!threadId) return undefined;
   try {
     const meetings = await getActiveThreadMeetings(userId, threadId);
     if (meetings.length === 0) return undefined;
+    // Names, never addresses — same projection as getThreadMeetings.
+    const names = await attendeeNamesForModel(userId, meetings);
     return meetings.map((m) => ({
-      title: m.title,
+      title: maskMailboxTextForModel(m.title),
       start: m.start,
       end: m.end,
-      attendees: m.attendees,
+      attendees: attendeesForModel(m.attendees, names, selfEmail),
     }));
   } catch (error) {
     console.warn("[executor:summarizeEmail] thread meetings lookup failed", {
@@ -127,7 +132,7 @@ export class CorsairSummarizeEmailExecutor
 {
   async execute(
     args: SummarizeEmailInput,
-    ctx: { userId: string; requestId: string },
+    ctx: { userId: string; requestId: string; userEmail?: string },
   ): Promise<SummarizeEmailOutput> {
     const { userId } = ctx;
     console.log("[executor:summarizeEmail] START", {
@@ -184,7 +189,7 @@ export class CorsairSummarizeEmailExecutor
           sender: outcome.sender ? senderForModel(outcome.sender) : outcome.sender,
           receivedAt: outcome.receivedAt,
           message: outcome.message,
-          meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+          meetings: await loadThreadMeetings(ctx.userId, outcome.threadId, ctx.userEmail),
           // An image-only mail is exactly where the files are the content.
           attachments: await loadAttachments(ctx.userId, outcome.entityId),
         };
@@ -218,7 +223,7 @@ export class CorsairSummarizeEmailExecutor
       summary: outcome.digest,
       overview: outcome.summary,
       guardrails: outcome.flags,
-      meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+      meetings: await loadThreadMeetings(ctx.userId, outcome.threadId, ctx.userEmail),
       attachments: await loadAttachments(ctx.userId, outcome.entityId),
     };
   }

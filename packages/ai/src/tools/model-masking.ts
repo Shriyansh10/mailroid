@@ -45,3 +45,13 @@ export function senderForModel(header: string | null | undefined): string {
   const { name, address } = parseFromHeader(header);
   return maskForModel(name || address);
 }
+
+/**
+ * A tool failure's message as the model may see it. Upstream errors are
+ * quoted verbatim by the executors (Google's "Invalid attendee email: …"),
+ * so they are mailbox-adjacent text and masked the same way. The fallback is
+ * used when there is no message at all.
+ */
+export function toolErrorForModel(error: string | null | undefined, fallback: string): string {
+  return maskForModel(error) || fallback;
+}

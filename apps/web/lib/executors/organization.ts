@@ -5,7 +5,17 @@ import {
   windowForDays,
 } from "@repo/services/organization/index";
 import { isOrganizationLicensed } from "@repo/services/entitlements";
+import { contactHandle } from "@repo/services/scheduling/contacts";
+import { maskMailboxTextForModel, matchPeopleByName, metricsPersonForModel } from "@repo/ai";
 import type { ToolExecutionContext } from "@repo/ai";
+
+/**
+ * The opaque ref a person is shown under. The same keyed hash as a scheduling
+ * handle, computed rather than stored: resolution recomputes it over the
+ * caller's visible scope, so nothing is written and a ref outside that scope
+ * resolves to no one.
+ */
+const personRef = (userId: string, email: string) => contactHandle(userId, email);
 
 /**
  * Organization metrics, for the assistant.
@@ -18,7 +28,7 @@ import type { ToolExecutionContext } from "@repo/ai";
  * licensed organization and their visible scope itself, in the same order as
  * the `orgProcedure` middleware, and fails closed at each step.
  *
- * `subjectEmail` reaches us from the model, which means it reaches us from
+ * `person` reaches us from the model, which means it reaches us from
  * whatever the user typed. It is untrusted input, never a resolved identity:
  * asking about a colleague outside the caller's subtree must be REFUSED, not
  * answered with an empty report. An empty report reads as "that person has no
@@ -32,7 +42,8 @@ import type { ToolExecutionContext } from "@repo/ai";
  */
 
 export interface CommunicationMetricsInput {
-  subjectEmail?: string;
+  /** A ref from an earlier result, a name, or an address the user typed. */
+  person?: string;
   days?: 7 | 30 | 90;
 }
 
@@ -43,6 +54,7 @@ export interface CommunicationMetricsOutput {
   policy?: Record<string, unknown>;
   totals?: Record<string, unknown>;
   people?: Record<string, unknown>[];
+  candidates?: { ref: string; name: string }[];
 }
 
 const refuse = (message: string): CommunicationMetricsOutput => ({ found: false, message });
@@ -73,18 +85,49 @@ export class OrganizationMetricsExecutor {
       return refuse("You're not a member of this organization.");
     }
 
-    const subject = args.subjectEmail?.trim().toLowerCase();
-    if (subject && !scope.visibleEmails.includes(subject)) {
-      // Refusal, not an empty report. The difference matters: one says "you
-      // cannot see this", the other says "there is nothing here".
-      return refuse(
-        `${subject} isn't someone you can see a report for — they don't report to you, ` +
-          `directly or through anyone else.`,
-      );
-    }
-
     const days = args.days ?? 30;
     const window = windowForDays(days);
+
+    // Who `person` means, resolved inside the visible scope only. The model
+    // never sees an address, so it names people by ref or by name; an address
+    // is accepted only as something the user typed.
+    let subject: string | undefined;
+    const asked = args.person?.trim();
+    if (asked) {
+      const byRef = scope.visibleEmails.find((email) => personRef(ctx.userId, email) === asked);
+      if (byRef) {
+        subject = byRef;
+      } else if (asked.includes("@")) {
+        subject = asked.toLowerCase();
+        if (!scope.visibleEmails.includes(subject)) {
+          // Refusal, not an empty report. The difference matters: one says
+          // "you cannot see this", the other says "there is nothing here".
+          return refuse(
+            "That person isn't someone you can see a report for — they don't report to you, " +
+              "directly or through anyone else.",
+          );
+        }
+      } else {
+        // A name: matched against the people in scope, never the whole org,
+        // so a miss discloses nothing about anyone outside it.
+        const everyone = await buildReport({ organizationId: licensed.organizationId, viewerEmail, window });
+        const matches = everyone ? matchPeopleByName(everyone.rows, asked) : [];
+        if (matches.length === 0) {
+          return refuse(
+            `No one you can see a report for matches "${maskMailboxTextForModel(asked)}". Ask the user who they mean.`,
+          );
+        }
+        if (matches.length > 1) {
+          return {
+            found: false,
+            message: "Several people you can see match that name. Ask the user which one, then call again with their ref.",
+            candidates: matches.map((row) => metricsPersonForModel(row, personRef(ctx.userId, row.email))),
+          };
+        }
+        subject = matches[0]!.email;
+      }
+    }
+
     const report = await buildReport({
       organizationId: licensed.organizationId,
       viewerEmail,
@@ -114,9 +157,9 @@ export class OrganizationMetricsExecutor {
             : undefined,
       },
       people: report.rows.map((row) => ({
-        email: row.email,
-        // Only ever someone already in scope — the rows are the scope.
-        name: row.name ?? undefined,
+        // Only ever someone already in scope — the rows are the scope. Named
+        // and referenced, never addressed; see metricsPersonForModel.
+        ...metricsPersonForModel(row, personRef(ctx.userId, row.email)),
         connected: row.coverage === "COVERED",
         status: row.status.status,
         statusReason: row.status.reason,

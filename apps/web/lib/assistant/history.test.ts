@@ -127,15 +127,84 @@ test("unparseable stored content is left exactly as it was", () => {
   assert.equal(trimHistoryForModel([broken])[0]!.content, broken.content);
 });
 
-test("other tools' results are untouched", () => {
-  const other = framed("getEvents", { events: [{ id: PHONEY_ID, attendees: ["ravi@acme.com"] }] });
+test("tools that return no mailbox text are untouched", () => {
+  const slots = framed("findMeetingSlots", {
+    intent: "LUNCH",
+    candidates: [{ start: "2026-10-23T13:00:00", end: "2026-10-23T14:00:00", score: 0.9, reasons: [] }],
+    conflicts: ["+1 415 555 0134"],
+  });
+  assert.equal(trimHistoryForModel([slots])[0], slots);
+});
+
+test("an old getEvents result: attendees, title, description and location masked; ids and times intact", () => {
+  const old = framed("getEvents", {
+    events: [{
+      id: PHONEY_ID,
+      title: "Call with ravi@acme.com",
+      start: "2026-10-22T10:30:00+05:30",
+      end: "2026-10-22T11:00:00+05:30",
+      description: "Dial +1 415 555 0134",
+      location: "jane@client.io's office",
+      attendees: ["ravi@acme.com", "Ravi Kumar <ravi@acme.com>"],
+      status: "upcoming",
+    }],
+  });
+  const out = trimHistoryForModel([old])[0]!.content!;
+  assert.doesNotMatch(out, ADDRESS);
+  assert.doesNotMatch(out, /415 555 0134/);
+  assert.match(out, /"attendees":\["\[EMAIL\]","Ravi Kumar"\]/);
+  assert.match(out, new RegExp(`"id":"${PHONEY_ID}"`));
+  assert.match(out, /"start":"2026-10-22T10:30:00\+05:30","end":"2026-10-22T11:00:00\+05:30"/);
+});
+
+test("a names-only getEvents / getThreadMeetings result replays byte-identical", () => {
+  const events = framed("getEvents", {
+    events: [{ id: "e1", title: "Lunch", start: "2026-10-22T13:00:00Z", end: "2026-10-22T14:00:00Z", attendees: ["You", "Ravi Kumar", "[EMAIL]"] }],
+  });
+  const meetings = framed("getThreadMeetings", {
+    meetings: [{ selectionId: "sel_1", title: "Sync", start: "s", end: "e", attendees: ["Ravi Kumar"], past: false }],
+  });
+  const out = trimHistoryForModel([events, meetings]);
+  assert.equal(out[0], events);
+  assert.equal(out[1], meetings);
+});
+
+test("an old summarizeEmail result's meeting attendees are masked", () => {
+  const out = trimHistoryForModel([
+    framed("summarizeEmail", { found: true, entityId: "m1", meetings: [{ title: "Sync", start: "s", end: "e", attendees: ["ravi@acme.com"] }] }),
+  ])[0]!.content!;
+  assert.doesNotMatch(out, ADDRESS);
+  assert.match(out, /"attendees":\["\[EMAIL\]"\]/);
+});
+
+test("an old getCommunicationMetrics result loses each colleague's address", () => {
+  const out = trimHistoryForModel([
+    framed("getCommunicationMetrics", {
+      found: true,
+      people: [{ email: "amit@acme.com", name: "Amit Shah", received: 12 }, { email: "zed@acme.com", received: 3 }],
+    }),
+  ])[0]!.content!;
+  assert.doesNotMatch(out, ADDRESS);
+  assert.match(out, /\{"name":"Amit Shah","received":12\}/);
+  assert.match(out, /\{"received":3,"name":"\[EMAIL\]"\}/);
+});
+
+test("an old executive brief is masked", () => {
+  const out = trimHistoryForModel([
+    framed("generateExecutiveBrief", { briefing: "- **From ravi@acme.com**: *Q3* — call +1 415 555 0134 on 2026-10-22" }),
+  ])[0]!.content!;
+  assert.doesNotMatch(out, ADDRESS);
+  assert.doesNotMatch(out, /415 555 0134/);
+  assert.match(out, /2026-10-22/);
+});
+
+test("a stored tool error from any tool is masked", () => {
   const error: DbChatMessage = {
     role: "tool",
-    content: `<tool_error tool="searchEmails">\n{"error":"ravi@acme.com not found"}\n</tool_error>`,
+    content: `<tool_error tool="createEvent">\n{"error":"Invalid attendee email: ravi@acme.com"}\n</tool_error>`,
     tool_call_id: "e",
     metadata: null,
   };
-  const out = trimHistoryForModel([other, error]);
-  assert.equal(out[0], other);
-  assert.equal(out[1], error);
+  const out = trimHistoryForModel([error])[0]!.content!;
+  assert.equal(out, `<tool_error tool="createEvent">\n{"error":"Invalid attendee email: [EMAIL]"}\n</tool_error>`);
 });

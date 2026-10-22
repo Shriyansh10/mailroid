@@ -1,5 +1,5 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError } from "@repo/ai";
+import { ToolExecutionError, maskMailboxTextForModel } from "@repo/ai";
 import { getOrGenerateBrief } from "@repo/services/gmail/index";
 
 export interface GenerateExecutiveBriefInput {}
@@ -25,7 +25,10 @@ export class CorsairGenerateBriefExecutor
 
       const briefing = await getOrGenerateBrief(ctx.userId, localDate);
 
-      return { briefing };
+      // The stored brief embeds raw From headers, the organizer's address and
+      // invite descriptions. It is prose, so the whole text is masked for the
+      // model; the brief shown in the inbox is unchanged.
+      return { briefing: maskMailboxTextForModel(briefing) };
     } catch (error) {
       console.error("[executor:generateExecutiveBrief] FAILED", { userId: ctx.userId, error: String(error) });
       throw new ToolExecutionError("generateExecutiveBrief", error);

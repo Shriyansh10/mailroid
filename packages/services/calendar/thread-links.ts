@@ -2,7 +2,7 @@ import { db, and, eq, desc, isNull } from "@repo/database";
 import { calendarEvents } from "@repo/database/models/calendar-events";
 import { threadCalendarEvents } from "@repo/database/models/thread-calendar-events";
 
-import { getEvent, getEventOrganizerEmail } from "./index.ts";
+import { attendeeNamesFrom, getEvent, getEventOrganizerEmail } from "./index.ts";
 import { findGuestThreadMeetings, type GuestResolution } from "./guest-links.ts";
 import { getAccountEmail } from "../gmail/index.ts";
 import { isUpcomingMeeting, partitionMeetingsByTime } from "@repo/shared/calendar";
@@ -60,6 +60,8 @@ export interface ThreadMeeting {
   start: string;
   end: string;
   attendees: string[];
+  /** Google's display names, keyed by lower-cased address. See attendeeNamesFrom. */
+  attendeeNames?: Record<string, string>;
   htmlLink?: string;
   /** The Google Meet join URL, when the meeting has a conference attached. */
   meetLink?: string;
@@ -240,6 +242,7 @@ async function resolveLinks(
         start: row.startTime.toISOString(),
         end: row.endTime.toISOString(),
         attendees: extractAttendees(row.attendees),
+        attendeeNames: attendeeNamesFrom(row.attendees),
         htmlLink: row.htmlLink ?? undefined,
         meetLink: row.meetLink ?? undefined,
         location: row.location ?? undefined,
@@ -270,6 +273,7 @@ async function resolveLinks(
         start: live.start,
         end: live.end,
         attendees: live.attendees ?? [],
+        attendeeNames: live.attendeeNames,
         htmlLink: live.htmlLink,
         meetLink: live.meetLink,
         location: live.location,

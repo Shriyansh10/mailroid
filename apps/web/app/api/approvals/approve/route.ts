@@ -10,6 +10,7 @@ import {
   runAgentLoop,
   withAiUsage,
   firewall,
+  toolErrorForModel,
 } from "@repo/ai";
 import type { ChatMessage, ApprovalRequiredResponse } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
@@ -148,7 +149,7 @@ export async function POST(request: Request) {
         content:
           result.status === "success"
             ? `<tool_result tool="${approval.toolName}">\n${JSON.stringify(safeData)}\n</tool_result>`
-            : `<tool_error tool="${approval.toolName}">\n${JSON.stringify({ error: result.error ?? "Tool execution failed" })}\n</tool_error>`,
+            : `<tool_error tool="${approval.toolName}">\n${JSON.stringify({ error: toolErrorForModel(result.error, "Tool execution failed") })}\n</tool_error>`,
         metadata: deriveToolMessageMetadata(approval.toolName, approval.args as Record<string, unknown>, result) ?? null,
       });
     }

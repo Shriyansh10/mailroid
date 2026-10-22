@@ -35,6 +35,11 @@ import type {
  * update call never sends `conferenceDataVersion`, which is precisely what
  * preserves an existing Meet link when a meeting moves.
  */
+/** Meeting attendees as every calendar tool returns them: names, never addresses. */
+const ATTENDEES_FOR_MODEL =
+  'Who is on the meeting, by name: "You" for the user, "[EMAIL]" when no name is known. Never an address. ' +
+  "To schedule with one of them, call resolveRecipient with that name (and the threadId).";
+
 const ADD_MEET_SCHEMA = z
   .boolean()
   .optional()
@@ -144,7 +149,9 @@ export class ToolRegistry {
     // ── getEvents ───────────────────────────────────────────────────
     this.register({
       name: "getEvents",
-      description: "Retrieve calendar events for a given time range",
+      description:
+        "Retrieve calendar events for a given time range. " +
+        "Attendees are listed by name (\"You\" for the user, \"[EMAIL]\" when no name is known), never by address.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
@@ -256,7 +263,7 @@ export class ToolRegistry {
             title: z.string(),
             start: z.string(),
             end: z.string(),
-            attendees: z.array(z.string()),
+            attendees: z.array(z.string()).describe(ATTENDEES_FOR_MODEL),
             // Listed but not actionable. A finished meeting is still part of
             // the thread's history and the user may be asking about it; it
             // simply cannot be rescheduled or cancelled, and passing its
@@ -576,8 +583,12 @@ export class ToolRegistry {
         "answered within the response target, and what is still waiting. " +
         "Never returns mail content — no subjects, no senders, no message text " +
         "— because the organization reporting layer cannot read them. " +
-        "Omit subjectEmail for the user's own scope; supply it only for a named " +
-        "colleague. There is no performance score and no ranking of people: " +
+        "Omit `person` for the user's own scope; supply it only for a named " +
+        "colleague: their `ref` from an earlier result of this tool, their name as the user said it, " +
+        "or an email address the user typed themselves. Never an address you reconstructed. " +
+        "If the result has `candidates`, several people match: ask the user which one, then call again with that ref. " +
+        "People are shown by name only, never by address. " +
+        "There is no performance score and no ranking of people: " +
         "report the numbers and let the user interpret them. Each exception " +
         "carries a nextStep — when you mention what needs attention, say the " +
         "next step with it, without being asked.",
@@ -585,12 +596,12 @@ export class ToolRegistry {
       requiresApproval: false,
       enabled: true,
       inputSchema: z.object({
-        subjectEmail: z
+        person: z
           .string()
           .optional()
           .describe(
-            "One person to report on. The server independently checks they are " +
-              "visible to the caller and refuses otherwise.",
+            "One person to report on: a ref from an earlier result, a name, or an address the user typed. " +
+              "The server independently checks they are visible to the caller and refuses otherwise.",
           ),
         days: z
           .union([z.literal(7), z.literal(30), z.literal(90)])
@@ -604,6 +615,10 @@ export class ToolRegistry {
         policy: z.record(z.string(), z.unknown()).optional(),
         totals: z.record(z.string(), z.unknown()).optional(),
         people: z.array(z.record(z.string(), z.unknown())).optional(),
+        candidates: z
+          .array(z.object({ ref: z.string(), name: z.string() }))
+          .optional()
+          .describe("Several people match the name given: ask which one, then call again with that ref"),
       }),
       execute: async () => ({
         found: false,
@@ -754,7 +769,7 @@ export class ToolRegistry {
               title: z.string(),
               start: z.string(),
               end: z.string(),
-              attendees: z.array(z.string()),
+              attendees: z.array(z.string()).describe(ATTENDEES_FOR_MODEL),
             }),
           )
           .optional()

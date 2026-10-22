@@ -11,6 +11,8 @@ export const calendarEventSchema = z.object({
   description: z.string().optional(),
   location: z.string().optional(),
   attendees: z.array(z.string()).optional(),
+  /** Google's display names, keyed by lower-cased attendee address; only where Google has one. */
+  attendeeNames: z.record(z.string(), z.string()).optional(),
   /**
    * The event's organizer — and therefore the Meet host, since Google derives
    * one from the other. Singular because Google Calendar's `organizer` is a
