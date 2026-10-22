@@ -1702,6 +1702,11 @@ export async function searchEmails(
     .filter((t): t is Record<string, unknown> => t !== undefined)
     .map((t) => extractThreadSummary(t));
 
+  // The same chips every other list surface shows — one indexed query keyed by
+  // threadId, metadata only. No paperclip here: these rows come from Gmail with
+  // no entityId, so the per-message has_attachment flag is not to hand.
+  await enrichWithAttachments(tenantId, threads);
+
   logger.info("[SERVICE] searchEmails completed", {
     tenantId, query, threadCount: threads.length,
     nextPageToken: result.nextPageToken ?? null,
@@ -2218,6 +2223,10 @@ export async function searchLocalEmails(
 
   if (!applyAssistantRules) {
     // Raw UI search: full results (minus Sent), no blocklist/partition/cap.
+    // Chips as on every other list surface. UI only: the assistant's tool maps
+    // its own fields, and what Dobbie learns about attachments is decided
+    // there, not by whatever this row happens to carry.
+    await enrichWithAttachments(userId, withoutSent);
     return { threads: withoutSent, total: withoutSent.length };
   }
 
@@ -2271,7 +2280,13 @@ async function finalizeSearch(
   };
 }
 
-/** Batch-load each row's Gmail category from message_metadata (keyed by entityId). */
+/**
+ * Batch-load each row's Gmail category and has_attachment flag from
+ * message_metadata (keyed by entityId).
+ *
+ * has_attachment is carried tri-state — null stays null ("nobody has looked"),
+ * never coerced to false — because the row's paperclip renders only on `true`.
+ */
 async function enrichCategories(
   userId: string,
   threads: ThreadSummary[],
@@ -2280,15 +2295,23 @@ async function enrichCategories(
   if (ids.length === 0) return threads;
 
   const rows = await db
-    .select({ entityId: messageMetadata.entityId, category: messageMetadata.category })
+    .select({
+      entityId: messageMetadata.entityId,
+      category: messageMetadata.category,
+      hasAttachment: messageMetadata.hasAttachment,
+    })
     .from(messageMetadata)
     .where(and(eq(messageMetadata.userId, userId), inArray(messageMetadata.entityId, ids)));
 
-  const catById = new Map(rows.map((r) => [r.entityId, r.category]));
-  return threads.map((t) => ({
-    ...t,
-    category: (t.entityId ? catById.get(t.entityId) : undefined) ?? t.category ?? undefined,
-  }));
+  const byId = new Map(rows.map((r) => [r.entityId, r]));
+  return threads.map((t) => {
+    const row = t.entityId ? byId.get(t.entityId) : undefined;
+    return {
+      ...t,
+      category: row?.category ?? t.category ?? undefined,
+      hasAttachment: row ? row.hasAttachment : (t.hasAttachment ?? null),
+    };
+  });
 }
 
 /** Recent mail within the window, newest first — the "summarize my inbox" source. */
