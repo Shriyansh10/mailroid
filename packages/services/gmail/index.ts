@@ -1639,7 +1639,7 @@ export async function searchEmails(
 ): Promise<ThreadListResult> {
   const startMs = Date.now();
   logger.info("[SERVICE] searchEmails start", {
-    tenantId, query, maxResults: opts?.maxResults, pageToken: opts?.pageToken,
+    tenantId, queryLength: query.length, maxResults: opts?.maxResults, pageToken: opts?.pageToken,
   });
 
   const tenant = corsair.withTenant(tenantId);
@@ -1664,7 +1664,7 @@ export async function searchEmails(
     { tenantId, trigger: "ui" },
   );
   logger.info("[GMAIL] threads.list (searchEmails)", {
-    tenantId, query: searchQuery,
+    tenantId, queryLength: searchQuery.length,
     threadCount: (result.threads ?? []).length,
     nextPageToken: result.nextPageToken ?? null,
     gmailDurationMs: Date.now() - gmailStart,
@@ -1690,7 +1690,7 @@ export async function searchEmails(
     ),
   );
   logger.info("[GMAIL] threads.get batch (searchEmails)", {
-    tenantId, query, threadCount: detailed.length,
+    tenantId, queryLength: query.length, threadCount: detailed.length,
     durationMs: Date.now() - gmailStart,
   });
 
@@ -1708,7 +1708,7 @@ export async function searchEmails(
   await enrichWithAttachments(tenantId, threads);
 
   logger.info("[SERVICE] searchEmails completed", {
-    tenantId, query, threadCount: threads.length,
+    tenantId, queryLength: query.length, threadCount: threads.length,
     nextPageToken: result.nextPageToken ?? null,
     totalDurationMs: Date.now() - startMs,
   });
@@ -2193,15 +2193,15 @@ export async function searchLocalEmails(
       raw = dedupeThreads(await searchByEmbedding(userId, effectiveQuery, 20, withinDays));
       if (raw.length === 0) {
         logger.info(
-          `[search] ⚠️ Vector search returned 0 results — falling back to ILIKE for "${effectiveQuery}"`,
-          { userId, query: effectiveQuery },
+          "[search] ⚠️ Vector search returned 0 results — falling back to ILIKE",
+          { userId, queryLength: effectiveQuery.length },
         );
         raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
       }
     } catch (err) {
       logger.warn(
-        `[search] ❌ Vector search failed — falling back to ILIKE for "${effectiveQuery}"`,
-        { userId, query: effectiveQuery, err },
+        "[search] ❌ Vector search failed — falling back to ILIKE",
+        { userId, queryLength: effectiveQuery.length, err },
       );
       raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
     }
@@ -2438,16 +2438,16 @@ async function searchBySender(
       );
 
       logger.info(
-        `[search] ✅ Sender+topic search — ${threads.length} results for sender "${sender}", topic "${meaningfulQuery}"`,
-        { userId, sender, query: meaningfulQuery, count: threads.length, durationMs: Date.now() - startMs },
+        "[search] ✅ Sender+topic search",
+        { userId, queryLength: meaningfulQuery.length, count: threads.length, durationMs: Date.now() - startMs },
       );
       if (threads.length > 0) return { threads, total: threads.length };
       // No topic-ranked matches for this sender — fall through to a plain
       // recency listing of everything from them, rather than returning empty.
     } catch (err) {
       logger.warn(
-        `[search] ❌ Sender+topic vector search failed — falling back to recency for sender "${sender}"`,
-        { userId, sender, query: meaningfulQuery, err },
+        "[search] ❌ Sender+topic vector search failed — falling back to recency",
+        { userId, queryLength: meaningfulQuery.length, err },
       );
       // fall through to recency listing below
     }
@@ -2482,8 +2482,8 @@ async function searchBySender(
   );
 
   logger.info(
-    `[search] ✅ Sender search (recency) — ${threads.length} results for sender "${sender}"`,
-    { userId, sender, count: threads.length },
+    "[search] ✅ Sender search (recency)",
+    { userId, count: threads.length },
   );
   return { threads, total: threads.length };
 }
@@ -2500,7 +2500,7 @@ async function searchByEmbedding(
   withinDays?: number,
 ): Promise<ThreadSummary[]> {
   const startMs = Date.now();
-  logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, query, limit });
+  logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, queryLength: query.length, limit });
 
   const queryVector = await embedSearchQuery(query);
   const vectorLiteral = `[${queryVector.join(",")}]`;
@@ -2538,7 +2538,7 @@ async function searchByEmbedding(
     score: Math.max(0, Math.min(1, 1 - Number(r.distance))),
   }));
 
-  logger.debug("[SEARCH] searchByEmbedding result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
+  logger.debug("[SEARCH] searchByEmbedding result", { userId, queryLength: query.length, resultCount: threads.length, durationMs: Date.now() - startMs });
   return threads;
 }
 
@@ -2552,7 +2552,7 @@ async function searchByText(
   withinDays?: number,
 ): Promise<LocalSearchResult> {
   const startMs = Date.now();
-  logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, query });
+  logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, queryLength: query.length });
 
   const pattern = `%${query}%`;
   const cutoff = windowCutoff(withinDays);
@@ -2592,7 +2592,7 @@ async function searchByText(
     })),
   );
 
-  logger.info("[SEARCH] searchByText (ILIKE) result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
+  logger.info("[SEARCH] searchByText (ILIKE) result", { userId, queryLength: query.length, resultCount: threads.length, durationMs: Date.now() - startMs });
   return { threads, total: threads.length };
 }
 

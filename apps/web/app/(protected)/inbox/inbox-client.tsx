@@ -157,17 +157,18 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
     for (const [k, v] of Object.entries(params)) {
       if (v) p.set(k, v); else p.delete(k);
     }
-    frontendLogger.info("[INBOX_UI]", "navigateTo", { params, url: `/inbox${p.size ? `?${p.toString()}` : ""}` });
+    // Which params, not their values: q and aiq are what the user typed.
+    frontendLogger.info("[INBOX_UI]", "navigateTo", { params: Object.keys(params).filter((k) => params[k]) });
     router.replace(`/inbox${p.size ? `?${p.toString()}` : ""}`);
   };
 
   const handleChange = useCallback((e: React.ChangeEvent<HTMLInputElement>) => {
     const value = e.target.value;
     setLocalValue(value);
-    frontendLogger.info("[INBOX_UI]", "search input change", { value, searchMode, category });
+    frontendLogger.info("[INBOX_UI]", "search input change", { valueLength: value.length, searchMode, category });
     if (debounceRef.current) clearTimeout(debounceRef.current);
     debounceRef.current = setTimeout(() => {
-      frontendLogger.info("[INBOX_UI]", "search debounce fired", { value, searchMode, category });
+      frontendLogger.info("[INBOX_UI]", "search debounce fired", { valueLength: value.length, searchMode, category });
       if (searchMode === "ai") {
         navigateTo({ category, aiq: value || undefined, mode: "ai" });
       } else {

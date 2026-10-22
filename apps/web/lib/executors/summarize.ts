@@ -134,7 +134,7 @@ export class CorsairSummarizeEmailExecutor
       userId,
       entityId: args.entityId,
       threadId: args.threadId,
-      query: args.query,
+      hasQuery: !!args.query,
     });
 
     const outcome = await getOrCreateSummary({

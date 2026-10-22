@@ -162,7 +162,7 @@ export const useSearchEmails = (
   query: string,
   opts?: { maxResults?: number; pageToken?: string }
 ) => {
-  frontendLogger.info("[INBOX_HOOK]", "useSearchEmails called", { query, opts: opts ?? {} });
+  frontendLogger.info("[INBOX_HOOK]", "useSearchEmails called", { queryLength: query.length, opts: opts ?? {} });
   const startMs = Date.now();
 
   const result = trpc.gmail.search.useQuery(
@@ -173,7 +173,7 @@ export const useSearchEmails = (
   useEffect(() => {
     if (result.data && !result.isLoading) {
       frontendLogger.info("[INBOX_HOOK]", "useSearchEmails result", {
-        query, threadCount: result.data.threads?.length ?? 0,
+        queryLength: query.length, threadCount: result.data.threads?.length ?? 0,
         nextPageToken: result.data.nextPageToken,
         durationMs: Date.now() - startMs,
       });
@@ -181,7 +181,7 @@ export const useSearchEmails = (
   }, [result.data, result.isLoading]);
   useEffect(() => {
     if (result.error) {
-      frontendLogger.error("[INBOX_HOOK]", "useSearchEmails error", { query, error: result.error.message });
+      frontendLogger.error("[INBOX_HOOK]", "useSearchEmails error", { queryLength: query.length, error: result.error.message });
     }
   }, [result.error]);
 

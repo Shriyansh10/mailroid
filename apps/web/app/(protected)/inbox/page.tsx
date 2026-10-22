@@ -448,7 +448,11 @@ function DossierLayout({
   const utils = trpc.useUtils();
   /** Read, not threaded through as a prop: four call sites render this layout
       and only one of them has a page number to pass. */
-  const listPage = useSearchParams().get("page") ?? "1";
+  const searchParams = useSearchParams();
+  const listPage = searchParams.get("page") ?? "1";
+  // The folder total is unfiltered, so the banner has to say so when the
+  // "With attachments" filter is narrowing the list it sits above.
+  const filteredByAttachments = searchParams.get("attachments") === "1";
   const { trashThreadAsync } = useTrashThread();
   const { untrashThreadAsync } = useUntrashThread();
   const { setStarredAsync } = useSetStarred();
@@ -898,7 +902,11 @@ function DossierLayout({
           <div className="px-4 py-2 text-center text-xs text-muted-foreground bg-muted/40 border-b border-border">
             All {selectableThreads.length} conversations on this page are selected.
             {category && categoryCounts?.[category] != null && (
-              <> {categoryLabel(category)} holds {categoryCounts[category]} in total.</>
+              filteredByAttachments ? (
+                <> {categoryLabel(category)} holds {categoryCounts[category]} in total, with or without attachments.</>
+              ) : (
+                <> {categoryLabel(category)} holds {categoryCounts[category]} in total.</>
+              )
             )}
           </div>
         )}

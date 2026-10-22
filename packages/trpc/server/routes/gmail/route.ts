@@ -473,7 +473,7 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.search called", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         maxResults: input.maxResults, pageToken: input.pageToken,
       });
       const result = await searchEmails(ctx.user!.id, input.query, {
@@ -481,7 +481,7 @@ export const gmailRouter = router({
         pageToken: input.pageToken,
       });
       logger.info("[TRPC] gmail.search result", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         threadCount: result.threads?.length ?? 0,
         hasNextPage: !!result.nextPageToken, durationMs: Date.now() - startMs,
       });
@@ -837,7 +837,7 @@ export const gmailRouter = router({
     )
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
-      logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, query: input.query });
+      logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, queryLength: input.query.length });
       // Belt-and-braces alongside the client-side disabled search input:
       // `ready` is a one-time latch (see ai-readiness.ts), so this only ever
       // blocks a user's first-ever setup window, never an established user.
@@ -848,7 +848,7 @@ export const gmailRouter = router({
       }
       const result = await searchLocalEmails(ctx.user!.id, { query: input.query });
       logger.info("[TRPC] gmail.searchLocal result", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         threadCount: result.threads?.length ?? 0, total: result.total,
         durationMs: Date.now() - startMs,
       });

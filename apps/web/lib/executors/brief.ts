@@ -27,7 +27,7 @@ export class CorsairGenerateBriefExecutor
 
       return { briefing };
     } catch (error) {
-      console.error("[executor:generateExecutiveBrief] FAILED", error);
+      console.error("[executor:generateExecutiveBrief] FAILED", { userId: ctx.userId, error: String(error) });
       throw new ToolExecutionError("generateExecutiveBrief", error);
     }
   }

@@ -99,7 +99,11 @@ export class CorsairSearchEmailsExecutor
     args: SearchEmailsInput,
     ctx: { userId: string; requestId: string },
   ): Promise<SearchEmailsOutput> {
-    console.log("[executor:searchEmails] START", { userId: ctx.userId, query: args.query, sender: args.sender });
+    console.log("[executor:searchEmails] START", {
+      userId: ctx.userId,
+      queryLength: args.query?.length ?? 0,
+      hasSender: !!args.sender?.trim(),
+    });
     if (!args.query?.trim() && !args.sender?.trim()) {
       throw new ToolExecutionError("searchEmails", new Error("At least one of query or sender is required"));
     }
