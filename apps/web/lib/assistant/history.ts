@@ -1,4 +1,5 @@
 import { db, eq, and, asc, sql } from "@repo/database";
+import { maskMailboxTextForModel, senderForModel } from "@repo/ai";
 import { assistantMessages } from "@repo/database/schema";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import type { EmailContext } from "./system-prompt";
@@ -231,10 +232,13 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
     }
 
     if (meta?.emailRef) {
+      // Masked again here: refs stored before summarizeEmail masked its output
+      // still hold raw values, and this stub goes back to the model every turn.
+      // Masking is idempotent, so already-masked refs pass through unchanged.
       const stub = {
         entityId: meta.emailRef.entityId,
-        subject: meta.emailRef.subject,
-        sender: meta.emailRef.sender,
+        subject: meta.emailRef.subject ? maskMailboxTextForModel(meta.emailRef.subject) : undefined,
+        sender: meta.emailRef.sender ? senderForModel(meta.emailRef.sender) : undefined,
         note: "digest elided — call getEmailDetail for specifics",
       };
       return {

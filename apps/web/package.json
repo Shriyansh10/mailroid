@@ -8,7 +8,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint --max-warnings 0",
-    "test": "tsx --tsconfig tsconfig.test.json --test components/*.test.tsx",
+    "test": "tsx --tsconfig tsconfig.test.json --test components/*.test.tsx lib/assistant/*.test.ts",
     "check-types": "next typegen && tsc --noEmit"
   },
   "dependencies": {

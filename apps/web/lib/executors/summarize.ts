@@ -1,5 +1,11 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError, attachmentsForModel, type AttachmentForModel } from "@repo/ai";
+import {
+  ToolExecutionError,
+  attachmentsForModel,
+  maskMailboxTextForModel,
+  senderForModel,
+  type AttachmentForModel,
+} from "@repo/ai";
 import { getOrCreateSummary, type EmailCandidate } from "@web/lib/summarize/get-or-create-summary";
 import { getActiveThreadMeetings } from "@repo/services/calendar/thread-links";
 import { getMessageAttachmentManifest } from "@repo/services/attachments/discovery";
@@ -155,7 +161,16 @@ export class CorsairSummarizeEmailExecutor
       }
 
       if (outcome.reason === "ambiguous") {
-        return { found: false, ambiguous: true, candidates: outcome.candidates, message: outcome.message };
+        return {
+          found: false,
+          ambiguous: true,
+          candidates: outcome.candidates?.map((c) => ({
+            ...c,
+            subject: c.subject ? maskMailboxTextForModel(c.subject) : c.subject,
+            sender: c.sender ? senderForModel(c.sender) : c.sender,
+          })),
+          message: outcome.message,
+        };
       }
 
       if (outcome.reason === "no_content") {
@@ -165,8 +180,8 @@ export class CorsairSummarizeEmailExecutor
           found: true,
           entityId: outcome.entityId,
           threadId: outcome.threadId,
-          subject: outcome.subject,
-          sender: outcome.sender,
+          subject: outcome.subject ? maskMailboxTextForModel(outcome.subject) : outcome.subject,
+          sender: outcome.sender ? senderForModel(outcome.sender) : outcome.sender,
           receivedAt: outcome.receivedAt,
           message: outcome.message,
           meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
@@ -189,8 +204,12 @@ export class CorsairSummarizeEmailExecutor
       found: true,
       entityId: outcome.entityId,
       threadId: outcome.threadId,
-      subject: outcome.subject,
-      sender: outcome.sender,
+      // Identity fields come straight from message_metadata, unlike the digest
+      // (which the summarizer already masked). Masked here so "every sender you
+      // have seen was replaced with [EMAIL]" holds for this tool too. The email
+      // card under the reply is built from this same output.
+      subject: outcome.subject ? maskMailboxTextForModel(outcome.subject) : outcome.subject,
+      sender: outcome.sender ? senderForModel(outcome.sender) : outcome.sender,
       receivedAt: outcome.receivedAt,
       // The tool's "summary" field is the full digest — the model's working
       // context — while "overview" is the short version. This is the

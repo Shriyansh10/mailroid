@@ -9,6 +9,7 @@
  * text is constructed, from server-known values (session user, timezone
  * header, DB-resolved email context) — never from client input.
  */
+import { maskMailboxTextForModel, senderForModel } from "@repo/ai";
 
 export interface EmailContext {
   entityId: string;
@@ -236,8 +237,11 @@ export function buildSystemPrompt(opts: {
       `EMAIL CONTEXT — the email currently under discussion`,
       `entityId: ${emailContext.entityId}`,
       emailContext.threadId ? `threadId: ${emailContext.threadId}` : ``,
-      emailContext.subject ? `subject: ${emailContext.subject}` : ``,
-      emailContext.sender ? `from: ${emailContext.sender}` : ``,
+      // Read fresh from message_metadata, so raw: masked here, at the one place
+      // this block is built, because "every sender you've seen was replaced
+      // with [EMAIL]" (below) must be true of this block too.
+      emailContext.subject ? `subject: ${maskMailboxTextForModel(emailContext.subject)}` : ``,
+      emailContext.sender ? `from: ${senderForModel(emailContext.sender)}` : ``,
       emailContext.receivedAt ? `received: ${emailContext.receivedAt}` : ``,
       `When the user says "this email", "it", or "the email", they mean this one.`,
       `Pass this exact entityId to summarizeEmail / getEmailDetail — never a free-text query.`,
