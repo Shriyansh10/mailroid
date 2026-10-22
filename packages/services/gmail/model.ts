@@ -284,6 +284,12 @@ export const forwardEmailInputSchema = z.object({
   cc: z.string().optional(),
   bcc: z.string().optional(),
   note: z.string().optional(),
+  /**
+   * Forward WITHOUT the original's files. Only ever set by an explicit choice —
+   * the "Forward without attachments" action after a carry failure, or the
+   * user telling Dobbie so. Absent means the files go, or nothing does.
+   */
+  omitOriginalAttachments: z.boolean().optional(),
 });
 
 export type ForwardEmailInput = z.infer<typeof forwardEmailInputSchema>;

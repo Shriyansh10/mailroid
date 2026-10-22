@@ -925,6 +925,10 @@ export default function ThreadDetailPage() {
             // and seeding from `activeDraft` unguarded would carry a stale
             // draft's attachments into an unrelated reply.
             initialAttachments={box.draftId ? activeDraft?.attachments : undefined}
+            // The forward target is lastMsg, so its files are what a forward
+            // carries. Undefined (not null) outside forward mode: the note is
+            // forward-only, and null would read as "unknown".
+            originalAttachments={box.mode === "forward" ? (lastMsg.attachments ?? null) : undefined}
             onClose={closeBox}
             onSent={() => void refetchThread()}
           />

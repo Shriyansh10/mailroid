@@ -252,3 +252,13 @@ function mbPair(actual: number, limit: number): [actual: string, limit: string] 
   }
   return [`${actual.toLocaleString("en-US")} bytes`, `${limit.toLocaleString("en-US")} bytes`];
 }
+
+/**
+ * Error code for "the original's files could not be carried onto a forward,
+ * and nothing was sent" (ForwardAttachmentsUnavailableError).
+ *
+ * Here rather than beside the error because this module is client-safe — the
+ * compose UI keys its "Forward without attachments" action on this code and
+ * must not import the server module that throws it.
+ */
+export const FORWARD_ATTACHMENTS_UNAVAILABLE = "FORWARD_ATTACHMENTS_UNAVAILABLE";

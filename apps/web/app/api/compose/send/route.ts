@@ -11,6 +11,7 @@ import {
 } from "@repo/services/gmail/attachment-limits";
 import { admitUpload, AttachmentBusyError } from "@repo/services/attachments/index";
 import { getGlobalMaintenance } from "@repo/services/gmail/pause";
+import { FORWARD_ATTACHMENTS_UNAVAILABLE } from "@repo/services/gmail/attachment-limits";
 import { logger } from "@repo/logger";
 
 /**
@@ -315,6 +316,7 @@ export async function POST(request: Request) {
             note: body || undefined,
             cc: str("cc"),
             bcc: str("bcc"),
+            omitOriginalAttachments: form.get("omitOriginalAttachments") === "true",
           },
           attachments,
         );
@@ -348,6 +350,16 @@ export async function POST(request: Request) {
     // through the ordinary sync path rather than being written here.
     return NextResponse.json({ id: result.id, threadId: result.threadId });
   } catch (err) {
+    // The original's files could not be carried, and nothing was sent. 409 with
+    // the code, so the client can offer "Forward without attachments" — safe
+    // only because this error is raised before any send is attempted.
+    if ((err as { code?: unknown })?.code === FORWARD_ATTACHMENTS_UNAVAILABLE) {
+      logger.warn("[COMPOSE] forward stopped: original attachments unavailable", { error: String(err) });
+      return NextResponse.json(
+        { error: (err as Error).message, code: FORWARD_ATTACHMENTS_UNAVAILABLE },
+        { status: 409 },
+      );
+    }
     if (err instanceof AttachmentBusyError) {
       return NextResponse.json(
         { error: "The server is busy moving attachments. Try again in a moment." },

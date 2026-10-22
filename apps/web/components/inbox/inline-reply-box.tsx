@@ -8,6 +8,7 @@ import {
   Loader2Icon,
   XIcon,
   MoreHorizontalIcon,
+  PaperclipIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -53,6 +54,8 @@ import {
   type ExistingAttachment,
 } from "@web/components/inbox/attachment-picker";
 import { sendWithAttachments } from "@web/lib/send-with-attachments";
+import { isForwardAttachmentsUnavailable } from "@web/lib/forward-errors";
+import type { MessageAttachment } from "@web/components/attachment-list";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -108,6 +111,12 @@ export interface InlineReplyBoxProps {
   initialBody?: string;
   /** Already attached to the draft being resumed. Absent for a fresh reply. */
   initialAttachments?: ExistingAttachment[];
+  /**
+   * The forwarded message's own files, as the thread view knows them. Forward
+   * only. `null` means the message was never read in full, so whether it has
+   * any is unknown — not that it has none.
+   */
+  originalAttachments?: MessageAttachment[] | null;
   onClose: () => void;
   onSent: () => void;
 }
@@ -184,6 +193,7 @@ export function InlineReplyBox({
   initialBcc,
   initialBody,
   initialAttachments,
+  originalAttachments,
   onClose,
   onSent,
 }: InlineReplyBoxProps) {
@@ -211,6 +221,10 @@ export function InlineReplyBox({
   const recipientsRef = useRef<RecipientFieldsHandle>(null);
   const [body, setBody] = useState(initialBody ?? "");
   const [submitting, setSubmitting] = useState(false);
+  // Guards the send itself, not just the button: the "Forward without
+  // attachments" toast action holds an older handleSend, whose `submitting`
+  // is stale, and a second click there must not fire a second send.
+  const sendingRef = useRef(false);
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   // Two lists, never merged — see the note in compose-dialog.tsx. `files` are
   // handles to things on the user disk; `existingAttachments` are already on
@@ -383,7 +397,9 @@ export function InlineReplyBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSend = useCallback(async () => {
+  const handleSend = useCallback(async (opts?: { omitOriginalAttachments?: boolean }) => {
+    if (sendingRef.current) return;
+    const omitOriginalAttachments = opts?.omitOriginalAttachments === true;
     // Same rule as the compose dialog: bad addresses are tolerated while
     // typing and refused here, with the cursor put on the line at fault.
     const invalidField = firstInvalidRecipientField(recipients);
@@ -400,6 +416,7 @@ export function InlineReplyBox({
 
     const { to, cc, bcc } = recipients;
     const hasAttachments = files.length > 0 || existingAttachments.length > 0;
+    sendingRef.current = true;
     setSubmitting(true);
     try {
       if (draftId) {
@@ -435,10 +452,12 @@ export function InlineReplyBox({
             files,
             entityId, to, cc, bcc,
             body: body.trim(),
+            omitOriginalAttachments,
           });
         } else {
           await forwardEmailAsync({
             entityId, to, cc, bcc, note: body.trim() || undefined,
+            omitOriginalAttachments: omitOriginalAttachments || undefined,
           });
         }
       } else if (hasAttachments) {
@@ -463,10 +482,25 @@ export function InlineReplyBox({
       onSent();
       onClose();
     } catch (err) {
-      toast.error("Couldn't send", {
-        description: err instanceof Error ? err.message : "Please try again.",
-      });
+      // The one failure that comes with a way forward. Offered ONLY for this
+      // error because it guarantees nothing was sent — after any other failure
+      // the outcome is uncertain, and a one-click resend could send twice.
+      if (mode === "forward" && !omitOriginalAttachments && isForwardAttachmentsUnavailable(err)) {
+        toast.error("Couldn't forward", {
+          description: err instanceof Error ? err.message : undefined,
+          duration: 15_000,
+          action: {
+            label: "Forward without attachments",
+            onClick: () => void handleSend({ omitOriginalAttachments: true }),
+          },
+        });
+      } else {
+        toast.error("Couldn't send", {
+          description: err instanceof Error ? err.message : "Please try again.",
+        });
+      }
     } finally {
+      sendingRef.current = false;
       setSubmitting(false);
     }
   }, [
@@ -577,6 +611,8 @@ export function InlineReplyBox({
 
       {isFreshForward && <QuotedHistoryToggle quoted={quoted} variant="forward" alwaysOpen />}
 
+      {isFreshForward && <OriginalAttachmentsNote attachments={originalAttachments} />}
+
       <div className="flex flex-wrap items-center gap-2">
         <TemplatePicker onSelect={applyTemplate} disabled={submitting} />
         <AiGeneratePanel
@@ -658,7 +694,7 @@ export function InlineReplyBox({
         </Button>
         <Button
           size="sm"
-          onClick={handleSend}
+          onClick={() => void handleSend()}
           disabled={submitting || !attachmentVerdict.ok}
           title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
         >
@@ -703,5 +739,34 @@ export function InlineReplyBox({
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+/**
+ * What a forward will carry from the original, stated before Send.
+ *
+ * The server carries these or sends nothing, so naming them here is a promise
+ * it keeps. Unknown (`null`) is said as unknown: the server still carries
+ * whatever the original has, it is only this view that has not looked.
+ */
+function OriginalAttachmentsNote({ attachments }: { attachments?: MessageAttachment[] | null }) {
+  if (attachments === undefined) return null;
+  if (attachments === null) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <PaperclipIcon className="size-3 shrink-0" aria-hidden />
+        Any files on the original message will be included.
+      </p>
+    );
+  }
+  if (attachments.length === 0) return null;
+  const names = attachments.map((a) => a.filename);
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground" title={names.join(", ")}>
+      <PaperclipIcon className="mt-0.5 size-3 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        Includes from the original: <span className="text-foreground">{names.join(", ")}</span>
+      </span>
+    </p>
   );
 }

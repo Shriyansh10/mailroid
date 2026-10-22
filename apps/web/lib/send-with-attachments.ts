@@ -38,6 +38,20 @@ export interface SendWithAttachmentsInput {
    * Gmail's draft update replaces the entire message either way.
    */
   keepAttachmentIds?: string[];
+  /** Forward only: send without the original's files. An explicit choice, never a default. */
+  omitOriginalAttachments?: boolean;
+}
+
+/**
+ * A refusal from the send route. `code` is set when the server named the
+ * failure (e.g. FORWARD_ATTACHMENTS_UNAVAILABLE), so the UI can act on the kind
+ * of failure rather than on the wording of its message.
+ */
+export class SendRouteError extends Error {
+  constructor(message: string, readonly code?: string) {
+    super(message);
+    this.name = "SendRouteError";
+  }
 }
 
 export async function sendWithAttachments(
@@ -55,6 +69,7 @@ export async function sendWithAttachments(
     if (typeof value === "string" && value.trim()) form.set(key, value.trim());
   }
   if (input.replyAll) form.set("replyAll", "true");
+  if (input.omitOriginalAttachments) form.set("omitOriginalAttachments", "true");
 
   // Only when the caller actually has an opinion. Sending "[]" by default would
   // strip every attachment from any draft written by a caller that simply did
@@ -73,9 +88,9 @@ export async function sendWithAttachments(
     // with a generic string here would throw away the only actionable part.
     const detail = await response
       .json()
-      .then((json: { error?: string }) => json?.error)
+      .then((json: { error?: string; code?: string }) => json)
       .catch(() => undefined);
-    throw new Error(detail || "Could not send the message.");
+    throw new SendRouteError(detail?.error || "Could not send the message.", detail?.code);
   }
 
   return (await response.json()) as SendWithAttachmentsResult;

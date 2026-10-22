@@ -870,8 +870,10 @@ export class ToolRegistry {
       name: "forwardEmail",
       description:
         "Forward a specific email to someone. Requires the entityId (from a prior summarizeEmail/searchEmails result, or EMAIL CONTEXT) and the recipient. " +
-        "You may add a short covering note, but never write the forwarded content yourself — the original message is attached automatically. " +
-        "Attachments on the original are NOT carried over; say so if asked.",
+        "You may add a short covering note, but never write the forwarded content yourself — the original message is quoted automatically. " +
+        "The original's file attachments are carried automatically, and the approval card names them. " +
+        "If any of them is no longer available, the forward fails and NOTHING is sent: tell the user which file, and ask whether to forward without the attachments. " +
+        "Set omitOriginalAttachments only after the user has said to forward without them — never on your own.",
       riskLevel: RiskLevel.DANGEROUS,
       requiresApproval: true,
       enabled: true,
@@ -879,6 +881,10 @@ export class ToolRegistry {
         entityId: z.string().min(1).describe("The email to forward"),
         to: z.string().email().describe("Recipient's email address"),
         note: z.string().optional().describe("Optional short covering note, prepended before the quoted original"),
+        omitOriginalAttachments: z
+          .boolean()
+          .optional()
+          .describe("Forward WITHOUT the original's files. Only when the user explicitly asked for that, after being told a file was unavailable."),
       }),
       outputSchema: z.object({
         draft: z.boolean(),

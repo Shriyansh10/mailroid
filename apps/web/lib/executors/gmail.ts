@@ -277,6 +277,7 @@ export interface ForwardEmailInput {
   entityId: string;
   to: string;
   note?: string;
+  omitOriginalAttachments?: boolean;
 }
 
 export interface ForwardEmailOutput {
@@ -305,6 +306,7 @@ export class ForwardEmailExecutor
         entityId: args.entityId,
         to: args.to,
         note: args.note,
+        omitOriginalAttachments: args.omitOriginalAttachments === true,
       });
       console.log("[executor:forwardEmail] SUCCESS", { id: result.id, threadId: result.threadId });
       return { draft: false, id: result.id, threadId: result.threadId };
@@ -319,13 +321,12 @@ export class ForwardEmailExecutor
  * Approval-preview builder for forwardEmail — surfaces the resolved subject
  * and states what will travel with the message.
  *
- * This used to warn `⚠ N attachments will NOT be included`, because
- * buildRawEmail was text/plain only. It now carries them, so the warning became
- * a lie and was replaced rather than deleted: the approval card is the last
- * thing a user reads before real mail leaves, and "3 attachments" versus
- * silence is the difference between knowingly forwarding a contract and
- * forwarding one by accident. Naming them is more informative than counting
- * them, and the count alone was never enough to decide with.
+ * The approval card is the last thing a user reads before real mail leaves,
+ * so it NAMES the original's files rather than counting them: "contract.pdf"
+ * versus "1 attachment" is the difference between knowingly forwarding a
+ * contract and forwarding one by accident. It is also a promise the service
+ * keeps — those files go, or nothing does (forward-attachments.ts) — and when
+ * the user chose to forward without them, the card says that instead.
  */
 export async function buildForwardPreview(
   args: Record<string, unknown>,
@@ -337,9 +338,12 @@ export async function buildForwardPreview(
   try {
     const target = await previewForward(ctx.userId, entityId);
     const lines = [`To: ${to}`, `Subject: ${target.subject}`];
-    if (target.attachmentCount > 0) {
+    const count = target.attachmentNames.length;
+    if (count > 0) {
       lines.push(
-        `Includes ${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} from the original`,
+        args.omitOriginalAttachments === true
+          ? `The original's ${count} attachment${count === 1 ? "" : "s"} will NOT be included: ${target.attachmentNames.join(", ")}`
+          : `Includes from the original: ${target.attachmentNames.join(", ")}`,
       );
     }
     return lines.join("\n");

@@ -28,7 +28,7 @@ import {
 } from "./mime.ts";
 import { validateOutgoingAttachments } from "./attachment-limits.ts";
 import { sendRawMessage } from "./send-raw.ts";
-import { getAttachmentBytes, listMessageAttachments } from "../attachments/index.ts";
+import { forwardWithOriginalAttachments } from "./forward-attachments.ts";
 import { enrichWithAttachments } from "./metadata.ts";
 import { withGmailRetry } from "./retry.ts";
 import { buildThreadFromDb } from "./thread-cache.ts";
@@ -44,7 +44,8 @@ import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
 // Imported from the leaf modules rather than ../attachments/index.ts on
 // purpose: the barrel re-exports gmail-fetch.ts, which imports ./retry.ts, and
 // routing that back through this file would create a cycle for no benefit.
-import { countVisibleAttachments, extractAttachments } from "../attachments/parse.ts";
+import { extractAttachments } from "../attachments/parse.ts";
+import type { AttachmentMeta } from "../attachments/types.ts";
 import { replaceAttachmentManifest, listThreadAttachments } from "../attachments/store.ts";
 import type {
   ThreadSummary,
@@ -84,19 +85,6 @@ export interface MessagePart {
   body?: { data?: string; size?: number; attachmentId?: string };
   headers?: PayloadHeader[];
   parts?: MessagePart[];
-}
-
-/**
- * Counts attachments a reader would call attachments.
- *
- * Delegates to the shared walker rather than re-testing `filename`, which
- * over-counted in two directions at once: it treated every inline signature
- * image as an attachment, and it missed parts that carry an `attachmentId`
- * with no filename. Both mattered — this count is what the forward disclosure
- * quotes back to the user about their own mail.
- */
-function countAttachments(payload: MessagePart | undefined): number {
-  return countVisibleAttachments(payload);
 }
 
 /**
@@ -1035,7 +1023,11 @@ export async function previewReply(
 interface ResolvedForwardTarget {
   subject: string;
   quoted: string;
-  attachmentCount: number;
+  threadId: string | null;
+  /** Every part of the live payload, inline included — the manifest's source. */
+  parsedAttachments: AttachmentMeta[];
+  /** The non-inline ones: what the forward promises to carry. */
+  forwardable: AttachmentMeta[];
 }
 
 async function resolveForwardTarget(
@@ -1058,7 +1050,11 @@ async function resolveForwardTarget(
   const date = getHeader(headers, "Date");
   const subject = getHeader(headers, "Subject");
   const bodyText = extractBody(payload) || (original.snippet as string) || "";
-  const attachmentCount = countAttachments(payload);
+  // The same parser and the same inline rule as countVisibleAttachments, so
+  // the approval card and the carry step cannot disagree about what "the
+  // original's attachments" are.
+  const parsedAttachments = extractAttachments(payload);
+  const forwardable = parsedAttachments.filter((a) => !a.isInline);
 
   const forwardSubject = /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
   const quoted = [
@@ -1071,54 +1067,13 @@ async function resolveForwardTarget(
     bodyText,
   ].join("\n");
 
-  return { subject: forwardSubject, quoted, attachmentCount };
-}
-
-/**
- * Read back the original message's attachments so a forward can carry them.
- *
- * SEQUENTIAL, DELIBERATELY. Each fetch goes through getAttachmentBytes, which
- * charges the in-flight byte budget and holds its Buffer until released — so
- * fetching a message's five attachments in parallel would charge all five at
- * once against a budget shared with every download happening on the box, and a
- * user forwarding a heavy message could 503 their own reading. One at a time is
- * slower for the sender and invisible to everyone else.
- *
- * The total is checked BEFORE the first fetch. Discovering at attachment four
- * that the set will not fit means having already bought three attachments'
- * worth of memory to learn something the metadata could have told us for free.
- *
- * Throws rather than returning partial results: a forward carrying three of
- * five attachments, with nothing saying so, is worse than one that admits it
- * carried none.
- */
-async function fetchForwardableAttachments(
-  tenantId: string,
-  gmailMessageId: string,
-): Promise<OutgoingAttachment[]> {
-  const rows = await listMessageAttachments(tenantId, gmailMessageId);
-  const visible = rows.filter((row) => !row.isInline);
-  if (visible.length === 0) return [];
-
-  const verdict = validateOutgoingAttachments(
-    visible.map((row) => ({ filename: row.filename, sizeBytes: row.sizeBytes })),
-  );
-  if (!verdict.ok) {
-    throw new Error(`Original attachments cannot be forwarded: ${verdict.reason}`);
-  }
-
-  const carried: OutgoingAttachment[] = [];
-  for (const row of visible) {
-    const payload = await getAttachmentBytes(tenantId, row.id);
-    if (!payload) throw new Error(`Attachment ${row.id} is no longer available.`);
-    // Bytes always arrive as a stream from object storage (the API populated it
-    // on a miss — this process never downloads from Gmail); the MIME builder
-    // needs whole bytes, so collapse it here.
-    const bytes = Buffer.from(await new Response(payload.body).arrayBuffer());
-    carried.push({ filename: row.filename, mimeType: row.mimeType, content: bytes });
-  }
-
-  return carried;
+  return {
+    subject: forwardSubject,
+    quoted,
+    threadId: (original.threadId as string | undefined) ?? null,
+    parsedAttachments,
+    forwardable,
+  };
 }
 
 /**
@@ -1143,59 +1098,35 @@ export async function forwardEmail(
   });
 
   const target = await resolveForwardTarget(tenantId, input.entityId, "send");
+  const composedBody = input.note ? `${input.note}\n\n${target.quoted}` : target.quoted;
 
-  // THE ORIGINAL'S OWN ATTACHMENTS. A forward that silently drops them is the
-  // behaviour this replaces, and the disclosure that used to be appended to the
-  // body has been removed with it — but only because the parts are genuinely
-  // carried now. If this fetch fails, the note comes back rather than the
-  // recipient being left to assume they received everything.
-  const carried = await fetchForwardableAttachments(tenantId, input.entityId).catch(
-    (err: unknown) => {
-      logger.warn("[SERVICE] forwardEmail could not carry original attachments", {
-        tenantId,
-        entityId: input.entityId,
-        error: String(err),
-      });
-      return null;
+  // The original's files are carried, or nothing is sent — see
+  // forward-attachments.ts. Omitting them is the sender's explicit choice,
+  // never a fallback.
+  const result = await forwardWithOriginalAttachments(tenantId, {
+    original: {
+      gmailMessageId: input.entityId,
+      threadId: target.threadId,
+      parsed: target.parsedAttachments,
     },
-  );
-
-  const allAttachments = [...(carried ?? []), ...(attachments ?? [])];
-
-  // Combined check. fetchForwardableAttachments validated the ORIGINAL's parts
-  // against the ceiling, but a sender adding their own files to a forward that
-  // was already near the limit puts the total over it — and neither half alone
-  // would have shown that.
-  if (allAttachments.length) {
-    const verdict = validateOutgoingAttachments(
-      allAttachments.map((a) => ({ filename: a.filename, sizeBytes: a.content.byteLength })),
-    );
-    if (!verdict.ok) throw new Error(verdict.reason);
-  }
-
-  // Only when we actually failed to carry them. Silence here would mean the
-  // recipient cannot tell a message with no attachments from one whose
-  // attachments were dropped.
-  const attachmentNote =
-    carried === null && target.attachmentCount > 0
-      ? `\n\n[${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} on the original message could not be forwarded.]`
-      : "";
-
-  const composedBody = (input.note ? `${input.note}\n\n${target.quoted}` : target.quoted) + attachmentNote;
-  const raw = buildRawEmail(input.to, target.subject, composedBody, {
-    cc: input.cc?.trim() || undefined,
-    bcc: input.bcc?.trim() || undefined,
-    attachments: allAttachments,
+    extra: attachments ?? [],
+    omitOriginalAttachments: input.omitOriginalAttachments === true,
+    send: async (allAttachments) => {
+      const raw = buildRawEmail(input.to, target.subject, composedBody, {
+        cc: input.cc?.trim() || undefined,
+        bcc: input.bcc?.trim() || undefined,
+        attachments: allAttachments,
+      });
+      const tenant = corsair.withTenant(tenantId);
+      return allAttachments.length
+        ? await sendRawMessage(tenantId, raw)
+        : await withGmailRetry<{ id?: string; threadId?: string }>(
+            "messages.send",
+            () => tenant.gmail.api.messages.send({ raw }),
+            { tenantId, trigger: "send" },
+          );
+    },
   });
-
-  const tenant = corsair.withTenant(tenantId);
-  const result = allAttachments.length
-    ? await sendRawMessage(tenantId, raw)
-    : await withGmailRetry<{ id?: string; threadId?: string }>(
-        "messages.send",
-        () => tenant.gmail.api.messages.send({ raw }),
-        { tenantId, trigger: "send" },
-      );
 
   logger.info("[SERVICE] forwardEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
@@ -1211,9 +1142,9 @@ export async function forwardEmail(
 export async function previewForward(
   tenantId: string,
   entityId: string,
-): Promise<{ subject: string; attachmentCount: number }> {
+): Promise<{ subject: string; attachmentNames: string[] }> {
   const target = await resolveForwardTarget(tenantId, entityId);
-  return { subject: target.subject, attachmentCount: target.attachmentCount };
+  return { subject: target.subject, attachmentNames: target.forwardable.map((a) => a.filename) };
 }
 
 // ── Mailbox write actions (Bin / Star) ───────────────────────────────

@@ -28,6 +28,8 @@ import {
 } from "@repo/services/gmail/drafts.js";
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
+import { FORWARD_ATTACHMENTS_UNAVAILABLE } from "@repo/services/gmail/attachment-limits.js";
+import { TRPCError } from "@trpc/server";
 import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
 import { ALL_CATEGORIES } from "@repo/services/gmail/metadata.js";
 import {
@@ -199,6 +201,7 @@ export const gmailRouter = router({
         cc: z.string().optional(),
         bcc: z.string().optional(),
         note: z.string().optional(),
+        omitOriginalAttachments: z.boolean().optional(),
       }),
     )
     .output(sendEmailOutputModel)
@@ -206,7 +209,19 @@ export const gmailRouter = router({
       logger.info("[TRPC] gmail.forwardEmail called", {
         userId: ctx.user!.id, entityId: input.entityId, toHash: hashMailboxList(input.to),
       });
-      return await forwardEmail(ctx.user!.id, input);
+      try {
+        return await forwardEmail(ctx.user!.id, input);
+      } catch (err) {
+        // PRECONDITION_FAILED is used by this procedure for exactly one case:
+        // the original's files could not be carried and NOTHING was sent. The
+        // client offers "Forward without attachments" on it, which is only safe
+        // because of that guarantee — never reuse this code here for anything
+        // whose send outcome is uncertain.
+        if ((err as { code?: unknown })?.code === FORWARD_ATTACHMENTS_UNAVAILABLE) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: (err as Error).message, cause: err });
+        }
+        throw err;
+      }
     }),
 
   // ── Mailbox actions (Bin / Star) ───────────────────────────────────
