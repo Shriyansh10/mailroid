@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useRef } from "react";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
 import { PaperclipIcon, XIcon, AlertTriangleIcon } from "lucide-react";
 import { Button } from "@web/components/ui/button";
 import {
@@ -91,6 +91,7 @@ export function AttachmentPicker({
   existing = [],
   onRemoveExisting,
   disabled,
+  openRef,
 }: {
   files: File[];
   onChange: (files: File[]) => void;
@@ -98,8 +99,22 @@ export function AttachmentPicker({
   existing?: ExistingAttachment[];
   onRemoveExisting?: (id: string) => void;
   disabled?: boolean;
+  /**
+   * Receives a function that opens the file chooser — for callers that offer
+   * "Attach files" somewhere other than this component's own button (the
+   * forgotten-attachment prompt). It must be called from a user gesture.
+   */
+  openRef?: RefObject<(() => void) | null>;
 }) {
   const inputRef = useRef<HTMLInputElement>(null);
+
+  useEffect(() => {
+    if (!openRef) return;
+    openRef.current = () => inputRef.current?.click();
+    return () => {
+      openRef.current = null;
+    };
+  }, [openRef]);
 
   const add = useCallback(
     (incoming: FileList | null) => {

@@ -55,6 +55,8 @@ import {
 } from "@web/components/inbox/attachment-picker";
 import { sendWithAttachments } from "@web/lib/send-with-attachments";
 import { isForwardAttachmentsUnavailable } from "@web/lib/forward-errors";
+import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
+import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
 import type { MessageAttachment } from "@web/components/attachment-list";
 import {
   MeetingInviteFields,
@@ -225,6 +227,9 @@ export function InlineReplyBox({
   // attachments" toast action holds an older handleSend, whose `submitting`
   // is stale, and a second click there must not fire a second send.
   const sendingRef = useRef(false);
+  // "You mentioned an attachment" — asked at Send, see AttachmentReminderDialog.
+  const [remindAttachment, setRemindAttachment] = useState(false);
+  const openPickerRef = useRef<(() => void) | null>(null);
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
   // Two lists, never merged — see the note in compose-dialog.tsx. `files` are
   // handles to things on the user disk; `existingAttachments` are already on
@@ -397,7 +402,7 @@ export function InlineReplyBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSend = useCallback(async (opts?: { omitOriginalAttachments?: boolean }) => {
+  const handleSend = useCallback(async (opts?: { omitOriginalAttachments?: boolean; skipReminder?: boolean }) => {
     if (sendingRef.current) return;
     const omitOriginalAttachments = opts?.omitOriginalAttachments === true;
     // Same rule as the compose dialog: bad addresses are tolerated while
@@ -416,6 +421,23 @@ export function InlineReplyBox({
 
     const { to, cc, bcc } = recipients;
     const hasAttachments = files.length > 0 || existingAttachments.length > 0;
+
+    // A forward already carries the original's files — known, or unknown and
+    // carried by the server regardless — so "attached" in its note is usually
+    // about those, and asking would only interrupt.
+    const forwardCarriesFiles =
+      isFreshForward && (originalAttachments === null || (originalAttachments?.length ?? 0) > 0);
+    if (
+      !opts?.skipReminder &&
+      !omitOriginalAttachments &&
+      !hasAttachments &&
+      !forwardCarriesFiles &&
+      mentionsAttachment(body)
+    ) {
+      setRemindAttachment(true);
+      return;
+    }
+
     sendingRef.current = true;
     setSubmitting(true);
     try {
@@ -507,6 +529,7 @@ export function InlineReplyBox({
     draftId, recipients, subject, body, threadId, mode, entityId,
     saveDraftAsync, sendDraftAsync, forwardEmailAsync, replyToEmailAsync,
     onSent, onClose, fireMeeting, files, existingAttachments,
+    isFreshForward, originalAttachments,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
@@ -667,6 +690,7 @@ export function InlineReplyBox({
           setExistingAttachments((prev) => prev.filter((a) => a.id !== id))
         }
         disabled={submitting}
+        openRef={openPickerRef}
       />
 
       {/*
@@ -706,6 +730,20 @@ export function InlineReplyBox({
           Send
         </Button>
       </div>
+
+      <AttachmentReminderDialog
+        open={remindAttachment}
+        onCancel={() => setRemindAttachment(false)}
+        onAttach={() => {
+          setRemindAttachment(false);
+          // Still inside the click, so the browser treats it as a user gesture.
+          openPickerRef.current?.();
+        }}
+        onSendAnyway={() => {
+          setRemindAttachment(false);
+          void handleSend({ skipReminder: true });
+        }}
+      />
 
       <AlertDialog
         open={!!pendingApply}

@@ -150,6 +150,8 @@
     "./gmail/mime.js": "./gmail/mime.ts",
     "./gmail/attachment-limits": "./gmail/attachment-limits.ts",
     "./gmail/attachment-limits.js": "./gmail/attachment-limits.ts",
+    "./gmail/attachment-reminder": "./gmail/attachment-reminder.ts",
+    "./gmail/attachment-reminder.js": "./gmail/attachment-reminder.ts",
     "./gmail/send-raw": "./gmail/send-raw.ts",
     "./gmail/send-raw.js": "./gmail/send-raw.ts",
     "./calendar/guest-links": "./calendar/guest-links.ts",

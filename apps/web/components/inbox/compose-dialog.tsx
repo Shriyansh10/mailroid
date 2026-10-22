@@ -63,6 +63,8 @@ import {
   type ExistingAttachment,
 } from "@web/components/inbox/attachment-picker";
 import { sendWithAttachments } from "@web/lib/send-with-attachments";
+import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
+import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -213,6 +215,12 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   // A close request (backdrop / Esc / X) held back until the user says what to
   // do with the message they'd otherwise lose.
   const [confirmClose, setConfirmClose] = useState(false);
+  // "You mentioned an attachment" — held open at Send until the user attaches
+  // or chooses to send as written. The skip flag carries "Send anyway" through
+  // one more pass of handleSubmit, so validation and isSubmitting still apply.
+  const [remindAttachment, setRemindAttachment] = useState(false);
+  const skipReminderRef = useRef(false);
+  const openPickerRef = useRef<(() => void) | null>(null);
 
   /**
    * Attachments, in two lists that are deliberately not merged.
@@ -592,6 +600,21 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     if (field) recipientsRef.current?.focusField(field);
   }, [form]);
 
+  /** Send, unless the text says a file is attached and none is. */
+  const submitWithReminder = useCallback(
+    async (values: Parameters<typeof onSubmit>[0]) => {
+      const skip = skipReminderRef.current;
+      skipReminderRef.current = false;
+      const nothingAttached = files.length === 0 && existingAttachments.length === 0;
+      if (!skip && nothingAttached && mentionsAttachment(values.body)) {
+        setRemindAttachment(true);
+        return;
+      }
+      await onSubmit(values);
+    },
+    [files, existingAttachments, onSubmit],
+  );
+
   /**
    * Save without sending. Deliberately does NOT run the zod resolver: a draft
    * is by definition unfinished, and refusing to save one because the recipient
@@ -697,7 +720,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
         <Form {...form}>
           <form
-            onSubmit={form.handleSubmit(onSubmit, handleInvalidSubmit)}
+            onSubmit={form.handleSubmit(submitWithReminder, handleInvalidSubmit)}
             style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
           >
             <div className="flex flex-wrap items-center gap-2">
@@ -790,6 +813,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                 setExistingAttachments((prev) => prev.filter((a) => a.id !== id))
               }
               disabled={isSubmitting}
+              openRef={openPickerRef}
             />
 
             <MeetingInviteFields
@@ -851,6 +875,21 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           </form>
         </Form>
       </DialogContent>
+
+      <AttachmentReminderDialog
+        open={remindAttachment}
+        onCancel={() => setRemindAttachment(false)}
+        onAttach={() => {
+          setRemindAttachment(false);
+          // Still inside the click, so the browser treats it as a user gesture.
+          openPickerRef.current?.();
+        }}
+        onSendAnyway={() => {
+          setRemindAttachment(false);
+          skipReminderRef.current = true;
+          void form.handleSubmit(submitWithReminder, handleInvalidSubmit)();
+        }}
+      />
 
       <AlertDialog
         open={!!pendingApply}
