@@ -1,26 +1,11 @@
 /**
- * Attachment metadata as the model is allowed to see it.
- *
- * The agent loop's tool-output pass (firewall.sanitizeToolOutput) redacts
- * secrets, OTPs, tokens, reset links and injection — but NOT email addresses
- * or phone numbers. Those are masked only inside the summarizer's own prompt
- * pipeline. Attachment filenames and From headers come straight from the
- * mailbox and routinely carry exactly that ("invoice-jane@acme.com.pdf",
- * "Ravi Kumar <ravi@…>"), so they are masked HERE, explicitly, before any
- * tool returns them.
- *
- * Filenames are also untrusted text: bidi controls (which make `fdp.exe`
- * display as `exe.pdf`) are stripped, matching the UI's safeName.
+ * Attachment metadata as the model is allowed to see it. Filenames and From
+ * headers are mailbox text, masked through model-masking.ts (see there for why
+ * the agent loop's own pass is not enough).
  */
-import { maskPII } from "../security/pii.ts";
+import { maskForModel, parseFromHeader } from "./model-masking.ts";
 
-const BIDI = /[‎‏‪-‮⁦-⁩]/g;
-
-/** Untrusted mailbox text, made safe to hand to the model. */
-export function maskForModel(text: string): string {
-  const cleaned = text.replace(BIDI, "").trim();
-  return maskPII(cleaned).masked;
-}
+export { maskForModel, parseFromHeader };
 
 export interface AttachmentForModel {
   filename: string;
@@ -41,16 +26,6 @@ export function attachmentsForModel(
 }
 
 // ── Sender identity ─────────────────────────────────────────────────────
-
-/** "Ravi Kumar <ravi@acme.com>" → { name: "Ravi Kumar", address: "ravi@acme.com" }. */
-export function parseFromHeader(header: string): { name: string; address: string } {
-  const angle = header.match(/<([^>]+)>/);
-  const address = (angle?.[1] ?? (header.includes("@") ? header : "")).trim().toLowerCase();
-  const name = (angle ? header.slice(0, angle.index) : header.includes("@") ? "" : header)
-    .replace(/^["'\s]+|["'\s]+$/g, "")
-    .trim();
-  return { name, address };
-}
 
 /**
  * Distinct PEOPLE among matching From headers: grouped by address, so one

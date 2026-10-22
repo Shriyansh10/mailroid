@@ -10,6 +10,8 @@ import assert from "node:assert/strict";
 
 import {
   collectForwardAttachments,
+  describeForwardPreview,
+  forwardableParts,
   forwardWithOriginalAttachments,
   ForwardAttachmentsUnavailableError,
   FORWARD_ATTACHMENTS_UNAVAILABLE,
@@ -180,4 +182,46 @@ test("the sender's own files are added after the original's", async () => {
 test("unnamed missing parts are still counted in the message", () => {
   const err = new ForwardAttachmentsUnavailableError("missing", ["a.pdf", ""]);
   assert.match(err.message, /"a\.pdf" and 1 file on the original are no longer available/);
+});
+
+// ── Approval card ───────────────────────────────────────────────────────
+
+test("the approval card names every file the forward will carry", () => {
+  const card = describeForwardPreview({
+    to: "lee@example.com",
+    subject: "Fwd: Q3 contract",
+    attachmentNames: ["contract.pdf", "annex-b.docx"],
+  });
+  assert.equal(
+    card,
+    "To: lee@example.com\nSubject: Fwd: Q3 contract\nIncludes from the original: contract.pdf, annex-b.docx",
+  );
+});
+
+test("when the user chose to forward without them, the card says so and names them", () => {
+  const card = describeForwardPreview({
+    to: "lee@example.com",
+    subject: "Fwd: Q3 contract",
+    attachmentNames: ["contract.pdf"],
+    omitOriginalAttachments: true,
+  });
+  assert.match(card, /The original's 1 attachment will NOT be included: contract\.pdf/);
+  assert.doesNotMatch(card, /Includes from the original/);
+});
+
+test("no files: no attachment line at all", () => {
+  assert.equal(
+    describeForwardPreview({ to: "a@b.com", subject: "Fwd: hi", attachmentNames: [] }),
+    "To: a@b.com\nSubject: Fwd: hi",
+  );
+});
+
+test("the card and the carry step use one definition of the files", () => {
+  // A signature image (inline) plus two real files: the card's names come
+  // from forwardableParts, and so does the carry step's expected set.
+  const parsed = [part("1"), part("2", { isInline: true, filename: "logo.png" }), part("3")];
+  const named = forwardableParts(parsed).map((p) => p.filename);
+  assert.deepEqual(named, ["1.pdf", "3.pdf"]);
+  assert.match(describeForwardPreview({ to: "x@y.com", subject: "s", attachmentNames: named }), /1\.pdf, 3\.pdf$/);
+  assert.doesNotMatch(describeForwardPreview({ to: "x@y.com", subject: "s", attachmentNames: named }), /logo/);
 });

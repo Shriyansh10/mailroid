@@ -58,6 +58,43 @@ function describeMissing(filenames: string[]): string {
   return `${parts.slice(0, -1).join(", ")} and ${parts[parts.length - 1]}`;
 }
 
+/**
+ * The parts a forward promises to carry: the payload's non-inline parts.
+ *
+ * ONE function, used by both the approval card (via resolveForwardTarget) and
+ * the carry step, so the card can never name a different set of files than
+ * the forward actually tries to send.
+ */
+export function forwardableParts(parsed: AttachmentMeta[]): AttachmentMeta[] {
+  return parsed.filter((part) => !part.isInline);
+}
+
+/**
+ * The approval card's text for a forward — the last thing the user reads
+ * before real mail leaves. It NAMES the original's files rather than counting
+ * them ("contract.pdf" versus "1 attachment" is the difference between
+ * knowingly forwarding a contract and doing it by accident), and says plainly
+ * when they will NOT go.
+ */
+export function describeForwardPreview(params: {
+  to: string;
+  subject: string;
+  attachmentNames: string[];
+  omitOriginalAttachments?: boolean;
+}): string {
+  const lines = [`To: ${params.to}`, `Subject: ${params.subject}`];
+  const count = params.attachmentNames.length;
+  if (count > 0) {
+    const names = params.attachmentNames.join(", ");
+    lines.push(
+      params.omitOriginalAttachments === true
+        ? `The original's ${count} attachment${count === 1 ? "" : "s"} will NOT be included: ${names}`
+        : `Includes from the original: ${names}`,
+    );
+  }
+  return lines.join("\n");
+}
+
 export interface ForwardCarryDeps {
   listMessageAttachments: typeof listMessageAttachments;
   replaceAttachmentManifest: typeof replaceAttachmentManifest;
@@ -88,7 +125,7 @@ export async function collectForwardAttachments(
   deps: Partial<ForwardCarryDeps> = {},
 ): Promise<OutgoingAttachment[]> {
   const d = { ...defaultDeps, ...deps };
-  const expected = original.parsed.filter((part) => !part.isInline);
+  const expected = forwardableParts(original.parsed);
   if (expected.length === 0) return [];
 
   const verdict = validateOutgoingAttachments(

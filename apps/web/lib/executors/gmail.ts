@@ -1,5 +1,5 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError, appendSignature } from "@repo/ai";
+import { ToolExecutionError, appendSignature, shapeSearchEmailsForModel } from "@repo/ai";
 import {
   searchLocalEmails,
   sendEmail as corsairSendEmail,
@@ -9,6 +9,7 @@ import {
   previewForward,
 } from "@repo/services/gmail/index";
 import { getPriorityProfile } from "@repo/services/profile/index";
+import { describeForwardPreview } from "@repo/services/gmail/forward-attachments";
 import { db, eq } from "@repo/database";
 import { user } from "@repo/database/schema";
 
@@ -121,23 +122,16 @@ export class CorsairSearchEmailsExecutor
 
       // The service already caps the primary bucket; MAX_EMAIL_RESULTS is a
       // belt-and-suspenders ceiling for the summary path (~40).
-      const emails = result.threads.slice(0, MAX_EMAIL_RESULTS).map((t) => ({
-        entityId: t.entityId,
-        threadId: t.threadId,
-        sender: t.sender,
-        subject: t.subject,
-        date: t.date,
-        snippet: t.snippet,
-        score: t.score,
-      }));
+      //
+      // Masked on the way out: senders become display names, and subject,
+      // snippet and protected-sender entries lose addresses and phone numbers.
+      // The agent loop's own output pass does not mask those, and the system
+      // prompt tells the model they already were. The sender FILTER above ran
+      // server-side against the real headers, so searching is unaffected.
+      const shaped = shapeSearchEmailsForModel(result, MAX_EMAIL_RESULTS);
 
-      console.log("[executor:searchEmails] RETURNING", { emailCount: emails.length });
-      return {
-        emails,
-        primaryTotal: result.total,
-        spamCount: result.spamCount ?? 0,
-        hiddenProtected: result.hiddenProtected,
-      };
+      console.log("[executor:searchEmails] RETURNING", { emailCount: shaped.emails.length });
+      return shaped;
     } catch (error) {
       console.error("[executor:searchEmails] ERROR", { error: String(error), userId: ctx.userId });
       throw new ToolExecutionError("searchEmails", error);
@@ -337,16 +331,12 @@ export async function buildForwardPreview(
   if (!entityId) return `Forward an email to ${to}`;
   try {
     const target = await previewForward(ctx.userId, entityId);
-    const lines = [`To: ${to}`, `Subject: ${target.subject}`];
-    const count = target.attachmentNames.length;
-    if (count > 0) {
-      lines.push(
-        args.omitOriginalAttachments === true
-          ? `The original's ${count} attachment${count === 1 ? "" : "s"} will NOT be included: ${target.attachmentNames.join(", ")}`
-          : `Includes from the original: ${target.attachmentNames.join(", ")}`,
-      );
-    }
-    return lines.join("\n");
+    return describeForwardPreview({
+      to,
+      subject: target.subject,
+      attachmentNames: target.attachmentNames,
+      omitOriginalAttachments: args.omitOriginalAttachments === true,
+    });
   } catch (error) {
     console.error("[executor:forwardEmail] preview failed", { error: String(error) });
     return `Forward an email to ${to} (could not resolve subject — check the email still exists)`;

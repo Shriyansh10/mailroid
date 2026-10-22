@@ -28,7 +28,7 @@ import {
 } from "./mime.ts";
 import { validateOutgoingAttachments } from "./attachment-limits.ts";
 import { sendRawMessage } from "./send-raw.ts";
-import { forwardWithOriginalAttachments } from "./forward-attachments.ts";
+import { forwardWithOriginalAttachments, forwardableParts } from "./forward-attachments.ts";
 import { enrichWithAttachments } from "./metadata.ts";
 import { withGmailRetry } from "./retry.ts";
 import { buildThreadFromDb } from "./thread-cache.ts";
@@ -1054,7 +1054,7 @@ async function resolveForwardTarget(
   // the approval card and the carry step cannot disagree about what "the
   // original's attachments" are.
   const parsedAttachments = extractAttachments(payload);
-  const forwardable = parsedAttachments.filter((a) => !a.isInline);
+  const forwardable = forwardableParts(parsedAttachments);
 
   const forwardSubject = /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
   const quoted = [

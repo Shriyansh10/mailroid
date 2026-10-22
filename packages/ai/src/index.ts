@@ -74,6 +74,8 @@ export type {
 } from "./tools/index.ts";
 
 export { toOpenAiToolDefs } from "./tools/convert.ts";
+export { maskForModel as maskMailboxTextForModel, senderForModel } from "./tools/model-masking.ts";
+export { shapeSearchEmailsForModel } from "./tools/search-results.ts";
 export {
   attachmentsForModel,
   maskForModel,
