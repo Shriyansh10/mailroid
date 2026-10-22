@@ -65,6 +65,9 @@ import {
 import { sendWithAttachments } from "@web/lib/send-with-attachments";
 import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
 import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
+import { filesFromPaste, mergeFiles } from "@web/components/inbox/attachment-files";
+import { useFileDrop } from "@web/components/inbox/use-file-drop";
+import { DropOverlay } from "@web/components/inbox/drop-overlay";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -246,6 +249,13 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   // the mail would actually go. The server refused it either way — this makes
   // the UI agree with the server before the upload rather than after it.
   const attachmentVerdict = getAttachmentVerdict(files, existingAttachments);
+
+  // Dropped and pasted files join the same `files` list as picked ones, so the
+  // picker's per-file blame, the verdict above and the server all see them.
+  const addFiles = useCallback((incoming: File[]) => {
+    setFiles((prev) => mergeFiles(prev, incoming));
+  }, []);
+  const { dragging, dropHandlers } = useFileDrop(addFiles, isSubmitting);
 
   // Load the prefill when the dialog opens. Keyed on `open` as well as the
   // prefill itself so reopening on the same draft re-seeds the fields the user
@@ -722,7 +732,10 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           <form
             onSubmit={form.handleSubmit(submitWithReminder, handleInvalidSubmit)}
             style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
+            className="relative"
+            {...dropHandlers}
           >
+            <DropOverlay visible={dragging} />
             <div className="flex flex-wrap items-center gap-2">
               <TemplatePicker onSelect={applyTemplate} disabled={isSubmitting} />
               <ComposeAiPanel
@@ -798,6 +811,14 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                       // and let the text box scroll on its own instead.
                       className="min-h-32 sm:min-h-48 max-h-[45dvh] overflow-y-auto"
                       {...field}
+                      onPaste={(e) => {
+                        // Text pastes are untouched; only a paste that is
+                        // purely files (a screenshot) becomes an attachment.
+                        const pasted = filesFromPaste(e.clipboardData);
+                        if (pasted.length === 0) return;
+                        e.preventDefault();
+                        addFiles(pasted);
+                      }}
                     />
                   </FormControl>
                   <FormMessage />

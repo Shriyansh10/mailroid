@@ -10,6 +10,7 @@ import {
   validateOutgoingAttachments,
   type AttachmentValidation,
 } from "@repo/services/gmail/attachment-limits";
+import { mergeFiles } from "./attachment-files";
 
 /**
  * File selection for compose, reply and forward.
@@ -119,13 +120,10 @@ export function AttachmentPicker({
   const add = useCallback(
     (incoming: FileList | null) => {
       if (!incoming?.length) return;
-      // Deduplicated by name+size: picking the same file twice is a slip, and
-      // sending it twice costs the recipient's inbox as well as the size budget.
-      const merged = [...files];
-      for (const file of Array.from(incoming)) {
-        if (!merged.some((f) => f.name === file.name && f.size === file.size)) merged.push(file);
-      }
-      onChange(merged);
+      // Picking the same file twice is a slip, and sending it twice costs the
+      // recipient's inbox as well as the size budget. Same rule as drop and
+      // paste — see mergeFiles.
+      onChange(mergeFiles(files, Array.from(incoming)));
     },
     [files, onChange],
   );

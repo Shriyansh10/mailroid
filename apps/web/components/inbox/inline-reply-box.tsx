@@ -57,6 +57,9 @@ import { sendWithAttachments } from "@web/lib/send-with-attachments";
 import { isForwardAttachmentsUnavailable } from "@web/lib/forward-errors";
 import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
 import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
+import { filesFromPaste, mergeFiles } from "@web/components/inbox/attachment-files";
+import { useFileDrop } from "@web/components/inbox/use-file-drop";
+import { DropOverlay } from "@web/components/inbox/drop-overlay";
 import type { MessageAttachment } from "@web/components/attachment-list";
 import {
   MeetingInviteFields,
@@ -241,6 +244,13 @@ export function InlineReplyBox({
   // See the note in compose-dialog.tsx: the same verdict AttachmentPicker
   // renders, read here so Send and Save cannot stay live over an invalid set.
   const attachmentVerdict = getAttachmentVerdict(files, existingAttachments);
+
+  // Dropped and pasted files join the same `files` list as picked ones, so the
+  // picker's per-file blame, the verdict above and the server all see them.
+  const addFiles = useCallback((incoming: File[]) => {
+    setFiles((prev) => mergeFiles(prev, incoming));
+  }, []);
+  const { dragging, dropHandlers } = useFileDrop(addFiles, submitting);
   const [pendingApply, setPendingApply] = useState<null | {
     kind: "body" | "meeting";
     run: () => void;
@@ -609,7 +619,12 @@ export function InlineReplyBox({
         : "Reply";
 
   return (
-    <div ref={containerRef} className="bg-card border rounded-xl shadow-sm p-4 space-y-3">
+    <div
+      ref={containerRef}
+      className="relative bg-card border rounded-xl shadow-sm p-4 space-y-3"
+      {...dropHandlers}
+    >
+      <DropOverlay visible={dragging} />
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-foreground">{title}</div>
         <Button
@@ -663,6 +678,14 @@ export function InlineReplyBox({
         ref={bodyRef}
         value={body}
         onChange={(e) => setBody(e.target.value)}
+        onPaste={(e) => {
+          // Text pastes are untouched; only a paste that is purely files (a
+          // screenshot) becomes an attachment.
+          const pasted = filesFromPaste(e.clipboardData);
+          if (pasted.length === 0) return;
+          e.preventDefault();
+          addFiles(pasted);
+        }}
         placeholder={mode === "forward" ? "Add a note (optional)…" : "Write your reply…"}
         disabled={submitting}
         rows={5}
