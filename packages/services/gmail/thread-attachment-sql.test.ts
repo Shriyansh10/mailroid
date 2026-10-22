@@ -13,7 +13,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { db, sql, type SQL } from "@repo/database";
 
-import { threadAttachmentState, threadHasMessage } from "./metadata.ts";
+import { priorityCountsQuery, threadAttachmentState, threadHasMessage } from "./metadata.ts";
 
 const render = (q: SQL) =>
   (db as unknown as { dialect: { sqlToQuery: (s: SQL) => { sql: string; params: unknown[] } } })
@@ -43,4 +43,28 @@ test("the row state is tri-state: confirmed, then unknown, then no", () => {
   const unknown = flat.indexOf("has_attachment IS NULL");
   assert.ok(yes > 0 && unknown > yes, "true is decided before unknown");
   assert.match(flat, /THEN TRUE .* THEN NULL ELSE FALSE END/);
+});
+
+const SINCE = new Date("2026-10-15T00:00:00Z");
+
+test("priority tab counts apply the list's whole-thread attachment test when filtered", () => {
+  const filtered = priorityCountsQuery("user-1", SINCE, { withAttachments: true }).toSQL();
+  const flat = filtered.sql.replace(/\s+/g, " ");
+  // Same helper as the list: the outer message row's thread, every category.
+  assert.match(
+    flat,
+    /EXISTS \( SELECT 1 FROM "message_metadata" AS m2 WHERE m2\.user_id = \$\d+ AND \(m2\.thread_id = "message_metadata"\."thread_id" OR \("message_metadata"\."thread_id" IS NULL AND m2\.entity_id = "message_metadata"\."entity_id"\)\) AND m2\.has_attachment IS TRUE \)/,
+  );
+  // Confirmed only: unknown is never counted.
+  assert.doesNotMatch(flat, /has_attachment IS NULL/);
+  // Still counts threads, not messages.
+  assert.match(flat, /count\(distinct coalesce\("(message_metadata"\.")?thread_id", "(message_metadata"\.")?entity_id"\)\)/);
+  assert.equal(filtered.params.filter((p) => p === "user-1").length, 2);
+});
+
+test("priority tab counts are unchanged when the filter is off", () => {
+  const off = priorityCountsQuery("user-1", SINCE).toSQL();
+  const explicitOff = priorityCountsQuery("user-1", SINCE, { withAttachments: false }).toSQL();
+  assert.doesNotMatch(off.sql, /has_attachment|m2/);
+  assert.deepEqual(explicitOff, off);
 });

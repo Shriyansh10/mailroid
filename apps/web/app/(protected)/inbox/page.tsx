@@ -1766,7 +1766,9 @@ function PriorityInbox({
     return [filter];
   }, [filter]);
 
-  const { data: countsData } = usePriorityCounts();
+  // The tabs sit next to the toggle, so they count what the list shows.
+  // Omitted when off, so the unfiltered counts keep their existing cache key.
+  const { data: countsData } = usePriorityCounts(withAttachments ? { withAttachments: true } : undefined);
   const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, UNCLASSIFIED: 0, ALL: 0 };
 
   // Fetch a whole window, then slice out the requested page on the client.

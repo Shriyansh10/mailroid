@@ -1028,6 +1028,7 @@ export const gmailRouter = router({
       z
         .object({
           days: z.number().optional(),
+          withAttachments: z.boolean().optional(),
         })
         .optional()
     )
@@ -1043,7 +1044,9 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.priorityCounts called", { userId: ctx.user!.id, input: input ?? {} });
-      const result = await getPriorityCounts(ctx.user!.id, input?.days ?? undefined);
+      const result = await getPriorityCounts(ctx.user!.id, input?.days ?? undefined, {
+        withAttachments: input?.withAttachments,
+      });
       logger.info("[TRPC] gmail.priorityCounts result", {
         userId: ctx.user!.id, counts: result, durationMs: Date.now() - startMs,
       });

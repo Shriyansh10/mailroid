@@ -627,14 +627,16 @@ export async function getPriorityEmails(
   return { threads };
 }
 
-export async function getPriorityCounts(
+/**
+ * The tab-count query, built but not run, so its shape can be tested without
+ * a database (thread-attachment-sql.test.ts).
+ */
+export function priorityCountsQuery(
   userId: string,
-  days: number = 7
-): Promise<{ HIGH: number; MEDIUM: number; LOW: number; UNCLASSIFIED: number; ALL: number }> {
-  const thresholdDate = new Date();
-  thresholdDate.setDate(thresholdDate.getDate() - days);
-
-  const rows = await db
+  thresholdDate: Date,
+  opts?: { withAttachments?: boolean },
+) {
+  return db
     .select({
       priority: messageMetadata.priority,
       count: sql<number>`count(distinct coalesce(${messageMetadata.threadId}, ${messageMetadata.entityId}))`,
@@ -648,9 +650,33 @@ export async function getPriorityCounts(
         // promise rows the list itself refuses to show.
         eq(messageMetadata.isArchived, false),
         notInArray(messageMetadata.category, ["TRASH", "SPAM", "DRAFT", "SENT"] as any[]),
+        // The same whole-thread test the list applies. It is per thread, so
+        // putting it on each message row counts exactly the threads the list keeps.
+        opts?.withAttachments
+          ? threadHasMessage(
+              userId,
+              messageMetadata.threadId,
+              messageMetadata.entityId,
+              sql.raw("m2.has_attachment IS TRUE"),
+            )
+          : undefined,
       )
     )
     .groupBy(messageMetadata.priority);
+}
+
+export async function getPriorityCounts(
+  userId: string,
+  days: number = 7,
+  opts?: {
+    /** Count only threads the "With attachments" list would show. See getPriorityEmails. */
+    withAttachments?: boolean;
+  },
+): Promise<{ HIGH: number; MEDIUM: number; LOW: number; UNCLASSIFIED: number; ALL: number }> {
+  const thresholdDate = new Date();
+  thresholdDate.setDate(thresholdDate.getDate() - days);
+
+  const rows = await priorityCountsQuery(userId, thresholdDate, opts);
 
   // A NULL priority (genuinely unclassified — see message-metadata.ts) forms
   // its own group here with row.priority === null; without counting it, ALL

@@ -326,7 +326,7 @@ export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number;
   return result;
 };
 
-export const usePriorityCounts = (opts?: { days?: number }) => {
+export const usePriorityCounts = (opts?: { days?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "usePriorityCounts called", { opts: opts ?? {} });
   const startMs = Date.now();
 
