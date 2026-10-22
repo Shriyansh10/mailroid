@@ -36,6 +36,7 @@ import {
 import { cn } from "@web/lib/utils";
 import { EmailSummaryCard } from "@web/components/email-summary-card";
 import { ThreadMessageList } from "@web/components/thread-message-list";
+import { ThreadFileStrip } from "@web/components/thread-file-strip";
 import { StaleThreadBanner } from "@web/components/inbox/stale-thread-banner";
 import { InlineReplyBox } from "@web/components/inbox/inline-reply-box";
 import type { InlineReplyMode } from "@web/components/inbox/inline-reply-box";
@@ -174,6 +175,9 @@ export default function ThreadDetailPage() {
     [thread],
   );
   const lastMsg = realMessages[realMessages.length - 1];
+  // Set by ThreadMessageList: expands a message and scrolls to it, for the
+  // file strip's "show the message that carried this".
+  const revealMessageRef = useRef<((messageId: string) => void) | null>(null);
 
   // A draft left sitting at the end of this thread (e.g. a reply saved
   // earlier and never sent) — Gmail shows it inline, editable, in place of a
@@ -690,6 +694,10 @@ export default function ThreadDetailPage() {
         <p className="text-xs font-mono text-muted-foreground select-none">
           {thread.messages.length} {thread.messages.length === 1 ? "message" : "messages"} on file
         </p>
+        <ThreadFileStrip
+          messages={realMessages}
+          onReveal={(messageId) => revealMessageRef.current?.(messageId)}
+        />
       </div>
 
       {/*
@@ -893,7 +901,7 @@ export default function ThreadDetailPage() {
         )}
 
         {/* Email Messages Timeline */}
-        <ThreadMessageList messages={thread.messages} selfEmail={myEmail} />
+        <ThreadMessageList messages={thread.messages} selfEmail={myEmail} revealRef={revealMessageRef} />
 
         {/* Bottom pill bar — same handlers as the top icon bar. */}
         <div className="flex items-center gap-2 pt-2">

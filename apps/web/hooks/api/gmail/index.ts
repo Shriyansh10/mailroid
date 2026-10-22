@@ -295,7 +295,7 @@ export const usePendingEmbeddingsCount = () => {
   return { data, isLoading, isError, error, refetch };
 };
 
-export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number; unreadOnly?: boolean; maxResults?: number; page?: number }) => {
+export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number; unreadOnly?: boolean; maxResults?: number; page?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "usePriorityEmails called", { opts: opts ?? {} });
   const startMs = Date.now();
 
@@ -356,12 +356,17 @@ export const usePriorityCounts = (opts?: { days?: number }) => {
   return result;
 };
 
-export const useCategoryEmails = (category: string, opts?: { maxResults?: number; page?: number }) => {
+export const useCategoryEmails = (category: string, opts?: { maxResults?: number; page?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "useCategoryEmails called", { category, maxResults: opts?.maxResults, page: opts?.page });
   const startMs = Date.now();
 
   const result = trpc.gmail.listByCategory.useQuery(
-    { category, maxResults: opts?.maxResults, page: opts?.page },
+    {
+      category, maxResults: opts?.maxResults, page: opts?.page,
+      // Omitted rather than `false` when off, so the unfiltered list keeps its
+      // existing cache key.
+      ...(opts?.withAttachments ? { withAttachments: true } : {}),
+    },
     {
       enabled: !!category,
       refetchOnMount: true,

@@ -1,4 +1,4 @@
-import { db, eq, and, or, sql, desc, inArray, notInArray } from "@repo/database";
+import { db, eq, and, or, sql, desc, inArray, notInArray, type SQL, type SQLWrapper } from "@repo/database";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import { emails } from "@repo/database/models/emails";
 import { logger } from "@repo/logger";
@@ -190,10 +190,51 @@ export async function getInboxVersion(userId: string): Promise<{ version: number
   return { version };
 }
 
+/**
+ * Is there a message in this row's thread, for this user, matching `condition`
+ * (written against alias `m2`)?
+ *
+ * The WHOLE thread, in every category — not just the messages that made it
+ * into the current view. A Primary thread whose attachment travelled in the
+ * user's own Sent reply still has an attachment, and its chips (which are
+ * per thread, see enrichWithAttachments) already say so; a view-scoped answer
+ * would disagree with them. Served by idx_mm_user_thread (user_id, thread_id).
+ * A row with no thread_id is a thread of one, matched on its own entity_id.
+ */
+export function threadHasMessage(userId: string, threadId: SQLWrapper, entityId: SQLWrapper, condition: SQL): SQL {
+  return sql`EXISTS (
+    SELECT 1 FROM ${messageMetadata} AS m2
+    WHERE m2.user_id = ${userId}
+      AND (m2.thread_id = ${threadId} OR (${threadId} IS NULL AND m2.entity_id = ${entityId}))
+      AND ${condition}
+  )`;
+}
+
+/**
+ * Thread-level has_attachment, tri-state like the column itself:
+ *   true  — some message in the thread has a confirmed attachment
+ *   null  — none confirmed, but some message has never been checked
+ *   false — every message was checked, and none has one
+ * Unknown is never folded into false: a "no" that nobody checked is a lie the
+ * list would tell about the user's own mail.
+ */
+export function threadAttachmentState(userId: string, threadId: SQLWrapper, entityId: SQLWrapper): SQL<boolean | null> {
+  return sql<boolean | null>`CASE
+    WHEN ${threadHasMessage(userId, threadId, entityId, sql.raw("m2.has_attachment IS TRUE"))} THEN TRUE
+    WHEN ${threadHasMessage(userId, threadId, entityId, sql.raw("m2.has_attachment IS NULL"))} THEN NULL
+    ELSE FALSE
+  END`;
+}
+
 export async function getEmailsByCategory(
   userId: string,
   category: string,
-  opts?: { maxResults?: number; page?: number },
+  opts?: {
+    maxResults?: number;
+    page?: number;
+    /** Only threads with a CONFIRMED attachment. Unknown threads are excluded, not counted as "no". */
+    withAttachments?: boolean;
+  },
 ): Promise<{ threads: ThreadSummary[] }> {
   const limit = opts?.maxResults ?? 50;
   const page = opts?.page ?? 0;
@@ -253,7 +294,6 @@ export async function getEmailsByCategory(
     recipient: sql<string | null>`COALESCE(${messageMetadata.recipient}, ${emails.to})`.as(
       "recipient",
     ),
-    hasAttachment: messageMetadata.hasAttachment,
     rn: sql<number>`
       ROW_NUMBER() OVER(
         PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -287,10 +327,22 @@ export async function getEmailsByCategory(
     category: sq.category,
     draftId: sq.draftId,
     recipient: sq.recipient,
-    hasAttachment: sq.hasAttachment,
+    // The thread's answer, not the newest message's: the row stands for the
+    // conversation, and its chips already cover every message in it.
+    hasAttachment: threadAttachmentState(userId, sq.threadId, sq.entityId),
   })
   .from(sq)
-  .where(eq(sq.rn, 1))
+  // rn = 1 picks the thread's newest message to stand for the row; the
+  // attachment test looks at the whole thread, so an attachment on an older
+  // message still matches and the row is still the newest message.
+  .where(
+    and(
+      eq(sq.rn, 1),
+      opts?.withAttachments
+        ? threadHasMessage(userId, sq.threadId, sq.entityId, sql.raw("m2.has_attachment IS TRUE"))
+        : undefined,
+    ),
+  )
   .orderBy(desc(sq.receivedAt))
   .offset(offset)
   .limit(limit);
@@ -449,6 +501,8 @@ export async function getPriorityEmails(
     unreadOnly?: boolean;
     maxResults?: number;
     page?: number;
+    /** Only threads with a CONFIRMED attachment. See getEmailsByCategory. */
+    withAttachments?: boolean;
   }
 ): Promise<{ threads: ThreadSummary[] }> {
   const priorities = opts?.priorities ?? ["HIGH"];
@@ -505,7 +559,6 @@ export async function getPriorityEmails(
       isActionRequired: messageMetadata.isActionRequired,
       isReplyNeeded: messageMetadata.isReplyNeeded,
       isUnread: messageMetadata.isUnread,
-      hasAttachment: messageMetadata.hasAttachment,
       rn: sql<number>`
         ROW_NUMBER() OVER(
           PARTITION BY COALESCE(${messageMetadata.threadId}, ${messageMetadata.entityId})
@@ -533,10 +586,17 @@ export async function getPriorityEmails(
       isActionRequired: sq.isActionRequired,
       isReplyNeeded: sq.isReplyNeeded,
       isUnread: sq.isUnread,
-      hasAttachment: sq.hasAttachment,
+      hasAttachment: threadAttachmentState(userId, sq.threadId, sq.entityId),
     })
     .from(sq)
-    .where(eq(sq.rn, 1))
+    .where(
+      and(
+        eq(sq.rn, 1),
+        opts?.withAttachments
+          ? threadHasMessage(userId, sq.threadId, sq.entityId, sql.raw("m2.has_attachment IS TRUE"))
+          : undefined,
+      ),
+    )
     .orderBy(
       desc(sq.isUnread),
       sql`${sq.priorityScore} DESC NULLS LAST`,

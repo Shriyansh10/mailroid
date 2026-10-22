@@ -60,12 +60,12 @@ const PREVIEWABLE = new Set([
  */
 const BIDI = /[‎‏‪-‮⁦-⁩]/g;
 
-function safeName(name: string): string {
+export function safeName(name: string): string {
   const cleaned = name.replace(BIDI, "").trim();
   return cleaned.length > 0 ? cleaned : "attachment";
 }
 
-function formatSize(bytes: number): string {
+export function formatSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
   return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
@@ -73,7 +73,7 @@ function formatSize(bytes: number): string {
 
 /** Icon and accent per family. The accent is the only colour on the card, so a
  *  row of mixed attachments stays scannable by type at a glance. */
-function visualFor(mimeType: string, filename: string) {
+export function visualFor(mimeType: string, filename: string) {
   const ext = filename.split(".").pop()?.toLowerCase() ?? "";
 
   if (mimeType.startsWith("image/")) {

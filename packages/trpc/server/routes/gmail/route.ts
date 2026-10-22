@@ -906,6 +906,8 @@ export const gmailRouter = router({
         category: z.string(),
         maxResults: z.number().optional(),
         page: z.number().optional(),
+        /** Only threads with a confirmed attachment (unknown is excluded, not "no"). */
+        withAttachments: z.boolean().optional(),
       }),
     )
     .output(
@@ -922,6 +924,7 @@ export const gmailRouter = router({
       const result = await getEmailsByCategory(ctx.user!.id, input.category, {
         maxResults: input.maxResults,
         page: input.page,
+        withAttachments: input.withAttachments,
       });
       logger.info("[TRPC] gmail.listByCategory result", {
         userId: ctx.user!.id, category: input.category,
@@ -983,6 +986,7 @@ export const gmailRouter = router({
           unreadOnly: z.boolean().optional(),
           maxResults: z.number().optional(),
           page: z.number().optional(),
+          withAttachments: z.boolean().optional(),
         })
         .optional()
     )
@@ -1002,6 +1006,7 @@ export const gmailRouter = router({
         unreadOnly: input?.unreadOnly,
         maxResults: input?.maxResults,
         page: input?.page,
+        withAttachments: input?.withAttachments,
       });
       logger.info("[TRPC] gmail.listPriority result", {
         userId: ctx.user!.id,

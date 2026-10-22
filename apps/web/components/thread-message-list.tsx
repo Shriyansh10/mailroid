@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
+import { useState, useEffect, useMemo, useRef, type RefObject } from "react";
 import { ChevronRightIcon, ChevronDownIcon, ImageOffIcon } from "lucide-react";
 import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
 import { parseAddressList } from "@web/lib/email-addresses";
@@ -47,7 +47,7 @@ export interface ThreadMessage {
   inlineImages?: InlineImage[] | null;
 }
 
-function parseSender(from: string) {
+export function parseSender(from: string) {
   if (!from) return { name: "Unknown", email: "" };
   const match = from.match(/^([^<]+)<([^>]+)>/);
   if (match && match[1] && match[2]) {
@@ -79,7 +79,7 @@ function summariseRecipients(header: string | undefined, selfEmail?: string): st
     .join(", ");
 }
 
-function formatMessageDate(dateString: string): string {
+export function formatMessageDate(dateString: string): string {
   if (!dateString) return "";
   try {
     const date = new Date(dateString);
@@ -191,10 +191,17 @@ function MessageBody({ msg }: { msg: ThreadMessage }) {
 export function ThreadMessageList({
   messages: allMessages,
   selfEmail,
+  revealRef,
 }: {
   messages: ThreadMessage[];
   /** The signed-in address, so recipient summaries can say "me" like Gmail. */
   selfEmail?: string;
+  /**
+   * Receives a function that expands one message and scrolls it into view —
+   * for entry points outside this list (the thread's file strip) that point at
+   * a message which may currently be collapsed.
+   */
+  revealRef?: RefObject<((messageId: string) => void) | null>;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
@@ -251,6 +258,25 @@ export function ThreadMessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
 
+  // Expanding and scrolling are two steps: the expanded card has to render
+  // before there is anything to scroll to.
+  const [scrollTo, setScrollTo] = useState<string | null>(null);
+  useEffect(() => {
+    if (!revealRef) return;
+    revealRef.current = (id: string) => {
+      setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      setScrollTo(id);
+    };
+    return () => {
+      revealRef.current = null;
+    };
+  }, [revealRef]);
+  useEffect(() => {
+    if (!scrollTo) return;
+    document.getElementById(`msg-${scrollTo}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setScrollTo(null);
+  }, [scrollTo, expanded]);
+
   const toggle = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -271,9 +297,10 @@ export function ThreadMessageList({
           return (
             <button
               key={msg.id}
+              id={`msg-${msg.id}`}
               type="button"
               onClick={() => toggle(msg.id)}
-              className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl border bg-card hover:bg-muted/40 transition-colors text-left"
+              className="scroll-mt-4 w-full flex items-center gap-3 px-4 py-2.5 rounded-xl border bg-card hover:bg-muted/40 transition-colors text-left"
             >
               <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
               <Avatar className="size-7 border border-border shrink-0">
@@ -297,7 +324,7 @@ export function ThreadMessageList({
           // of the header. The header carries its own rounded-t-xl instead,
           // which is all the clipping was doing (its tinted background is the
           // only thing that reaches the card's corners).
-          <div key={msg.id} className="bg-card border rounded-xl shadow-sm">
+          <div key={msg.id} id={`msg-${msg.id}`} className="scroll-mt-4 bg-card border rounded-xl shadow-sm">
             {/*
               Message Header — clicking it collapses the message back, as in
               Gmail. A div rather than a button now that it contains its own
