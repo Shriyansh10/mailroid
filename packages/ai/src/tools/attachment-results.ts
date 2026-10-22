@@ -80,7 +80,7 @@ export interface FindAttachmentsResult {
     names?: string[];
   };
   coverage: { awaitingList: number; unknownStatus: number };
-  /** Plain-language statement of what was and wasn't searched. */
+  /** Plain-language caveat for the user; empty when there is nothing to say. */
   note: string;
 }
 
@@ -89,6 +89,8 @@ export function shapeFindAttachmentsResult(input: {
   senderQuery?: string;
   matchingSenderHeaders: string[];
   coverage: { awaitingList: number; unknownStatus: number };
+  /** The page size the search ran with; fewer files than this means it may be incomplete. */
+  limit: number;
 }): FindAttachmentsResult {
   const files = input.files.map((f) => ({
     attachmentId: f.attachmentId,
@@ -119,9 +121,14 @@ export function shapeFindAttachmentsResult(input: {
   } else if (sender && sender.matched > 1) {
     parts.push(`"${query}" matches ${sender.matched} different senders; ask the user which one they mean.`);
   }
-  if (unchecked > 0) {
+  // Most mail is synced metadata-only on purpose, so nearly every search has
+  // unchecked messages. Saying so is only worth it when the answer may be
+  // incomplete: a short page, which includes no results at all. Silence there
+  // would read as "there are none". A full page answered the question, so the
+  // caveat would only be noise. The coverage numbers are returned either way.
+  if (unchecked > 0 && files.length < input.limit) {
     parts.push(
-      `Only mail Mailroid has checked for attachments was searched: ${unchecked} message${unchecked === 1 ? "" : "s"} in this range ${unchecked === 1 ? "was" : "were"} not checked by file name.`,
+      `This only covers mail I've checked for attachments; ${unchecked} message${unchecked === 1 ? "" : "s"} in that range ${unchecked === 1 ? "wasn't" : "weren't"} checked.`,
     );
   }
   return { files, ...(sender ? { sender } : {}), coverage: input.coverage, note: parts.join(" ") };

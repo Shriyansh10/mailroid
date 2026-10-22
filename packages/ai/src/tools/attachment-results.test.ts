@@ -59,14 +59,14 @@ const file = (over: Record<string, unknown> = {}) => ({
 });
 
 test("result files carry no raw sender address", () => {
-  const out = shapeFindAttachmentsResult({ files: [file()], matchingSenderHeaders: [], coverage: coverage0 });
+  const out = shapeFindAttachmentsResult({ files: [file()], matchingSenderHeaders: [], coverage: coverage0, limit: 10 });
   assert.equal(out.files[0]!.sender, "Ravi Kumar");
   assert.doesNotMatch(JSON.stringify(out), /ravi@acme\.com/);
 });
 
 test("an unmatched sender is said, not returned as an empty list", () => {
   const out = shapeFindAttachmentsResult({
-    files: [], senderQuery: "Zed", matchingSenderHeaders: [], coverage: coverage0,
+    files: [], senderQuery: "Zed", matchingSenderHeaders: [], coverage: coverage0, limit: 10,
   });
   assert.equal(out.sender?.matched, 0);
   assert.match(out.note, /No mail from anyone matching "Zed"/);
@@ -77,17 +77,35 @@ test("two people matching one name: both named, and the model is told to ask", (
     files: [file()],
     senderQuery: "Ravi",
     matchingSenderHeaders: ["Ravi Kumar <r@a.com>", "Ravi Shah <rs@b.com>", "r@a.com"],
-    coverage: coverage0,
+    coverage: coverage0, limit: 10,
   });
   assert.equal(out.sender?.matched, 2);
   assert.deepEqual(out.sender?.names, ["Ravi Kumar", "Ravi Shah"]);
   assert.match(out.note, /ask the user which one/);
 });
 
-test("coverage is stated whenever anything went unchecked", () => {
-  const out = shapeFindAttachmentsResult({
-    files: [], matchingSenderHeaders: [], coverage: { awaitingList: 2, unknownStatus: 5 },
-  });
-  assert.match(out.note, /7 messages in this range were not checked/);
-  assert.equal(shapeFindAttachmentsResult({ files: [], matchingSenderHeaders: [], coverage: coverage0 }).note, "");
+const unchecked7 = { awaitingList: 2, unknownStatus: 5 };
+const files = (n: number) => Array.from({ length: n }, (_, i) => file({ attachmentId: `att-${i}` }));
+
+test("a full page with unchecked mail gives no coverage note, but keeps the numbers", () => {
+  const out = shapeFindAttachmentsResult({ files: files(10), matchingSenderHeaders: [], coverage: unchecked7, limit: 10 });
+  assert.equal(out.note, "");
+  assert.deepEqual(out.coverage, unchecked7);
+});
+
+test("a short page with unchecked mail states the coverage", () => {
+  const out = shapeFindAttachmentsResult({ files: files(3), matchingSenderHeaders: [], coverage: unchecked7, limit: 10 });
+  assert.match(out.note, /only covers mail I've checked for attachments; 7 messages in that range weren't checked/);
+});
+
+test("zero results with unchecked mail always state the coverage", () => {
+  const out = shapeFindAttachmentsResult({ files: [], matchingSenderHeaders: [], coverage: unchecked7, limit: 10 });
+  assert.match(out.note, /7 messages in that range weren't checked/);
+  const one = shapeFindAttachmentsResult({ files: [], matchingSenderHeaders: [], coverage: { awaitingList: 0, unknownStatus: 1 }, limit: 1 });
+  assert.match(one.note, /1 message in that range wasn't checked/);
+});
+
+test("nothing unchecked gives no coverage note, even on an empty result", () => {
+  assert.equal(shapeFindAttachmentsResult({ files: [], matchingSenderHeaders: [], coverage: coverage0, limit: 10 }).note, "");
+  assert.equal(shapeFindAttachmentsResult({ files: files(2), matchingSenderHeaders: [], coverage: coverage0, limit: 10 }).note, "");
 });

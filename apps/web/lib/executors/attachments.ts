@@ -32,7 +32,9 @@ export class FindAttachmentsExecutor implements ToolExecutor<FindAttachmentsInpu
       family: args.type,
       sender: args.sender,
       withinDays: args.withinDays,
-      limit: args.limit ?? 10,
+      // Clamped the same way the query clamps it, so the shaper's "short page"
+      // test compares against the page size that actually ran.
+      limit: Math.max(1, Math.min(args.limit ?? 10, 20)),
     };
     try {
       const [files, matchingSenderHeaders, coverage] = await Promise.all([
@@ -45,6 +47,7 @@ export class FindAttachmentsExecutor implements ToolExecutor<FindAttachmentsInpu
         senderQuery: args.sender,
         matchingSenderHeaders,
         coverage,
+        limit: filters.limit,
       });
       console.log("[executor:findAttachments] done", {
         userId: ctx.userId,

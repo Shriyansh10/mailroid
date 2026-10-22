@@ -888,7 +888,7 @@ export class ToolRegistry {
         "Find files (attachments) in the user's mail by name, type, sender and date — e.g. 'the invoice PDF Ravi sent last month'. " +
         "Pass `sender` exactly as the user said it (a name, company or address they typed), never an address you reconstructed. " +
         "If sender.matched is 0, say there is no mail from them. If sender.matched > 1, list sender.names and ask which one they mean. " +
-        "Always relay `note` when it is non-empty: results cover only mail Mailroid has checked for attachments. " +
+        "When `note` is non-empty, relay it to the user in your own words. It appears when the results may be incomplete (for example, no files found while some mail in that range hasn't been checked for attachments), so never present such a result as \"there are none\". When `note` is empty, don't add a coverage caveat of your own. " +
         "You see names only and cannot open, read or describe a file's contents. The interface shows the files with Open and Download, so never write a link or an id.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
