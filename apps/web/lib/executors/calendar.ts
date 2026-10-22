@@ -190,11 +190,11 @@ export class CorsairCreateEventExecutor
   ): Promise<CreateEventOutput> {
     console.log("[executor:createEvent] START", {
       userId: ctx.userId,
-      title: args.title,
       start: args.start,
       end: args.end,
-      attendees: args.attendees,
-      organizer: args.organizer,
+      attendeeCount: args.attendees?.length ?? 0,
+      attendeeRefCount: args.attendeeRefs?.length ?? 0,
+      hasOrganizer: !!args.organizer,
     });
     try {
       assertNotPast(args.start, (ctx as any).userTimeZone);
@@ -225,7 +225,6 @@ export class CorsairCreateEventExecutor
 
       console.log("[executor:createEvent] SUCCESS", {
         id: result.id,
-        title: result.title,
         meetStatus: result.meetStatus,
       });
       return { draft: false, id: result.id };
@@ -439,7 +438,6 @@ export class ScheduleThreadMeetingExecutor
     console.log("[executor:scheduleThreadMeeting] START", {
       userId: ctx.userId,
       threadId: args.threadId,
-      title: args.title,
     });
     try {
       assertNotPast(args.start, ctx.userTimeZone);

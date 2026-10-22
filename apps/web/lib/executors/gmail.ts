@@ -112,12 +112,14 @@ export class CorsairSearchEmailsExecutor
         applyAssistantRules: true,
       });
 
+      // Counts only: a success is a statistic. The message name is kept so
+      // existing log queries still match.
       console.log("[executor:searchEmails] RAW RESULT", {
+        requestId: ctx.requestId,
         threadCount: result.threads.length,
         total: result.total,
         spamCount: result.spamCount,
         hiddenProtected: result.hiddenProtected?.count ?? 0,
-        firstThread: result.threads[0] ?? null,
       });
 
       // The service already caps the primary bucket; MAX_EMAIL_RESULTS is a
@@ -169,7 +171,11 @@ export class CorsairSendEmailExecutor
     args: SendEmailInput,
     ctx: { userId: string; requestId: string },
   ): Promise<SendEmailOutput> {
-    console.log("[executor:sendEmail] START", { userId: ctx.userId, to: args.to, subject: args.subject, from: args.from });
+    console.log("[executor:sendEmail] START", {
+      userId: ctx.userId,
+      recipientCount: args.to.split(",").filter((s) => s.trim()).length,
+      hasFrom: !!args.from,
+    });
     try {
       if (args.from) {
         const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
@@ -294,7 +300,11 @@ export class ForwardEmailExecutor
     args: ForwardEmailInput,
     ctx: { userId: string; requestId: string },
   ): Promise<ForwardEmailOutput> {
-    console.log("[executor:forwardEmail] START", { userId: ctx.userId, entityId: args.entityId, to: args.to });
+    console.log("[executor:forwardEmail] START", {
+      userId: ctx.userId,
+      entityId: args.entityId,
+      recipientCount: args.to.split(",").filter((s) => s.trim()).length,
+    });
     try {
       const result = await corsairForwardEmail(ctx.userId, {
         entityId: args.entityId,
