@@ -38,6 +38,7 @@ import {
 import {
   useSendEmail,
   useSaveDraft,
+  useDraftSaved,
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
@@ -56,6 +57,17 @@ import {
   type RecipientFieldsHandle,
 } from "@web/components/inbox/recipient-fields";
 import { isValidAddress, parseAddressList } from "@web/lib/email-addresses";
+import {
+  AttachmentPicker,
+  getAttachmentVerdict,
+  type ExistingAttachment,
+} from "@web/components/inbox/attachment-picker";
+import { sendWithAttachments } from "@web/lib/send-with-attachments";
+import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
+import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
+import { filesFromPaste, mergeFiles } from "@web/components/inbox/attachment-files";
+import { useFileDrop } from "@web/components/inbox/use-file-drop";
+import { DropOverlay } from "@web/components/inbox/drop-overlay";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -101,6 +113,8 @@ export interface ComposePrefill {
   threadId?: string;
   /** Present when editing an existing draft: saving updates it in place. */
   draftId?: string;
+  /** Already attached to that draft in Gmail — see the note by `files`. */
+  attachments?: ExistingAttachment[];
 }
 
 interface ComposeDialogProps {
@@ -160,7 +174,14 @@ function ComposeAiPanel({
 
 export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDialogProps) {
   const { sendEmailAsync } = useSendEmail();
-  const { saveDraftAsync, isPending: isSavingDraft } = useSaveDraft();
+  const { saveDraftAsync } = useSaveDraft();
+  const draftSaved = useDraftSaved();
+  // Covers BOTH save paths: the multipart route (attachments) is a plain fetch
+  // with no mutation state, so `isPending` alone left Save clickable mid-upload
+  // and a second click raced the first. The ref blocks re-entry synchronously;
+  // the state drives the buttons.
+  const [isSavingDraft, setIsSavingDraft] = useState(false);
+  const savingDraftRef = useRef(false);
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
@@ -197,6 +218,44 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   // A close request (backdrop / Esc / X) held back until the user says what to
   // do with the message they'd otherwise lose.
   const [confirmClose, setConfirmClose] = useState(false);
+  // "You mentioned an attachment" — held open at Send until the user attaches
+  // or chooses to send as written. The skip flag carries "Send anyway" through
+  // one more pass of handleSubmit, so validation and isSubmitting still apply.
+  const [remindAttachment, setRemindAttachment] = useState(false);
+  const skipReminderRef = useRef(false);
+  const openPickerRef = useRef<(() => void) | null>(null);
+
+  /**
+   * Attachments, in two lists that are deliberately not merged.
+   *
+   * `files` are handles to things on the user's disk, picked in this session.
+   * `existingAttachments` are already on the Gmail draft and have no disk to
+   * point at. Merging them would mean downloading a draft's attachments into
+   * the browser on every open, just to have something File-shaped — megabytes
+   * moved to change a subject line.
+   *
+   * Keeping them apart is what lets a draft save send only what is new and name
+   * the rest by id. Gmail's draft update replaces the whole message, so the
+   * server has to restate every part either way; the difference is whether the
+   * bytes cross the network again.
+   */
+  const [files, setFiles] = useState<File[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<ExistingAttachment[]>([]);
+
+  // The SAME verdict AttachmentPicker renders, read here so Send and Save are
+  // dead while the set is invalid. Previously the picker computed this
+  // privately: it showed "these attachments are too large" beside ordinary
+  // chips and a live Send button, leaving nothing on screen that said whether
+  // the mail would actually go. The server refused it either way — this makes
+  // the UI agree with the server before the upload rather than after it.
+  const attachmentVerdict = getAttachmentVerdict(files, existingAttachments);
+
+  // Dropped and pasted files join the same `files` list as picked ones, so the
+  // picker's per-file blame, the verdict above and the server all see them.
+  const addFiles = useCallback((incoming: File[]) => {
+    setFiles((prev) => mergeFiles(prev, incoming));
+  }, []);
+  const { dragging, dropHandlers } = useFileDrop(addFiles, isSubmitting);
 
   // Load the prefill when the dialog opens. Keyed on `open` as well as the
   // prefill itself so reopening on the same draft re-seeds the fields the user
@@ -211,9 +270,14 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
       body: prefill?.body ?? "",
     });
     setMeetingState(emptyMeetingState());
+    // Reopening re-seeds from Gmail rather than keeping whatever was on screen:
+    // the draft is the source of truth for what is attached, and a stale list
+    // here would be sent back as `keepAttachmentIds` and act on the wrong set.
+    setExistingAttachments(prefill?.attachments ?? []);
+    setFiles([]);
   }, [
     open, prefill?.to, prefill?.cc, prefill?.bcc,
-    prefill?.subject, prefill?.body, prefill?.draftId, form,
+    prefill?.subject, prefill?.body, prefill?.draftId, prefill?.attachments, form,
   ]);
 
   // Seed the meeting fields from the thread's existing meeting so scheduling
@@ -317,6 +381,8 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const resetAndClose = useCallback(() => {
     form.reset(EMPTY);
     setMeetingState(emptyMeetingState());
+    setFiles([]);
+      setExistingAttachments([]);
     onOpenChange(false);
   }, [form, onOpenChange]);
 
@@ -366,18 +432,60 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
   const onSubmit = useCallback(
     async (values: { to: string; cc: string; bcc: string; subject: string; body: string }) => {
       try {
-        // An open draft is sent via drafts.send so Gmail consumes the draft
-        // itself. Sending a fresh copy instead would leave the draft behind.
+        // Three send paths, and which one runs is decided here rather than
+        // inside a single overloaded mutation:
+        //
+        //   files present  → the multipart route, because tRPC is JSON-only
+        //                    and the API's express.json() has no size limit.
+        //   open draft     → drafts.send, so Gmail consumes the draft itself.
+        //                    Sending a fresh copy would leave the draft behind.
+        //   otherwise      → the existing tRPC mutation, entirely unchanged.
+        //
+        // A draft carrying files takes the multipart path and the draft is left
+        // in place — see the note by `files` on why that is the honest
+        // behaviour rather than a silent one.
+        // A draft that carries attachments is UPDATED first, then sent through
+        // drafts.send — not sent as a fresh message. Sending a copy would leave
+        // the original draft sitting in the mailbox after the mail had already
+        // gone, which is the failure the draftId branch has always existed to
+        // avoid; attachments do not change that, they only mean the update has
+        // to go through the multipart route to carry the bytes.
+        if (draftId && (files.length > 0 || existingAttachments.length > 0)) {
+          await sendWithAttachments({
+            mode: "draft-update",
+            files,
+            to: values.to,
+            cc: values.cc,
+            bcc: values.bcc,
+            subject: values.subject,
+            body: values.body,
+            threadId,
+            draftId,
+            keepAttachmentIds: existingAttachments.map((a) => a.id),
+          });
+        }
+
         const sent = draftId
           ? await sendDraftAsync({ draftId })
-          : await sendEmailAsync({
-              to: values.to.trim(),
-              cc: values.cc.trim(),
-              bcc: values.bcc.trim(),
-              subject: values.subject.trim(),
+          : files.length
+          ? await sendWithAttachments({
+              mode: "new",
+              files,
+              to: values.to,
+              cc: values.cc,
+              bcc: values.bcc,
+              subject: values.subject,
               body: values.body,
-              ...(threadId ? { threadId } : {}),
-            });
+              threadId,
+            })
+          : await sendEmailAsync({
+                to: values.to.trim(),
+                cc: values.cc.trim(),
+                bcc: values.bcc.trim(),
+                subject: values.subject.trim(),
+                body: values.body,
+                ...(threadId ? { threadId } : {}),
+              });
 
         // A fresh compose has no threadId to prefill — Gmail only assigns one
         // when the message is sent, and both send mutations return it. Without
@@ -489,7 +597,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
         toast.error("Failed to send", { description: message });
       }
     },
-    [sendEmailAsync, sendDraftAsync, createEventAsync, updateEventAsync, meetingState, draftId, threadId, form, onOpenChange, onSent],
+    [sendEmailAsync, sendDraftAsync, createEventAsync, updateEventAsync, meetingState, draftId, threadId, form, onOpenChange, onSent, files, existingAttachments],
   );
 
   /**
@@ -502,29 +610,73 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     if (field) recipientsRef.current?.focusField(field);
   }, [form]);
 
+  /** Send, unless the text says a file is attached and none is. */
+  const submitWithReminder = useCallback(
+    async (values: Parameters<typeof onSubmit>[0]) => {
+      const skip = skipReminderRef.current;
+      skipReminderRef.current = false;
+      const nothingAttached = files.length === 0 && existingAttachments.length === 0;
+      if (!skip && nothingAttached && mentionsAttachment(values.body)) {
+        setRemindAttachment(true);
+        return;
+      }
+      await onSubmit(values);
+    },
+    [files, existingAttachments, onSubmit],
+  );
+
   /**
    * Save without sending. Deliberately does NOT run the zod resolver: a draft
    * is by definition unfinished, and refusing to save one because the recipient
    * isn't a valid address yet is exactly the moment you most want it saved.
    */
   const handleSaveDraft = useCallback(async () => {
+    if (savingDraftRef.current) return;
+    savingDraftRef.current = true;
+    setIsSavingDraft(true);
     const values = form.getValues();
+    // getValues() returns the pre-resolver input shape, where the zod
+    // `.default("")` hasn't been applied yet — an untouched body is genuinely
+    // undefined here.
+    const common = {
+      to: values.to.trim(),
+      cc: values.cc?.trim() ?? "",
+      bcc: values.bcc?.trim() ?? "",
+      subject: values.subject.trim(),
+      body: values.body ?? "",
+    };
+
     try {
-      await saveDraftAsync({
-        to: values.to.trim(),
-        cc: values.cc?.trim() ?? "",
-        bcc: values.bcc?.trim() ?? "",
-        subject: values.subject.trim(),
-        // getValues() returns the pre-resolver input shape, where the zod
-        // `.default("")` hasn't been applied yet — an untouched body is
-        // genuinely undefined here.
-        body: values.body ?? "",
-        ...(threadId ? { threadId } : {}),
-        ...(draftId ? { draftId } : {}),
-      });
+      // Attachments force the multipart route: a File cannot travel through
+      // tRPC's JSON body. `keepAttachmentIds` is sent whenever this dialog is
+      // managing a draft's attachments, because Gmail's draft update replaces
+      // the whole message — staying silent would strip whatever the user had
+      // just chosen to keep.
+      const usesAttachments = files.length > 0 || existingAttachments.length > 0;
+
+      if (usesAttachments) {
+        await sendWithAttachments({
+          mode: draftId ? "draft-update" : "draft-create",
+          files,
+          ...common,
+          threadId,
+          draftId,
+          keepAttachmentIds: existingAttachments.map((a) => a.id),
+        });
+        draftSaved();
+      } else {
+        await saveDraftAsync({
+          ...common,
+          ...(threadId ? { threadId } : {}),
+          ...(draftId ? { draftId } : {}),
+        });
+      }
+
       toast.success(draftId ? "Draft updated" : "Draft saved");
       form.reset(EMPTY);
       setMeetingState(emptyMeetingState());
+      setFiles([]);
+      setExistingAttachments([]);
       // Cleared before the close so handleOpenChange sees an empty form and
       // doesn't re-open the confirmation it was just dismissed from.
       setConfirmClose(false);
@@ -532,8 +684,11 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
     } catch (err) {
       const message = err instanceof Error ? err.message : "Failed to save draft";
       toast.error("Couldn't save draft", { description: message });
+    } finally {
+      savingDraftRef.current = false;
+      setIsSavingDraft(false);
     }
-  }, [form, saveDraftAsync, draftId, threadId, onOpenChange]);
+  }, [form, saveDraftAsync, draftSaved, draftId, threadId, onOpenChange, files, existingAttachments]);
 
   /** Discard: deletes the draft in Gmail when editing one, else just closes. */
   const handleDiscard = useCallback(async () => {
@@ -575,9 +730,12 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
 
         <Form {...form}>
           <form
-            onSubmit={form.handleSubmit(onSubmit, handleInvalidSubmit)}
+            onSubmit={form.handleSubmit(submitWithReminder, handleInvalidSubmit)}
             style={{ display: "flex", flexDirection: "column", gap: "1rem" }}
+            className="relative"
+            {...dropHandlers}
           >
+            <DropOverlay visible={dragging} />
             <div className="flex flex-wrap items-center gap-2">
               <TemplatePicker onSelect={applyTemplate} disabled={isSubmitting} />
               <ComposeAiPanel
@@ -653,11 +811,30 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                       // and let the text box scroll on its own instead.
                       className="min-h-32 sm:min-h-48 max-h-[45dvh] overflow-y-auto"
                       {...field}
+                      onPaste={(e) => {
+                        // Text pastes are untouched; only a paste that is
+                        // purely files (a screenshot) becomes an attachment.
+                        const pasted = filesFromPaste(e.clipboardData);
+                        if (pasted.length === 0) return;
+                        e.preventDefault();
+                        addFiles(pasted);
+                      }}
                     />
                   </FormControl>
                   <FormMessage />
                 </FormItem>
               )}
+            />
+
+            <AttachmentPicker
+              files={files}
+              onChange={setFiles}
+              existing={existingAttachments}
+              onRemoveExisting={(id) =>
+                setExistingAttachments((prev) => prev.filter((a) => a.id !== id))
+              }
+              disabled={isSubmitting}
+              openRef={openPickerRef}
             />
 
             <MeetingInviteFields
@@ -674,7 +851,7 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                 variant="ghost"
                 type="button"
                 onClick={handleDiscard}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isSavingDraft}
               >
                 <Trash2Icon className="size-4" />
                 Discard
@@ -683,12 +860,26 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
                 variant="outline"
                 type="button"
                 onClick={handleSaveDraft}
-                disabled={isSubmitting}
+                disabled={isSubmitting || isSavingDraft || !attachmentVerdict.ok}
+                title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
               >
-                <SaveIcon className="size-4" />
-                {draftId ? "Update draft" : "Save as draft"}
+                {isSavingDraft ? (
+                  <>
+                    <Loader2Icon className="size-4 animate-spin" />
+                    Saving…
+                  </>
+                ) : (
+                  <>
+                    <SaveIcon className="size-4" />
+                    {draftId ? "Update draft" : "Save as draft"}
+                  </>
+                )}
               </Button>
-              <Button type="submit" disabled={isSubmitting}>
+              <Button
+                type="submit"
+                disabled={isSubmitting || isSavingDraft || !attachmentVerdict.ok}
+                title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
+              >
                 {isSubmitting ? (
                   <>
                     <Loader2Icon className="size-4 animate-spin" />
@@ -705,6 +896,21 @@ export function ComposeDialog({ open, onOpenChange, onSent, prefill }: ComposeDi
           </form>
         </Form>
       </DialogContent>
+
+      <AttachmentReminderDialog
+        open={remindAttachment}
+        onCancel={() => setRemindAttachment(false)}
+        onAttach={() => {
+          setRemindAttachment(false);
+          // Still inside the click, so the browser treats it as a user gesture.
+          openPickerRef.current?.();
+        }}
+        onSendAnyway={() => {
+          setRemindAttachment(false);
+          skipReminderRef.current = true;
+          void form.handleSubmit(submitWithReminder, handleInvalidSubmit)();
+        }}
+      />
 
       <AlertDialog
         open={!!pendingApply}

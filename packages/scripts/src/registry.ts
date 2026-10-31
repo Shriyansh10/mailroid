@@ -10,6 +10,8 @@
 
 import type { Command } from "./types.ts";
 
+import authVerify from "./commands/auth-verify.ts";
+import authConnect from "./commands/auth-connect.ts";
 import gmailStatus from "./commands/gmail-status.ts";
 import gmailResyncCategories from "./commands/gmail-resync-categories.ts";
 import gmailResync from "./commands/gmail-resync.ts";
@@ -31,6 +33,11 @@ import gmailQuotaReconcile from "./commands/gmail-quota-reconcile.ts";
 // Within a group: cheapest and safest first, so the expensive whole-mailbox
 // walk is never the first thing someone reaches for.
 export const commands: Command[] = [
+  // First in the listing on purpose: when credentials have been rotated, every
+  // other command in here fails on a token refresh. auth:verify says whether
+  // that has happened; auth:connect is the repair.
+  authVerify,
+  authConnect,
   aiUsage,
   gmailStatus,
   gmailQuotaReconcile,

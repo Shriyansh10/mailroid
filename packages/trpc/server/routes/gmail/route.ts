@@ -28,6 +28,8 @@ import {
 } from "@repo/services/gmail/drafts.js";
 import { getEmailsByCategory, getCategoryCounts, getPriorityEmails, getPriorityCounts, getInboxVersion } from "@repo/services/gmail/metadata.js";
 import { triggerGmailSync } from "@repo/services/gmail/sync-metadata.js";
+import { FORWARD_ATTACHMENTS_UNAVAILABLE } from "@repo/services/gmail/attachment-limits.js";
+import { TRPCError } from "@trpc/server";
 import { getSyncStatus } from "@repo/services/gmail/sync-status.js";
 import { ALL_CATEGORIES } from "@repo/services/gmail/metadata.js";
 import {
@@ -199,6 +201,7 @@ export const gmailRouter = router({
         cc: z.string().optional(),
         bcc: z.string().optional(),
         note: z.string().optional(),
+        omitOriginalAttachments: z.boolean().optional(),
       }),
     )
     .output(sendEmailOutputModel)
@@ -206,7 +209,19 @@ export const gmailRouter = router({
       logger.info("[TRPC] gmail.forwardEmail called", {
         userId: ctx.user!.id, entityId: input.entityId, toHash: hashMailboxList(input.to),
       });
-      return await forwardEmail(ctx.user!.id, input);
+      try {
+        return await forwardEmail(ctx.user!.id, input);
+      } catch (err) {
+        // PRECONDITION_FAILED is used by this procedure for exactly one case:
+        // the original's files could not be carried and NOTHING was sent. The
+        // client offers "Forward without attachments" on it, which is only safe
+        // because of that guarantee — never reuse this code here for anything
+        // whose send outcome is uncertain.
+        if ((err as { code?: unknown })?.code === FORWARD_ATTACHMENTS_UNAVAILABLE) {
+          throw new TRPCError({ code: "PRECONDITION_FAILED", message: (err as Error).message, cause: err });
+        }
+        throw err;
+      }
     }),
 
   // ── Mailbox actions (Bin / Star) ───────────────────────────────────
@@ -367,6 +382,23 @@ export const gmailRouter = router({
         body: z.string(),
         threadId: z.string().optional(),
         isReplyToExisting: z.boolean(),
+        /**
+         * What is already attached to this draft.
+         *
+         * Declared explicitly because `.output()` STRIPS undeclared fields
+         * without erroring: omit this and the compose box would reopen a draft
+         * showing no attachments, save it, and Gmail's replace-the-whole-message
+         * update would then genuinely remove them — a silent data loss with
+         * nothing anywhere reporting a failure.
+         */
+        attachments: z.array(
+          z.object({
+            id: z.string(),
+            filename: z.string(),
+            mimeType: z.string(),
+            sizeBytes: z.number(),
+          }),
+        ),
       }),
     )
     .query(async ({ ctx, input }) => {
@@ -441,7 +473,7 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.search called", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         maxResults: input.maxResults, pageToken: input.pageToken,
       });
       const result = await searchEmails(ctx.user!.id, input.query, {
@@ -449,7 +481,7 @@ export const gmailRouter = router({
         pageToken: input.pageToken,
       });
       logger.info("[TRPC] gmail.search result", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         threadCount: result.threads?.length ?? 0,
         hasNextPage: !!result.nextPageToken, durationMs: Date.now() - startMs,
       });
@@ -805,7 +837,7 @@ export const gmailRouter = router({
     )
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
-      logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, query: input.query });
+      logger.info("[TRPC] gmail.searchLocal called", { userId: ctx.user!.id, queryLength: input.query.length });
       // Belt-and-braces alongside the client-side disabled search input:
       // `ready` is a one-time latch (see ai-readiness.ts), so this only ever
       // blocks a user's first-ever setup window, never an established user.
@@ -816,7 +848,7 @@ export const gmailRouter = router({
       }
       const result = await searchLocalEmails(ctx.user!.id, { query: input.query });
       logger.info("[TRPC] gmail.searchLocal result", {
-        userId: ctx.user!.id, query: input.query,
+        userId: ctx.user!.id, queryLength: input.query.length,
         threadCount: result.threads?.length ?? 0, total: result.total,
         durationMs: Date.now() - startMs,
       });
@@ -874,6 +906,8 @@ export const gmailRouter = router({
         category: z.string(),
         maxResults: z.number().optional(),
         page: z.number().optional(),
+        /** Only threads with a confirmed attachment (unknown is excluded, not "no"). */
+        withAttachments: z.boolean().optional(),
       }),
     )
     .output(
@@ -890,6 +924,7 @@ export const gmailRouter = router({
       const result = await getEmailsByCategory(ctx.user!.id, input.category, {
         maxResults: input.maxResults,
         page: input.page,
+        withAttachments: input.withAttachments,
       });
       logger.info("[TRPC] gmail.listByCategory result", {
         userId: ctx.user!.id, category: input.category,
@@ -951,6 +986,7 @@ export const gmailRouter = router({
           unreadOnly: z.boolean().optional(),
           maxResults: z.number().optional(),
           page: z.number().optional(),
+          withAttachments: z.boolean().optional(),
         })
         .optional()
     )
@@ -970,6 +1006,7 @@ export const gmailRouter = router({
         unreadOnly: input?.unreadOnly,
         maxResults: input?.maxResults,
         page: input?.page,
+        withAttachments: input?.withAttachments,
       });
       logger.info("[TRPC] gmail.listPriority result", {
         userId: ctx.user!.id,
@@ -991,6 +1028,7 @@ export const gmailRouter = router({
       z
         .object({
           days: z.number().optional(),
+          withAttachments: z.boolean().optional(),
         })
         .optional()
     )
@@ -1006,7 +1044,9 @@ export const gmailRouter = router({
     .query(async ({ ctx, input }) => {
       const startMs = Date.now();
       logger.info("[TRPC] gmail.priorityCounts called", { userId: ctx.user!.id, input: input ?? {} });
-      const result = await getPriorityCounts(ctx.user!.id, input?.days ?? undefined);
+      const result = await getPriorityCounts(ctx.user!.id, input?.days ?? undefined, {
+        withAttachments: input?.withAttachments,
+      });
       logger.info("[TRPC] gmail.priorityCounts result", {
         userId: ctx.user!.id, counts: result, durationMs: Date.now() - startMs,
       });

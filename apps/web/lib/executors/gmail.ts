@@ -1,5 +1,5 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError, appendSignature } from "@repo/ai";
+import { ToolExecutionError, appendSignature, shapeSearchEmailsForModel } from "@repo/ai";
 import {
   searchLocalEmails,
   sendEmail as corsairSendEmail,
@@ -9,6 +9,7 @@ import {
   previewForward,
 } from "@repo/services/gmail/index";
 import { getPriorityProfile } from "@repo/services/profile/index";
+import { describeForwardPreview } from "@repo/services/gmail/forward-attachments";
 import { db, eq } from "@repo/database";
 import { user } from "@repo/database/schema";
 
@@ -98,7 +99,11 @@ export class CorsairSearchEmailsExecutor
     args: SearchEmailsInput,
     ctx: { userId: string; requestId: string },
   ): Promise<SearchEmailsOutput> {
-    console.log("[executor:searchEmails] START", { userId: ctx.userId, query: args.query, sender: args.sender });
+    console.log("[executor:searchEmails] START", {
+      userId: ctx.userId,
+      queryLength: args.query?.length ?? 0,
+      hasSender: !!args.sender?.trim(),
+    });
     if (!args.query?.trim() && !args.sender?.trim()) {
       throw new ToolExecutionError("searchEmails", new Error("At least one of query or sender is required"));
     }
@@ -111,33 +116,28 @@ export class CorsairSearchEmailsExecutor
         applyAssistantRules: true,
       });
 
+      // Counts only: a success is a statistic. The message name is kept so
+      // existing log queries still match.
       console.log("[executor:searchEmails] RAW RESULT", {
+        requestId: ctx.requestId,
         threadCount: result.threads.length,
         total: result.total,
         spamCount: result.spamCount,
         hiddenProtected: result.hiddenProtected?.count ?? 0,
-        firstThread: result.threads[0] ?? null,
       });
 
       // The service already caps the primary bucket; MAX_EMAIL_RESULTS is a
       // belt-and-suspenders ceiling for the summary path (~40).
-      const emails = result.threads.slice(0, MAX_EMAIL_RESULTS).map((t) => ({
-        entityId: t.entityId,
-        threadId: t.threadId,
-        sender: t.sender,
-        subject: t.subject,
-        date: t.date,
-        snippet: t.snippet,
-        score: t.score,
-      }));
+      //
+      // Masked on the way out: senders become display names, and subject,
+      // snippet and protected-sender entries lose addresses and phone numbers.
+      // The agent loop's own output pass does not mask those, and the system
+      // prompt tells the model they already were. The sender FILTER above ran
+      // server-side against the real headers, so searching is unaffected.
+      const shaped = shapeSearchEmailsForModel(result, MAX_EMAIL_RESULTS);
 
-      console.log("[executor:searchEmails] RETURNING", { emailCount: emails.length });
-      return {
-        emails,
-        primaryTotal: result.total,
-        spamCount: result.spamCount ?? 0,
-        hiddenProtected: result.hiddenProtected,
-      };
+      console.log("[executor:searchEmails] RETURNING", { emailCount: shaped.emails.length });
+      return shaped;
     } catch (error) {
       console.error("[executor:searchEmails] ERROR", { error: String(error), userId: ctx.userId });
       throw new ToolExecutionError("searchEmails", error);
@@ -175,7 +175,11 @@ export class CorsairSendEmailExecutor
     args: SendEmailInput,
     ctx: { userId: string; requestId: string },
   ): Promise<SendEmailOutput> {
-    console.log("[executor:sendEmail] START", { userId: ctx.userId, to: args.to, subject: args.subject, from: args.from });
+    console.log("[executor:sendEmail] START", {
+      userId: ctx.userId,
+      recipientCount: args.to.split(",").filter((s) => s.trim()).length,
+      hasFrom: !!args.from,
+    });
     try {
       if (args.from) {
         const authenticatedEmail = await getAuthenticatedEmail(ctx.userId);
@@ -277,6 +281,7 @@ export interface ForwardEmailInput {
   entityId: string;
   to: string;
   note?: string;
+  omitOriginalAttachments?: boolean;
 }
 
 export interface ForwardEmailOutput {
@@ -299,12 +304,17 @@ export class ForwardEmailExecutor
     args: ForwardEmailInput,
     ctx: { userId: string; requestId: string },
   ): Promise<ForwardEmailOutput> {
-    console.log("[executor:forwardEmail] START", { userId: ctx.userId, entityId: args.entityId, to: args.to });
+    console.log("[executor:forwardEmail] START", {
+      userId: ctx.userId,
+      entityId: args.entityId,
+      recipientCount: args.to.split(",").filter((s) => s.trim()).length,
+    });
     try {
       const result = await corsairForwardEmail(ctx.userId, {
         entityId: args.entityId,
         to: args.to,
         note: args.note,
+        omitOriginalAttachments: args.omitOriginalAttachments === true,
       });
       console.log("[executor:forwardEmail] SUCCESS", { id: result.id, threadId: result.threadId });
       return { draft: false, id: result.id, threadId: result.threadId };
@@ -317,8 +327,14 @@ export class ForwardEmailExecutor
 
 /**
  * Approval-preview builder for forwardEmail — surfaces the resolved subject
- * and warns explicitly when the original has attachments, since
- * buildRawEmail is text/plain only and never carries them over.
+ * and states what will travel with the message.
+ *
+ * The approval card is the last thing a user reads before real mail leaves,
+ * so it NAMES the original's files rather than counting them: "contract.pdf"
+ * versus "1 attachment" is the difference between knowingly forwarding a
+ * contract and forwarding one by accident. It is also a promise the service
+ * keeps — those files go, or nothing does (forward-attachments.ts) — and when
+ * the user chose to forward without them, the card says that instead.
  */
 export async function buildForwardPreview(
   args: Record<string, unknown>,
@@ -329,11 +345,12 @@ export async function buildForwardPreview(
   if (!entityId) return `Forward an email to ${to}`;
   try {
     const target = await previewForward(ctx.userId, entityId);
-    const lines = [`To: ${to}`, `Subject: ${target.subject}`];
-    if (target.attachmentCount > 0) {
-      lines.push(`⚠ ${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} will NOT be included`);
-    }
-    return lines.join("\n");
+    return describeForwardPreview({
+      to,
+      subject: target.subject,
+      attachmentNames: target.attachmentNames,
+      omitOriginalAttachments: args.omitOriginalAttachments === true,
+    });
   } catch (error) {
     console.error("[executor:forwardEmail] preview failed", { error: String(error) });
     return `Forward an email to ${to} (could not resolve subject — check the email still exists)`;

@@ -8,6 +8,7 @@ import {
   Loader2Icon,
   XIcon,
   MoreHorizontalIcon,
+  PaperclipIcon,
 } from "lucide-react";
 import { toast } from "sonner";
 
@@ -27,6 +28,7 @@ import {
   useReplyToEmail,
   useForwardEmail,
   useSaveDraft,
+  useDraftSaved,
   useSendDraft,
   useDiscardDraft,
 } from "@web/hooks/api/gmail";
@@ -46,6 +48,19 @@ import {
   type RecipientValues,
 } from "@web/components/inbox/recipient-fields";
 import { parseAddressList } from "@web/lib/email-addresses";
+import {
+  AttachmentPicker,
+  getAttachmentVerdict,
+  type ExistingAttachment,
+} from "@web/components/inbox/attachment-picker";
+import { sendWithAttachments } from "@web/lib/send-with-attachments";
+import { isForwardAttachmentsUnavailable } from "@web/lib/forward-errors";
+import { mentionsAttachment } from "@repo/services/gmail/attachment-reminder";
+import { AttachmentReminderDialog } from "@web/components/inbox/attachment-reminder-dialog";
+import { filesFromPaste, mergeFiles } from "@web/components/inbox/attachment-files";
+import { useFileDrop } from "@web/components/inbox/use-file-drop";
+import { DropOverlay } from "@web/components/inbox/drop-overlay";
+import type { MessageAttachment } from "@web/components/attachment-list";
 import {
   MeetingInviteFields,
   emptyMeetingState,
@@ -99,6 +114,14 @@ export interface InlineReplyBoxProps {
   initialCc?: string;
   initialBcc?: string;
   initialBody?: string;
+  /** Already attached to the draft being resumed. Absent for a fresh reply. */
+  initialAttachments?: ExistingAttachment[];
+  /**
+   * The forwarded message's own files, as the thread view knows them. Forward
+   * only. `null` means the message was never read in full, so whether it has
+   * any is unknown — not that it has none.
+   */
+  originalAttachments?: MessageAttachment[] | null;
   onClose: () => void;
   onSent: () => void;
 }
@@ -174,12 +197,15 @@ export function InlineReplyBox({
   initialCc,
   initialBcc,
   initialBody,
+  initialAttachments,
+  originalAttachments,
   onClose,
   onSent,
 }: InlineReplyBoxProps) {
   const { replyToEmailAsync } = useReplyToEmail();
   const { forwardEmailAsync } = useForwardEmail();
   const { saveDraftAsync } = useSaveDraft();
+  const draftSaved = useDraftSaved();
   const { sendDraftAsync } = useSendDraft();
   const { discardDraftAsync } = useDiscardDraft();
   const { createEventAsync } = useCreateEvent();
@@ -200,7 +226,31 @@ export function InlineReplyBox({
   const recipientsRef = useRef<RecipientFieldsHandle>(null);
   const [body, setBody] = useState(initialBody ?? "");
   const [submitting, setSubmitting] = useState(false);
+  // Guards the send itself, not just the button: the "Forward without
+  // attachments" toast action holds an older handleSend, whose `submitting`
+  // is stale, and a second click there must not fire a second send.
+  const sendingRef = useRef(false);
+  // "You mentioned an attachment" — asked at Send, see AttachmentReminderDialog.
+  const [remindAttachment, setRemindAttachment] = useState(false);
+  const openPickerRef = useRef<(() => void) | null>(null);
   const [meetingState, setMeetingState] = useState<MeetingState>(emptyMeetingState);
+  // Two lists, never merged — see the note in compose-dialog.tsx. `files` are
+  // handles to things on the user disk; `existingAttachments` are already on
+  // the Gmail draft and have no disk to point at.
+  const [files, setFiles] = useState<File[]>([]);
+  const [existingAttachments, setExistingAttachments] = useState<ExistingAttachment[]>(
+    initialAttachments ?? [],
+  );
+  // See the note in compose-dialog.tsx: the same verdict AttachmentPicker
+  // renders, read here so Send and Save cannot stay live over an invalid set.
+  const attachmentVerdict = getAttachmentVerdict(files, existingAttachments);
+
+  // Dropped and pasted files join the same `files` list as picked ones, so the
+  // picker's per-file blame, the verdict above and the server all see them.
+  const addFiles = useCallback((incoming: File[]) => {
+    setFiles((prev) => mergeFiles(prev, incoming));
+  }, []);
+  const { dragging, dropHandlers } = useFileDrop(addFiles, submitting);
   const [pendingApply, setPendingApply] = useState<null | {
     kind: "body" | "meeting";
     run: () => void;
@@ -362,7 +412,9 @@ export function InlineReplyBox({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  const handleSend = useCallback(async () => {
+  const handleSend = useCallback(async (opts?: { omitOriginalAttachments?: boolean; skipReminder?: boolean }) => {
+    if (sendingRef.current) return;
+    const omitOriginalAttachments = opts?.omitOriginalAttachments === true;
     // Same rule as the compose dialog: bad addresses are tolerated while
     // typing and refused here, with the cursor put on the line at fault.
     const invalidField = firstInvalidRecipientField(recipients);
@@ -378,6 +430,25 @@ export function InlineReplyBox({
     }
 
     const { to, cc, bcc } = recipients;
+    const hasAttachments = files.length > 0 || existingAttachments.length > 0;
+
+    // A forward already carries the original's files — known, or unknown and
+    // carried by the server regardless — so "attached" in its note is usually
+    // about those, and asking would only interrupt.
+    const forwardCarriesFiles =
+      isFreshForward && (originalAttachments === null || (originalAttachments?.length ?? 0) > 0);
+    if (
+      !opts?.skipReminder &&
+      !omitOriginalAttachments &&
+      !hasAttachments &&
+      !forwardCarriesFiles &&
+      mentionsAttachment(body)
+    ) {
+      setRemindAttachment(true);
+      return;
+    }
+
+    sendingRef.current = true;
     setSubmitting(true);
     try {
       if (draftId) {
@@ -385,14 +456,48 @@ export function InlineReplyBox({
         // id — local edits must be pushed first or they'd be silently dropped.
         // entityId/replyAll re-derive In-Reply-To/References on every push —
         // a draft opened here is always reply-shaped (see the comment below).
-        await saveDraftAsync({
-          to, cc, bcc, subject, body, threadId, draftId,
-          entityId, replyAll: mode === "replyAll",
-        });
+        //
+        // Attachments force that push through the multipart route: a File
+        // cannot travel through tRPC's JSON body. And because Gmail's draft
+        // update replaces the entire message, keepAttachmentIds has to restate
+        // everything the user chose to keep — silence there would strip it.
+        if (hasAttachments) {
+          await sendWithAttachments({
+            mode: "draft-update",
+            files,
+            to, cc, bcc, subject, body, threadId, draftId,
+            entityId,
+            replyAll: mode === "replyAll",
+            keepAttachmentIds: existingAttachments.map((a) => a.id),
+          });
+        } else {
+          await saveDraftAsync({
+            to, cc, bcc, subject, body, threadId, draftId,
+            entityId, replyAll: mode === "replyAll",
+          });
+        }
         await sendDraftAsync({ draftId });
       } else if (mode === "forward") {
-        await forwardEmailAsync({
-          entityId, to, cc, bcc, note: body.trim() || undefined,
+        if (hasAttachments) {
+          await sendWithAttachments({
+            mode: "forward",
+            files,
+            entityId, to, cc, bcc,
+            body: body.trim(),
+            omitOriginalAttachments,
+          });
+        } else {
+          await forwardEmailAsync({
+            entityId, to, cc, bcc, note: body.trim() || undefined,
+            omitOriginalAttachments: omitOriginalAttachments || undefined,
+          });
+        }
+      } else if (hasAttachments) {
+        await sendWithAttachments({
+          mode: "reply",
+          files,
+          entityId, to, cc, bcc, body,
+          replyAll: mode === "replyAll",
         });
       } else {
         // to/cc/bcc are passed explicitly, so what the user sees on screen is
@@ -409,33 +514,67 @@ export function InlineReplyBox({
       onSent();
       onClose();
     } catch (err) {
-      toast.error("Couldn't send", {
-        description: err instanceof Error ? err.message : "Please try again.",
-      });
+      // The one failure that comes with a way forward. Offered ONLY for this
+      // error because it guarantees nothing was sent — after any other failure
+      // the outcome is uncertain, and a one-click resend could send twice.
+      if (mode === "forward" && !omitOriginalAttachments && isForwardAttachmentsUnavailable(err)) {
+        toast.error("Couldn't forward", {
+          description: err instanceof Error ? err.message : undefined,
+          duration: 15_000,
+          action: {
+            label: "Forward without attachments",
+            onClick: () => void handleSend({ omitOriginalAttachments: true }),
+          },
+        });
+      } else {
+        toast.error("Couldn't send", {
+          description: err instanceof Error ? err.message : "Please try again.",
+        });
+      }
     } finally {
+      sendingRef.current = false;
       setSubmitting(false);
     }
   }, [
     draftId, recipients, subject, body, threadId, mode, entityId,
     saveDraftAsync, sendDraftAsync, forwardEmailAsync, replyToEmailAsync,
-    onSent, onClose, fireMeeting,
+    onSent, onClose, fireMeeting, files, existingAttachments,
+    isFreshForward, originalAttachments,
   ]);
 
   const handleSaveDraft = useCallback(async () => {
     setSubmitting(true);
     try {
-      await saveDraftAsync({
-        to: recipients.to,
-        cc: recipients.cc,
-        bcc: recipients.bcc,
-        subject,
-        body,
-        threadId,
-        ...(draftId ? { draftId } : {}),
-        // Forward drafts have no "reply target" to derive headers from —
-        // isFreshForward is the only case with no entityId/reply semantics.
-        ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
-      });
+      if (files.length > 0 || existingAttachments.length > 0) {
+        await sendWithAttachments({
+          mode: draftId ? "draft-update" : "draft-create",
+          files,
+          to: recipients.to,
+          cc: recipients.cc,
+          bcc: recipients.bcc,
+          subject,
+          body,
+          threadId,
+          draftId,
+          keepAttachmentIds: existingAttachments.map((a) => a.id),
+          ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
+        });
+        // The multipart route has no mutation to invalidate for it.
+        draftSaved();
+      } else {
+        await saveDraftAsync({
+          to: recipients.to,
+          cc: recipients.cc,
+          bcc: recipients.bcc,
+          subject,
+          body,
+          threadId,
+          ...(draftId ? { draftId } : {}),
+          // Forward drafts have no "reply target" to derive headers from —
+          // isFreshForward is the only case with no entityId/reply semantics.
+          ...(isFreshForward ? {} : { entityId, replyAll: mode === "replyAll" }),
+        });
+      }
       toast.success(draftId ? "Draft updated" : "Draft saved");
       onSent();
       onClose();
@@ -447,8 +586,8 @@ export function InlineReplyBox({
       setSubmitting(false);
     }
   }, [
-    saveDraftAsync, recipients, subject, body, threadId, draftId,
-    isFreshForward, entityId, mode, onClose, onSent,
+    saveDraftAsync, draftSaved, recipients, subject, body, threadId, draftId,
+    isFreshForward, entityId, mode, onClose, onSent, files, existingAttachments,
   ]);
 
   const handleDiscard = useCallback(async () => {
@@ -480,7 +619,12 @@ export function InlineReplyBox({
         : "Reply";
 
   return (
-    <div ref={containerRef} className="bg-card border rounded-xl shadow-sm p-4 space-y-3">
+    <div
+      ref={containerRef}
+      className="relative bg-card border rounded-xl shadow-sm p-4 space-y-3"
+      {...dropHandlers}
+    >
+      <DropOverlay visible={dragging} />
       <div className="flex items-center justify-between">
         <div className="text-sm font-semibold text-foreground">{title}</div>
         <Button
@@ -504,6 +648,8 @@ export function InlineReplyBox({
       />
 
       {isFreshForward && <QuotedHistoryToggle quoted={quoted} variant="forward" alwaysOpen />}
+
+      {isFreshForward && <OriginalAttachmentsNote attachments={originalAttachments} />}
 
       <div className="flex flex-wrap items-center gap-2">
         <TemplatePicker onSelect={applyTemplate} disabled={submitting} />
@@ -532,6 +678,14 @@ export function InlineReplyBox({
         ref={bodyRef}
         value={body}
         onChange={(e) => setBody(e.target.value)}
+        onPaste={(e) => {
+          // Text pastes are untouched; only a paste that is purely files (a
+          // screenshot) becomes an attachment.
+          const pasted = filesFromPaste(e.clipboardData);
+          if (pasted.length === 0) return;
+          e.preventDefault();
+          addFiles(pasted);
+        }}
         placeholder={mode === "forward" ? "Add a note (optional)…" : "Write your reply…"}
         disabled={submitting}
         rows={5}
@@ -551,6 +705,17 @@ export function InlineReplyBox({
         onAcknowledgeDeleted={(eventId) => void acknowledgeAsync({ eventId })}
       />
 
+      <AttachmentPicker
+        files={files}
+        onChange={setFiles}
+        existing={existingAttachments}
+        onRemoveExisting={(id) =>
+          setExistingAttachments((prev) => prev.filter((a) => a.id !== id))
+        }
+        disabled={submitting}
+        openRef={openPickerRef}
+      />
+
       {/*
         Reply/Reply All (fresh or resumed-as-draft) get the collapsed
         toggle — a draft only ever reaches this box when it was created as a
@@ -564,11 +729,22 @@ export function InlineReplyBox({
           <Trash2Icon className="size-3.5" />
           Discard
         </Button>
-        <Button variant="outline" size="sm" onClick={handleSaveDraft} disabled={submitting}>
+        <Button
+          variant="outline"
+          size="sm"
+          onClick={handleSaveDraft}
+          disabled={submitting || !attachmentVerdict.ok}
+          title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
+        >
           <SaveIcon className="size-3.5" />
           {draftId ? "Update draft" : "Save as draft"}
         </Button>
-        <Button size="sm" onClick={handleSend} disabled={submitting}>
+        <Button
+          size="sm"
+          onClick={() => void handleSend()}
+          disabled={submitting || !attachmentVerdict.ok}
+          title={attachmentVerdict.ok ? undefined : attachmentVerdict.reason}
+        >
           {submitting ? (
             <Loader2Icon className="size-3.5 animate-spin" />
           ) : (
@@ -577,6 +753,20 @@ export function InlineReplyBox({
           Send
         </Button>
       </div>
+
+      <AttachmentReminderDialog
+        open={remindAttachment}
+        onCancel={() => setRemindAttachment(false)}
+        onAttach={() => {
+          setRemindAttachment(false);
+          // Still inside the click, so the browser treats it as a user gesture.
+          openPickerRef.current?.();
+        }}
+        onSendAnyway={() => {
+          setRemindAttachment(false);
+          void handleSend({ skipReminder: true });
+        }}
+      />
 
       <AlertDialog
         open={!!pendingApply}
@@ -610,5 +800,34 @@ export function InlineReplyBox({
         </AlertDialogContent>
       </AlertDialog>
     </div>
+  );
+}
+
+/**
+ * What a forward will carry from the original, stated before Send.
+ *
+ * The server carries these or sends nothing, so naming them here is a promise
+ * it keeps. Unknown (`null`) is said as unknown: the server still carries
+ * whatever the original has, it is only this view that has not looked.
+ */
+function OriginalAttachmentsNote({ attachments }: { attachments?: MessageAttachment[] | null }) {
+  if (attachments === undefined) return null;
+  if (attachments === null) {
+    return (
+      <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+        <PaperclipIcon className="size-3 shrink-0" aria-hidden />
+        Any files on the original message will be included.
+      </p>
+    );
+  }
+  if (attachments.length === 0) return null;
+  const names = attachments.map((a) => a.filename);
+  return (
+    <p className="flex items-start gap-1.5 text-xs text-muted-foreground" title={names.join(", ")}>
+      <PaperclipIcon className="mt-0.5 size-3 shrink-0" aria-hidden />
+      <span className="min-w-0">
+        Includes from the original: <span className="text-foreground">{names.join(", ")}</span>
+      </span>
+    </p>
   );
 }

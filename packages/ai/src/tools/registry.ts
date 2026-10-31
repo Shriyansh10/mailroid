@@ -35,6 +35,11 @@ import type {
  * update call never sends `conferenceDataVersion`, which is precisely what
  * preserves an existing Meet link when a meeting moves.
  */
+/** Meeting attendees as every calendar tool returns them: names, never addresses. */
+const ATTENDEES_FOR_MODEL =
+  'Who is on the meeting, by name: "You" for the user, "[EMAIL]" when no name is known. Never an address. ' +
+  "To schedule with one of them, call resolveRecipient with that name (and the threadId).";
+
 const ADD_MEET_SCHEMA = z
   .boolean()
   .optional()
@@ -144,7 +149,9 @@ export class ToolRegistry {
     // ── getEvents ───────────────────────────────────────────────────
     this.register({
       name: "getEvents",
-      description: "Retrieve calendar events for a given time range",
+      description:
+        "Retrieve calendar events for a given time range. " +
+        "Attendees are listed by name (\"You\" for the user, \"[EMAIL]\" when no name is known), never by address.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
@@ -256,7 +263,7 @@ export class ToolRegistry {
             title: z.string(),
             start: z.string(),
             end: z.string(),
-            attendees: z.array(z.string()),
+            attendees: z.array(z.string()).describe(ATTENDEES_FOR_MODEL),
             // Listed but not actionable. A finished meeting is still part of
             // the thread's history and the user may be asking about it; it
             // simply cannot be rescheduled or cancelled, and passing its
@@ -576,8 +583,12 @@ export class ToolRegistry {
         "answered within the response target, and what is still waiting. " +
         "Never returns mail content — no subjects, no senders, no message text " +
         "— because the organization reporting layer cannot read them. " +
-        "Omit subjectEmail for the user's own scope; supply it only for a named " +
-        "colleague. There is no performance score and no ranking of people: " +
+        "Omit `person` for the user's own scope; supply it only for a named " +
+        "colleague: their `ref` from an earlier result of this tool, their name as the user said it, " +
+        "or an email address the user typed themselves. Never an address you reconstructed. " +
+        "If the result has `candidates`, several people match: ask the user which one, then call again with that ref. " +
+        "People are shown by name only, never by address. " +
+        "There is no performance score and no ranking of people: " +
         "report the numbers and let the user interpret them. Each exception " +
         "carries a nextStep — when you mention what needs attention, say the " +
         "next step with it, without being asked.",
@@ -585,12 +596,12 @@ export class ToolRegistry {
       requiresApproval: false,
       enabled: true,
       inputSchema: z.object({
-        subjectEmail: z
+        person: z
           .string()
           .optional()
           .describe(
-            "One person to report on. The server independently checks they are " +
-              "visible to the caller and refuses otherwise.",
+            "One person to report on: a ref from an earlier result, a name, or an address the user typed. " +
+              "The server independently checks they are visible to the caller and refuses otherwise.",
           ),
         days: z
           .union([z.literal(7), z.literal(30), z.literal(90)])
@@ -604,6 +615,10 @@ export class ToolRegistry {
         policy: z.record(z.string(), z.unknown()).optional(),
         totals: z.record(z.string(), z.unknown()).optional(),
         people: z.array(z.record(z.string(), z.unknown())).optional(),
+        candidates: z
+          .array(z.object({ ref: z.string(), name: z.string() }))
+          .optional()
+          .describe("Several people match the name given: ask which one, then call again with that ref"),
       }),
       execute: async () => ({
         found: false,
@@ -695,7 +710,8 @@ export class ToolRegistry {
         "Fetch and summarize a specific email into detailed reading notes the user can then ask follow-up questions about. " +
         "ALWAYS use this tool — never summarize from a searchEmails snippet alone — whenever the user asks to fetch, open, read, summarize or discuss a specific email; the snippet is a fragment and has not been through privacy screening, this tool's output has. " +
         "Accepts an exact email/message id (entityId), a thread id (threadId), or a natural-language description (query), e.g. 'the Drop Site newsletter from today' — a query may return several matches (ambiguous:true with candidates) if more than one email fits, in which case ask the user which one before proceeding. " +
-        "Never emit a URL or markdown link in your reply, even one found in the email's own content — the interface renders its own link to open the email; you only need to say you can open it.",
+        "Never emit a URL or markdown link in your reply, even one found in the email's own content — the interface renders its own link to open the email; you only need to say you can open it. " +
+        "The result lists the email's attachments by name: mention them in your summary without being asked. If attachments is null, say you couldn't check for them — never that there are none.",
       riskLevel: RiskLevel.SAFE,
       requiresApproval: false,
       enabled: true,
@@ -753,12 +769,28 @@ export class ToolRegistry {
               title: z.string(),
               start: z.string(),
               end: z.string(),
-              attendees: z.array(z.string()),
+              attendees: z.array(z.string()).describe(ATTENDEES_FOR_MODEL),
             }),
           )
           .optional()
           .describe(
             "Meetings already scheduled from this thread. Mention them when summarizing, and use rescheduleThreadMeeting rather than scheduling another.",
+          ),
+        // Names only — never contents. Same reasoning as `meetings`: the user
+        // should hear that the contract is attached when they ask about the
+        // mail, not only if they think to ask about files.
+        attachments: z
+          .array(
+            z.object({
+              filename: z.string(),
+              mimeType: z.string(),
+              sizeBytes: z.number(),
+            }),
+          )
+          .nullable()
+          .optional()
+          .describe(
+            "Files attached to this email, by name. [] means it has none; null means it was never checked — say so, never 'no attachments'. You cannot open them.",
           ),
         ambiguous: z
           .boolean()
@@ -859,6 +891,63 @@ export class ToolRegistry {
       }),
     });
 
+    // ── findAttachments ───────────────────────────────────────────────
+    // Metadata only: names, types, sizes, senders, dates. It never reads a
+    // file, and the ids it returns grant nothing — opening one goes through
+    // the authorized bytes route, which re-checks ownership. The interface
+    // renders the results as a card with Open/Download, so the model never
+    // writes a link.
+    this.register({
+      name: "findAttachments",
+      description:
+        "Find files (attachments) in the user's mail by name, type, sender and date — e.g. 'the invoice PDF Ravi sent last month'. " +
+        "Pass `sender` exactly as the user said it (a name, company or address they typed), never an address you reconstructed. " +
+        "If sender.matched is 0, say there is no mail from them. If sender.matched > 1, list sender.names and ask which one they mean. " +
+        "When `note` is non-empty, relay it to the user in your own words. It appears when the results may be incomplete (for example, no files found while some mail in that range hasn't been checked for attachments), so never present such a result as \"there are none\". When `note` is empty, don't add a coverage caveat of your own. " +
+        "You see names only and cannot open, read or describe a file's contents. The interface shows the files with Open and Download, so never write a link or an id.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({
+        filename: z.string().optional().describe("Part of the file name, e.g. 'invoice'"),
+        type: z
+          .enum(["pdf", "image", "spreadsheet", "document", "archive", "code"])
+          .optional()
+          .describe("Kind of file"),
+        sender: z.string().optional().describe("Who sent it, as the user said it"),
+        withinDays: z.number().optional().describe("Only mail received within this many days. Omit for no limit."),
+        limit: z.number().int().min(1).max(20).optional().describe("Most files to return (default 10, max 20)"),
+      }),
+      outputSchema: z.object({
+        files: z.array(
+          z.object({
+            attachmentId: z.string(),
+            filename: z.string(),
+            mimeType: z.string(),
+            sizeBytes: z.number(),
+            entityId: z.string(),
+            threadId: z.string().nullable(),
+            receivedAt: z.string().nullable(),
+            sender: z.string(),
+          }),
+        ),
+        sender: z
+          .object({
+            query: z.string(),
+            matched: z.number(),
+            names: z.array(z.string()).optional(),
+          })
+          .optional(),
+        coverage: z.object({ awaitingList: z.number(), unknownStatus: z.number() }),
+        note: z.string(),
+      }),
+      execute: async () => ({
+        files: [],
+        coverage: { awaitingList: 0, unknownStatus: 0 },
+        note: "findAttachments executor not registered",
+      }),
+    });
+
     // ── forwardEmail ──────────────────────────────────────────────────
     // The model supplies only the recipient and an optional note — never
     // the forwarded content itself, which is assembled server-side from the
@@ -870,8 +959,10 @@ export class ToolRegistry {
       name: "forwardEmail",
       description:
         "Forward a specific email to someone. Requires the entityId (from a prior summarizeEmail/searchEmails result, or EMAIL CONTEXT) and the recipient. " +
-        "You may add a short covering note, but never write the forwarded content yourself — the original message is attached automatically. " +
-        "Attachments on the original are NOT carried over; say so if asked.",
+        "You may add a short covering note, but never write the forwarded content yourself — the original message is quoted automatically. " +
+        "The original's file attachments are carried automatically, and the approval card names them. " +
+        "If any of them is no longer available, the forward fails and NOTHING is sent: tell the user which file, and ask whether to forward without the attachments. " +
+        "Set omitOriginalAttachments only after the user has said to forward without them — never on your own.",
       riskLevel: RiskLevel.DANGEROUS,
       requiresApproval: true,
       enabled: true,
@@ -879,6 +970,10 @@ export class ToolRegistry {
         entityId: z.string().min(1).describe("The email to forward"),
         to: z.string().email().describe("Recipient's email address"),
         note: z.string().optional().describe("Optional short covering note, prepended before the quoted original"),
+        omitOriginalAttachments: z
+          .boolean()
+          .optional()
+          .describe("Forward WITHOUT the original's files. Only when the user explicitly asked for that, after being told a file was unavailable."),
       }),
       outputSchema: z.object({
         draft: z.boolean(),

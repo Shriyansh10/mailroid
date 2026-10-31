@@ -162,6 +162,54 @@ jobs:
             # their logs would be inseparable by service_name, only by reading
             # message text. Whatever OTEL_SERVICE_NAME is set to in .env is
             # therefore irrelevant to these two containers by design.
+            # ── Memory limits ──────────────────────────────────────────
+            #
+            # The droplet has 1967 MB and NO SWAP, so an overshoot goes
+            # straight to the OOM killer, which picks its own victim. Without
+            # limits that victim is whichever process the kernel scores worst
+            # — plausibly Postgres, the one whose death matters most. These
+            # caps make a runaway kill only the container that caused it.
+            #
+            # Sized from measured cgroup peaks on this box, not guessed:
+            #
+            #   container  idle    peak   anon (unreclaimable)   cap
+            #   web        122 MB  133 MB  108 MB                512m
+            #   api        129 MB  260 MB  121 MB                384m
+            #   caddy       15 MB   44 MB    ~0                  128m
+            #   db         252 MB  822 MB    4 MB + 140 shmem    none
+            #
+            # mailroid-db is deliberately UNCAPPED. Its 822 MB peak is almost
+            # entirely reclaimable page cache; only ~144 MB (4 MB anon plus
+            # 128 MB shared_buffers) cannot be reclaimed. A cap would evict
+            # cache it benefits from and force disk reads on a 1 vCPU box, for
+            # no safety gain — the database was never the thing that runs away.
+            # Capping it would also need max_connections lowered from 100
+            # first, since per-backend work_mem is its only real path to anon
+            # growth.
+            #
+            # Attachment byte budgets (packages/services/attachments/admission.ts),
+            # one per container because each charges only its own memory:
+            #   api  384m — Gmail DOWNLOADS happen only here (object storage is
+            #               the read source; the API populates it on a miss).
+            #               MAX_INFLIGHT_DOWNLOAD_BYTES 128 MB at 2x → ~327 MB
+            #               predicted peak. Derived from the web measurements;
+            #               re-measure here before raising it.
+            #   web  512m — UPLOADS (send route). MAX_INFLIGHT_UPLOAD_BYTES 256 MB.
+            # Raising a budget without raising its container's cap would trade a
+            # 503 for an OOM kill.
+            #
+            # Required in ~/mailroid/.env for attachments (both containers refuse
+            # to start in production if object storage is missing):
+            #   ATTACHMENT_CACHE_ENABLED=true, OBJECT_STORAGE_ENDPOINT/REGION/
+            #   BUCKET/ACCESS_KEY_ID/SECRET_ACCESS_KEY, OBJECT_STORAGE_PREFIX=prod,
+            #   API_INTERNAL_URL=http://mailroid-api:8000 (the private network —
+            #   Caddy does not route /internal/*), INTERNAL_API_SECRET (same value
+            #   for both containers, >= 32 chars). Use a production Spaces key
+            #   separate from the dev one.
+            #
+            # --memory only, no --memory-swap: there is no swap to allow today,
+            # and leaving it unset means adding swap later gives these
+            # containers a cushion rather than silently doing nothing.
             docker stop mailroid-api || true
             docker rm mailroid-api || true
             docker run -d --restart unless-stopped \
@@ -169,6 +217,7 @@ jobs:
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               -e OTEL_SERVICE_NAME=mailroid-api \
+              --memory 384m \
               --name mailroid-api \
               ${REGISTRY}/mailroid-api:${TAG}
 
@@ -179,6 +228,7 @@ jobs:
               --network mailroid-net \
               --env-file ~/mailroid/.env \
               -e OTEL_SERVICE_NAME=mailroid-web \
+              --memory 512m \
               --name mailroid-web \
               ${REGISTRY}/mailroid-web:${TAG}
 
@@ -191,6 +241,7 @@ jobs:
               -v ~/mailroid/Caddyfile:/etc/caddy/Caddyfile \
               -v caddy_data:/data \
               -v caddy_config:/config \
+              --memory 128m \
               --name mailroid-caddy \
               caddy:2-alpine
 

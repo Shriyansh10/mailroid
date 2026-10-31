@@ -28,6 +28,8 @@ import { Switch } from "@web/components/ui/switch";
 import { Progress } from "@web/components/ui/progress";
 import { Tooltip, TooltipContent, TooltipTrigger } from "@web/components/ui/tooltip";
 import { EmailReferenceCard, type EmailReference } from "@web/components/email-reference-card";
+import { AttachmentResultsCard } from "@web/components/attachment-results-card";
+import type { AttachmentResultsRef } from "@web/lib/assistant/tool-memory";
 import { cn } from "@web/lib/utils";
 // Imported, not mirrored like REFINE_OPTIONS below: this is the rule that
 // decides what the executor will actually do, and a card drawing a switch
@@ -77,6 +79,8 @@ interface RenderableItem {
   resultSummary?: string;
   /** The email under discussion as of this reply — the newest emailRef-bearing tool result at or before this point in the conversation. Renders an EmailReferenceCard beneath assistant replies. */
   emailRef?: EmailReference;
+  /** Files a findAttachments call just returned — shown under this reply only. */
+  attachmentResults?: AttachmentResultsRef;
 }
 
 interface ChatMessage {
@@ -86,7 +90,7 @@ interface ChatMessage {
   tool_calls?: any;
   tool_call_id?: string;
   /** Set on a tool message when it named a specific email — see apps/web/lib/assistant/tool-memory.ts EmailRef. Drives the EmailReferenceCard under the assistant's reply. `status` is written by the cancel writers (api/approvals/cancel, api/chat's stale-approval sweep) and is how a rejected action is told apart from a completed one. */
-  metadata?: { emailRef?: EmailReference; status?: string } | null;
+  metadata?: { emailRef?: EmailReference; attachmentResults?: AttachmentResultsRef; status?: string } | null;
   /** Undefined for normal messages, set when AI needs approval */
   approvalRequired?: {
     approvalId: string;
@@ -292,6 +296,10 @@ function AssistantPageInner() {
     // email, so it needs to still be there on, say, the reply to "can I
     // open it?" — which is exactly the turn a "show once" rule would hide it on.
     let currentEmailRef: EmailReference | undefined;
+    // Unlike the email card, found files belong to ONE answer: they attach to
+    // the next reply after the tool result and are then cleared, so an old
+    // search does not keep reappearing under later turns.
+    let pendingAttachmentResults: AttachmentResultsRef | undefined;
 
     messages.forEach((msg) => {
       if (msg.role === "user") {
@@ -305,6 +313,8 @@ function AssistantPageInner() {
       } else if (msg.role === "tool") {
         const ref = msg.metadata?.emailRef;
         if (ref) currentEmailRef = ref;
+        const files = msg.metadata?.attachmentResults;
+        if (files) pendingAttachmentResults = files;
       } else if (msg.role === "assistant" || msg.role === "ai") {
         // If the message contains text content or pending approvals, add a message block
         if (msg.content || msg.approvalRequired) {
@@ -315,7 +325,9 @@ function AssistantPageInner() {
             content: msg.content,
             msgRef: msg,
             emailRef: currentEmailRef,
+            attachmentResults: msg.content ? pendingAttachmentResults : undefined,
           });
+          if (msg.content) pendingAttachmentResults = undefined;
         }
 
         // If it includes tool calls, add a tool call status card for each call
@@ -417,7 +429,7 @@ function AssistantPageInner() {
           tool_calls: msg.toolCalls || undefined,
           tool_call_id: msg.toolCallId || undefined,
           metadata: msg.metadata as
-            | { emailRef?: EmailReference; status?: string }
+            | { emailRef?: EmailReference; attachmentResults?: AttachmentResultsRef; status?: string }
             | null
             | undefined,
           approvalRequired: msg.approvalRequired ? {
@@ -1332,6 +1344,7 @@ function AssistantPageInner() {
                             </div>
                           );
                         })()}
+                        {item.attachmentResults && <AttachmentResultsCard results={item.attachmentResults} />}
                         {item.emailRef && <EmailReferenceCard emailRef={item.emailRef} />}
                       </div>
                     </motion.div>

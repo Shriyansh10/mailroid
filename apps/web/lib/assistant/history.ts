@@ -1,4 +1,5 @@
 import { db, eq, and, asc, sql } from "@repo/database";
+import { maskMailboxTextForModel, senderForModel } from "@repo/ai";
 import { assistantMessages } from "@repo/database/schema";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import type { EmailContext } from "./system-prompt";
@@ -165,6 +166,116 @@ interface Turn {
   messages: DbChatMessage[];
 }
 
+// ── Re-masking stored results ────────────────────────────────────────
+//
+// searchEmails and summarizeEmail masked their output only from baeb41f and
+// 793981b on. Results stored before that hold raw senders, subjects and
+// snippets, and a tool message is replayed from its stored content. So the
+// known fields are masked again on the way out, field by field, with the same
+// functions the executors now use. Never maskPII over the raw JSON: its phone
+// pattern can hit ids. Masking is idempotent, so a result stored after the
+// fix comes out byte-identical.
+
+// What the agent loop stores for a call (packages/ai/src/chat/agent.ts): a
+// result, or an error carrying the upstream message.
+const TOOL_FRAME = /^<(tool_result|tool_error) tool="([A-Za-z]+)">\n([\s\S]*)\n<\/\1>$/;
+
+type Json = Record<string, unknown>;
+
+const isObject = (v: unknown): v is Json => typeof v === "object" && v !== null && !Array.isArray(v);
+const maskText = (v: unknown) => (typeof v === "string" ? maskMailboxTextForModel(v) : v);
+const maskSender = (v: unknown) => (typeof v === "string" ? senderForModel(v) : v);
+// A stored attendee is a raw address (before the names-only change) or a
+// name (after). senderForModel turns the first into "[EMAIL]" and leaves the
+// second as it is; no names can be looked up here, so none are invented.
+const maskAttendees = (v: unknown) => (Array.isArray(v) ? v.map(maskSender) : v);
+
+function remaskMeeting(m: unknown): unknown {
+  if (!isObject(m)) return m;
+  const out: Json = { ...m, title: maskText(m.title), attendees: maskAttendees(m.attendees) };
+  if ("description" in m) out.description = maskText(m.description);
+  if ("location" in m) out.location = maskText(m.location);
+  return out;
+}
+
+function remaskSearchEmails(data: Json): Json {
+  const out: Json = { ...data };
+  if (Array.isArray(data.emails)) {
+    out.emails = data.emails.map((e) =>
+      isObject(e) ? { ...e, sender: maskSender(e.sender), subject: maskText(e.subject), snippet: maskText(e.snippet) } : e,
+    );
+  }
+  if (isObject(data.hiddenProtected) && Array.isArray(data.hiddenProtected.senders)) {
+    out.hiddenProtected = { ...data.hiddenProtected, senders: data.hiddenProtected.senders.map(maskSender) };
+  }
+  return out;
+}
+
+function remaskSummarizeEmail(data: Json): Json {
+  const out: Json = { ...data, sender: maskSender(data.sender), subject: maskText(data.subject) };
+  if (Array.isArray(data.candidates)) {
+    out.candidates = data.candidates.map((c) =>
+      isObject(c) ? { ...c, sender: maskSender(c.sender), subject: maskText(c.subject) } : c,
+    );
+  }
+  if (Array.isArray(data.meetings)) out.meetings = data.meetings.map(remaskMeeting);
+  return out;
+}
+
+/** Old rows carried each colleague's address; it is dropped, and a missing name reads "[EMAIL]". */
+function remaskMetricsPeople(data: Json): Json {
+  if (!Array.isArray(data.people)) return data;
+  return {
+    ...data,
+    people: data.people.map((p) => {
+      if (!isObject(p) || !("email" in p)) return p;
+      const rest: Json = { ...p };
+      delete rest.email;
+      const name = typeof p.name === "string" && p.name.trim() ? maskMailboxTextForModel(p.name) : "[EMAIL]";
+      return { ...rest, name };
+    }),
+  };
+}
+
+const REMASK_RESULT: Record<string, (data: Json) => Json> = {
+  searchEmails: remaskSearchEmails,
+  summarizeEmail: remaskSummarizeEmail,
+  getEvents: (d) => (Array.isArray(d.events) ? { ...d, events: d.events.map(remaskMeeting) } : d),
+  getThreadMeetings: (d) => (Array.isArray(d.meetings) ? { ...d, meetings: d.meetings.map(remaskMeeting) } : d),
+  generateExecutiveBrief: (d) => ({ ...d, briefing: maskText(d.briefing) }),
+  getCommunicationMetrics: remaskMetricsPeople,
+};
+
+/**
+ * The tool message with its known mailbox fields masked, or the message
+ * unchanged when it isn't one of the tools above (or an error from any tool,
+ * whose upstream message is masked). `unparseable` is set when the frame
+ * matched but the JSON inside did not parse; the content is then left
+ * exactly as stored.
+ */
+export function remaskStoredToolResult(m: DbChatMessage): { message: DbChatMessage; unparseable: boolean } {
+  const match = m.content ? TOOL_FRAME.exec(m.content) : null;
+  if (!match) return { message: m, unparseable: false };
+  const [, frame, tool, body] = match;
+  const remask =
+    frame === "tool_error"
+      ? (d: Json) => ({ ...d, error: maskText(d.error) })
+      : REMASK_RESULT[tool!];
+  if (!remask) return { message: m, unparseable: false };
+
+  let data: unknown;
+  try {
+    data = JSON.parse(body!);
+  } catch {
+    return { message: m, unparseable: true };
+  }
+  if (!isObject(data)) return { message: m, unparseable: false };
+
+  // Keys whose value was undefined drop out of JSON, as they did when stored.
+  const content = `<${frame} tool="${tool}">\n${JSON.stringify(remask(data))}\n</${frame}>`;
+  return { message: content === m.content ? m : { ...m, content }, unparseable: false };
+}
+
 /**
  * Splits history into turns: a user message plus everything up to (not
  * including) the next user message. A turn is the atomic unit for budget
@@ -203,9 +314,15 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
     .map((m, i) => (m.role === "tool" ? i : -1))
     .filter((i) => i >= 0);
   const recentToolIndices = new Set(toolIndices.slice(-RECENT_TOOL_KEEP));
+  let unparseable = 0;
 
-  const trimmed = messages.map((m, i) => {
-    if (m.role !== "tool" || recentToolIndices.has(i)) return m;
+  const trimmed = messages.map((stored, i) => {
+    if (stored.role !== "tool") return stored;
+    // Before truncation, so a cut result can never keep half an address.
+    const remasked = remaskStoredToolResult(stored);
+    if (remasked.unparseable) unparseable++;
+    const m = remasked.message;
+    if (recentToolIndices.has(i)) return m;
 
     const meta = m.metadata as
       | { emailRef?: EmailRef; actionRef?: ActionRef; toolName?: string }
@@ -231,10 +348,13 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
     }
 
     if (meta?.emailRef) {
+      // Masked again here: refs stored before summarizeEmail masked its output
+      // still hold raw values, and this stub goes back to the model every turn.
+      // Masking is idempotent, so already-masked refs pass through unchanged.
       const stub = {
         entityId: meta.emailRef.entityId,
-        subject: meta.emailRef.subject,
-        sender: meta.emailRef.sender,
+        subject: meta.emailRef.subject ? maskMailboxTextForModel(meta.emailRef.subject) : undefined,
+        sender: meta.emailRef.sender ? senderForModel(meta.emailRef.sender) : undefined,
         note: "digest elided — call getEmailDetail for specifics",
       };
       return {
@@ -247,6 +367,10 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
     if (content.length <= TRUNCATE_CHARS) return m;
     return { ...m, content: content.slice(0, TRUNCATE_CHARS) + "\n…[truncated]" };
   });
+
+  if (unparseable > 0) {
+    console.warn("[history] stored tool results left unmasked: content did not parse", { count: unparseable });
+  }
 
   const turns = splitIntoTurns(trimmed);
   const turnChars = turns.map((t) =>

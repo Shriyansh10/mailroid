@@ -1,9 +1,46 @@
 "use client";
 
-import { useEffect, useRef } from "react";
-import { keepPreviousData } from "@tanstack/react-query";
+import { useCallback, useEffect, useRef } from "react";
+import { keepPreviousData, useQueryClient } from "@tanstack/react-query";
+import { getQueryKey } from "@trpc/react-query";
+import { toast } from "sonner";
 import { trpc } from "@web/trpc/client";
 import { frontendLogger } from "@web/lib/frontend-logger";
+
+/**
+ * Tell the user a mailbox write did not happen.
+ *
+ * These mutations used to fail SILENTLY — `onError` wrote to frontendLogger and
+ * nothing reached the screen. During a Gmail quota cooldown that produced the
+ * worst available outcome: the write was refused, the row stayed unread, and
+ * the next render simply tried again, so the same doomed call went out on every
+ * thread open with no explanation anywhere in the UI.
+ *
+ * Failing visibly is a deliberate choice over queueing the write to reconcile
+ * later. A queue would show a read state Gmail never accepted — silent drift
+ * between what the user sees and what their mailbox says, which is exactly what
+ * CLAUDE.md rules out for outward-facing state.
+ *
+ * The toast id is per-ACTION, not per-call, so a mailbox refusing every write
+ * replaces one message instead of stacking twenty of them.
+ *
+ * Matching on the message rather than a status code because tRPC flattens the
+ * server error: `GmailQuotaCooldownError` carries `status = 429`, but only its
+ * message survives the wire.
+ */
+function notifyWriteFailed(action: string, message: string): void {
+  const coolingDown = /cooldown|quota|rate.?limit|too many requests|429/i.test(message);
+  const paused = /paused|maintenance/i.test(message);
+
+  toast.error(`Couldn't ${action}`, {
+    id: `mailbox-write-${action}`,
+    description: coolingDown
+      ? "Gmail is rate-limiting this mailbox, so nothing was changed. It will work again once the limit clears."
+      : paused
+        ? "Syncing is paused for this mailbox, so nothing was changed."
+        : "Gmail rejected the change, so nothing was changed.",
+  });
+}
 
 export const useThreads = (opts?: { maxResults?: number; pageToken?: string }) => {
   frontendLogger.info("[INBOX_HOOK]", "useThreads called", { opts: opts ?? {} });
@@ -60,6 +97,39 @@ export const useThread = (id: string) => {
   return result;
 };
 
+/**
+ * After an attachment preview finishes loading, mark that attachment as stored
+ * in every cached thread view, so reopening the thread shows its thumbnail
+ * directly instead of offering "Load preview" again.
+ *
+ * Purely a client-side cache edit: no server request and no Gmail call. It is
+ * correct because a preview can only load after the API has written the object
+ * to storage (the route serves bytes from storage only). Matched by our
+ * attachment id, across every cached `gmail.thread` query.
+ */
+export const useMarkAttachmentStored = () => {
+  const queryClient = useQueryClient();
+  return useCallback(
+    (attachmentId: string) => {
+      queryClient.setQueriesData({ queryKey: getQueryKey(trpc.gmail.thread) }, (old: unknown) => {
+        const thread = old as { messages?: Array<{ attachments?: Array<{ id: string | null; cached?: boolean }> | null }> } | undefined;
+        if (!thread?.messages) return old;
+        let changed = false;
+        const messages = thread.messages.map((message) => {
+          if (!message.attachments?.some((a) => a.id === attachmentId && !a.cached)) return message;
+          changed = true;
+          return {
+            ...message,
+            attachments: message.attachments.map((a) => (a.id === attachmentId ? { ...a, cached: true } : a)),
+          };
+        });
+        return changed ? { ...thread, messages } : old;
+      });
+    },
+    [queryClient],
+  );
+};
+
 export const useSendEmail = () => {
   frontendLogger.info("[INBOX_HOOK]", "useSendEmail hook initialized");
 
@@ -92,7 +162,7 @@ export const useSearchEmails = (
   query: string,
   opts?: { maxResults?: number; pageToken?: string }
 ) => {
-  frontendLogger.info("[INBOX_HOOK]", "useSearchEmails called", { query, opts: opts ?? {} });
+  frontendLogger.info("[INBOX_HOOK]", "useSearchEmails called", { queryLength: query.length, opts: opts ?? {} });
   const startMs = Date.now();
 
   const result = trpc.gmail.search.useQuery(
@@ -103,7 +173,7 @@ export const useSearchEmails = (
   useEffect(() => {
     if (result.data && !result.isLoading) {
       frontendLogger.info("[INBOX_HOOK]", "useSearchEmails result", {
-        query, threadCount: result.data.threads?.length ?? 0,
+        queryLength: query.length, threadCount: result.data.threads?.length ?? 0,
         nextPageToken: result.data.nextPageToken,
         durationMs: Date.now() - startMs,
       });
@@ -111,7 +181,7 @@ export const useSearchEmails = (
   }, [result.data, result.isLoading]);
   useEffect(() => {
     if (result.error) {
-      frontendLogger.error("[INBOX_HOOK]", "useSearchEmails error", { query, error: result.error.message });
+      frontendLogger.error("[INBOX_HOOK]", "useSearchEmails error", { queryLength: query.length, error: result.error.message });
     }
   }, [result.error]);
 
@@ -225,7 +295,7 @@ export const usePendingEmbeddingsCount = () => {
   return { data, isLoading, isError, error, refetch };
 };
 
-export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number; unreadOnly?: boolean; maxResults?: number; page?: number }) => {
+export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number; unreadOnly?: boolean; maxResults?: number; page?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "usePriorityEmails called", { opts: opts ?? {} });
   const startMs = Date.now();
 
@@ -256,7 +326,7 @@ export const usePriorityEmails = (opts?: { priorities?: string[]; days?: number;
   return result;
 };
 
-export const usePriorityCounts = (opts?: { days?: number }) => {
+export const usePriorityCounts = (opts?: { days?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "usePriorityCounts called", { opts: opts ?? {} });
   const startMs = Date.now();
 
@@ -286,12 +356,17 @@ export const usePriorityCounts = (opts?: { days?: number }) => {
   return result;
 };
 
-export const useCategoryEmails = (category: string, opts?: { maxResults?: number; page?: number }) => {
+export const useCategoryEmails = (category: string, opts?: { maxResults?: number; page?: number; withAttachments?: boolean }) => {
   frontendLogger.info("[INBOX_HOOK]", "useCategoryEmails called", { category, maxResults: opts?.maxResults, page: opts?.page });
   const startMs = Date.now();
 
   const result = trpc.gmail.listByCategory.useQuery(
-    { category, maxResults: opts?.maxResults, page: opts?.page },
+    {
+      category, maxResults: opts?.maxResults, page: opts?.page,
+      // Omitted rather than `false` when off, so the unfiltered list keeps its
+      // existing cache key.
+      ...(opts?.withAttachments ? { withAttachments: true } : {}),
+    },
     {
       enabled: !!category,
       refetchOnMount: true,
@@ -470,8 +545,10 @@ export const useTrashThread = () => {
   const invalidate = useInboxInvalidate();
   const result = trpc.gmail.trash.useMutation({
     onSuccess: invalidate,
-    onError: (error) =>
-      frontendLogger.error("[INBOX_HOOK]", "useTrashThread error", { error: error.message }),
+    onError: (error) => {
+      frontendLogger.error("[INBOX_HOOK]", "useTrashThread error", { error: error.message });
+      notifyWriteFailed("move this thread to Bin", error.message);
+    },
   });
   return { trashThread: result.mutate, trashThreadAsync: result.mutateAsync, ...result };
 };
@@ -481,8 +558,10 @@ export const useUntrashThread = () => {
   const invalidate = useInboxInvalidate();
   const result = trpc.gmail.untrash.useMutation({
     onSuccess: invalidate,
-    onError: (error) =>
-      frontendLogger.error("[INBOX_HOOK]", "useUntrashThread error", { error: error.message }),
+    onError: (error) => {
+      frontendLogger.error("[INBOX_HOOK]", "useUntrashThread error", { error: error.message });
+      notifyWriteFailed("restore this thread", error.message);
+    },
   });
   return { untrashThread: result.mutate, untrashThreadAsync: result.mutateAsync, ...result };
 };
@@ -492,8 +571,10 @@ export const useSetStarred = () => {
   const invalidate = useInboxInvalidate();
   const result = trpc.gmail.setStarred.useMutation({
     onSuccess: invalidate,
-    onError: (error) =>
-      frontendLogger.error("[INBOX_HOOK]", "useSetStarred error", { error: error.message }),
+    onError: (error, variables) => {
+      frontendLogger.error("[INBOX_HOOK]", "useSetStarred error", { error: error.message });
+      notifyWriteFailed(variables.starred ? "star this thread" : "unstar this thread", error.message);
+    },
   });
   return { setStarred: result.mutate, setStarredAsync: result.mutateAsync, ...result };
 };
@@ -506,8 +587,12 @@ export const useSetRead = () => {
   const invalidate = useInboxInvalidate();
   const result = trpc.gmail.setRead.useMutation({
     onSuccess: invalidate,
-    onError: (error) =>
-      frontendLogger.error("[INBOX_HOOK]", "useSetRead error", { error: error.message }),
+    onError: (error, variables) => {
+      frontendLogger.error("[INBOX_HOOK]", "useSetRead error", { error: error.message });
+      // No cache invalidation on failure, deliberately: the row must keep
+      // showing what Gmail actually holds, not what we asked for.
+      notifyWriteFailed(variables.read ? "mark as read" : "mark as unread", error.message);
+    },
   });
   return { setRead: result.mutate, setReadAsync: result.mutateAsync, ...result };
 };
@@ -633,11 +718,27 @@ export const useDraft = (draftId?: string) =>
     { enabled: !!draftId, staleTime: 0 },
   );
 
+/**
+ * After ANY draft write — the tRPC mutation or the multipart route — the list
+ * rows and every cached getDraft are stale. getDraft runs under the global
+ * `staleTime: Infinity`, so without this a draft reopened within the cache
+ * lifetime shows the version from before the save, and saving that copy writes
+ * the old text back over the new one.
+ */
+export const useDraftSaved = () => {
+  const utils = trpc.useUtils();
+  const invalidateInbox = useInboxInvalidate();
+  return () => {
+    invalidateInbox();
+    void utils.gmail.getDraft.invalidate();
+  };
+};
+
 /** Create or update a draft — `draftId` present means update. */
 export const useSaveDraft = () => {
-  const invalidate = useInboxInvalidate();
+  const draftSaved = useDraftSaved();
   const result = trpc.gmail.saveDraft.useMutation({
-    onSuccess: invalidate,
+    onSuccess: draftSaved,
     onError: (error) =>
       frontendLogger.error("[INBOX_HOOK]", "useSaveDraft error", { error: error.message }),
   });

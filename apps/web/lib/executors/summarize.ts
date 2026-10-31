@@ -1,7 +1,16 @@
 import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError } from "@repo/ai";
+import {
+  ToolExecutionError,
+  attachmentsForModel,
+  attendeesForModel,
+  maskMailboxTextForModel,
+  senderForModel,
+  type AttachmentForModel,
+} from "@repo/ai";
 import { getOrCreateSummary, type EmailCandidate } from "@web/lib/summarize/get-or-create-summary";
 import { getActiveThreadMeetings } from "@repo/services/calendar/thread-links";
+import { attendeeNamesForModel } from "./calendar";
+import { getMessageAttachmentManifest } from "@repo/services/attachments/discovery";
 
 export interface SummarizeEmailInput {
   entityId?: string;
@@ -38,6 +47,29 @@ export interface SummarizeEmailOutput {
     end: string;
     attendees: string[];
   }>;
+  /** This email's files, by (masked) name. `null` = never checked, not "none". */
+  attachments?: AttachmentForModel[] | null;
+}
+
+/**
+ * The email's attachments, as the model may see them — names masked, unknown
+ * kept as null. Best-effort like the meetings: a failed lookup is "couldn't
+ * check" (null), which the model is told to say, never a failed summary.
+ */
+async function loadAttachments(
+  userId: string,
+  entityId: string | undefined,
+): Promise<AttachmentForModel[] | null> {
+  if (!entityId) return null;
+  try {
+    return attachmentsForModel(await getMessageAttachmentManifest(userId, entityId));
+  } catch (error) {
+    console.warn("[executor:summarizeEmail] attachment lookup failed", {
+      entityId,
+      error: String(error),
+    });
+    return null;
+  }
 }
 
 /**
@@ -50,16 +82,19 @@ export interface SummarizeEmailOutput {
 async function loadThreadMeetings(
   userId: string,
   threadId: string | undefined,
+  selfEmail: string | undefined,
 ): Promise<SummarizeEmailOutput["meetings"]> {
   if (!threadId) return undefined;
   try {
     const meetings = await getActiveThreadMeetings(userId, threadId);
     if (meetings.length === 0) return undefined;
+    // Names, never addresses — same projection as getThreadMeetings.
+    const names = await attendeeNamesForModel(userId, meetings);
     return meetings.map((m) => ({
-      title: m.title,
+      title: maskMailboxTextForModel(m.title),
       start: m.start,
       end: m.end,
-      attendees: m.attendees,
+      attendees: attendeesForModel(m.attendees, names, selfEmail),
     }));
   } catch (error) {
     console.warn("[executor:summarizeEmail] thread meetings lookup failed", {
@@ -97,14 +132,14 @@ export class CorsairSummarizeEmailExecutor
 {
   async execute(
     args: SummarizeEmailInput,
-    ctx: { userId: string; requestId: string },
+    ctx: { userId: string; requestId: string; userEmail?: string },
   ): Promise<SummarizeEmailOutput> {
     const { userId } = ctx;
     console.log("[executor:summarizeEmail] START", {
       userId,
       entityId: args.entityId,
       threadId: args.threadId,
-      query: args.query,
+      hasQuery: !!args.query,
     });
 
     const outcome = await getOrCreateSummary({
@@ -131,7 +166,16 @@ export class CorsairSummarizeEmailExecutor
       }
 
       if (outcome.reason === "ambiguous") {
-        return { found: false, ambiguous: true, candidates: outcome.candidates, message: outcome.message };
+        return {
+          found: false,
+          ambiguous: true,
+          candidates: outcome.candidates?.map((c) => ({
+            ...c,
+            subject: c.subject ? maskMailboxTextForModel(c.subject) : c.subject,
+            sender: c.sender ? senderForModel(c.sender) : c.sender,
+          })),
+          message: outcome.message,
+        };
       }
 
       if (outcome.reason === "no_content") {
@@ -141,11 +185,13 @@ export class CorsairSummarizeEmailExecutor
           found: true,
           entityId: outcome.entityId,
           threadId: outcome.threadId,
-          subject: outcome.subject,
-          sender: outcome.sender,
+          subject: outcome.subject ? maskMailboxTextForModel(outcome.subject) : outcome.subject,
+          sender: outcome.sender ? senderForModel(outcome.sender) : outcome.sender,
           receivedAt: outcome.receivedAt,
           message: outcome.message,
-          meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+          meetings: await loadThreadMeetings(ctx.userId, outcome.threadId, ctx.userEmail),
+          // An image-only mail is exactly where the files are the content.
+          attachments: await loadAttachments(ctx.userId, outcome.entityId),
         };
       }
 
@@ -163,8 +209,12 @@ export class CorsairSummarizeEmailExecutor
       found: true,
       entityId: outcome.entityId,
       threadId: outcome.threadId,
-      subject: outcome.subject,
-      sender: outcome.sender,
+      // Identity fields come straight from message_metadata, unlike the digest
+      // (which the summarizer already masked). Masked here so "every sender you
+      // have seen was replaced with [EMAIL]" holds for this tool too. The email
+      // card under the reply is built from this same output.
+      subject: outcome.subject ? maskMailboxTextForModel(outcome.subject) : outcome.subject,
+      sender: outcome.sender ? senderForModel(outcome.sender) : outcome.sender,
       receivedAt: outcome.receivedAt,
       // The tool's "summary" field is the full digest — the model's working
       // context — while "overview" is the short version. This is the
@@ -173,7 +223,8 @@ export class CorsairSummarizeEmailExecutor
       summary: outcome.digest,
       overview: outcome.summary,
       guardrails: outcome.flags,
-      meetings: await loadThreadMeetings(ctx.userId, outcome.threadId),
+      meetings: await loadThreadMeetings(ctx.userId, outcome.threadId, ctx.userEmail),
+      attachments: await loadAttachments(ctx.userId, outcome.entityId),
     };
   }
 }

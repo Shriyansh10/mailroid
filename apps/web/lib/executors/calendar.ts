@@ -1,5 +1,12 @@
-import type { ToolExecutor } from "@repo/ai";
-import { ToolExecutionError } from "@repo/ai";
+import type { AttendeeNames, ToolExecutor } from "@repo/ai";
+import {
+  ToolExecutionError,
+  allAttendeeAddresses,
+  attendeesForModel,
+  eventForModel,
+  maskMailboxTextForModel,
+  mergeAttendeeNames,
+} from "@repo/ai";
 import {
   getEvents as corsairGetEvents,
   createEvent as corsairCreateEvent,
@@ -23,7 +30,7 @@ import {
   userOwnsEvent,
   type ThreadMeeting,
 } from "@repo/services/calendar/thread-links";
-import { resolveAttendeeRefs } from "@repo/services/scheduling/contacts";
+import { knownDisplayNames, resolveAttendeeRefs } from "@repo/services/scheduling/contacts";
 import { buildThreadSharedProperties } from "@repo/services/gmail/thread-headers";
 import { db, eq } from "@repo/database";
 import { user } from "@repo/database/schema";
@@ -90,6 +97,29 @@ async function resolveAttendees(
   return merged.length > 0 ? merged : undefined;
 }
 
+/**
+ * Names for the people on these meetings, for the model: Google's display
+ * names first, then names already known from mail. Read-only. Addresses never
+ * leave this function; see attendeesForModel.
+ *
+ * A failed lookup degrades to Google's names alone (the rest read "[EMAIL]")
+ * rather than failing the read: it changes how people are labelled, not who
+ * is invited to anything.
+ */
+export async function attendeeNamesForModel(
+  userId: string,
+  meetings: Array<{ attendees?: string[]; attendeeNames?: Record<string, string> }>,
+): Promise<AttendeeNames> {
+  const google = meetings.map((m) => m.attendeeNames);
+  let known: Record<string, string> = {};
+  try {
+    known = await knownDisplayNames(userId, allAttendeeAddresses(meetings.map((m) => m.attendees)));
+  } catch (error) {
+    console.warn("[executor:calendar] attendee name lookup failed", { userId, error: String(error) });
+  }
+  return mergeAttendeeNames(...google, known);
+}
+
 export interface GetEventsInput {
   timeMin?: string;
   timeMax?: string;
@@ -114,7 +144,7 @@ export class CorsairGetEventsExecutor
 {
   async execute(
     args: GetEventsInput,
-    ctx: { userId: string; requestId: string },
+    ctx: { userId: string; requestId: string; userEmail?: string },
   ): Promise<GetEventsOutput> {
     try {
       const now = new Date().toISOString();
@@ -134,17 +164,12 @@ export class CorsairGetEventsExecutor
       // These start/end values are already real, offset-bearing instants
       // from Google — no naive-string handling needed for the status check.
       const eventsNow = new Date();
-      const events = result.slice(0, MAX_EVENT_RESULTS).map((ev) => ({
-        id: ev.id,
-        title: ev.title,
-        start: ev.start,
-        end: ev.end,
-        allDay: ev.allDay,
-        description: ev.description,
-        location: ev.location,
-        attendees: ev.attendees,
-        status: getEventStatus(ev, eventsNow),
-      }));
+      const shown = result.slice(0, MAX_EVENT_RESULTS);
+      // Names, not addresses; free text masked. See calendar-results.ts.
+      const names = await attendeeNamesForModel(ctx.userId, shown);
+      const events = shown.map((ev) =>
+        eventForModel({ ...ev, status: getEventStatus(ev, eventsNow) }, names, ctx.userEmail),
+      );
 
       return { events };
     } catch (error) {
@@ -190,11 +215,11 @@ export class CorsairCreateEventExecutor
   ): Promise<CreateEventOutput> {
     console.log("[executor:createEvent] START", {
       userId: ctx.userId,
-      title: args.title,
       start: args.start,
       end: args.end,
-      attendees: args.attendees,
-      organizer: args.organizer,
+      attendeeCount: args.attendees?.length ?? 0,
+      attendeeRefCount: args.attendeeRefs?.length ?? 0,
+      hasOrganizer: !!args.organizer,
     });
     try {
       assertNotPast(args.start, (ctx as any).userTimeZone);
@@ -225,7 +250,6 @@ export class CorsairCreateEventExecutor
 
       console.log("[executor:createEvent] SUCCESS", {
         id: result.id,
-        title: result.title,
         meetStatus: result.meetStatus,
       });
       return { draft: false, id: result.id };
@@ -273,19 +297,21 @@ export class ThreadMeetingsExecutor
 {
   async execute(
     args: GetThreadMeetingsInput,
-    ctx: { userId: string; requestId: string },
+    ctx: { userId: string; requestId: string; userEmail?: string },
   ): Promise<GetThreadMeetingsOutput> {
     try {
       const meetings = await getActiveThreadMeetings(ctx.userId, args.threadId);
+      const names = await attendeeNamesForModel(ctx.userId, meetings);
       return {
         // Projected explicitly: eventId and calendarId stay server-side, and
-        // selectionId is what crosses the boundary in their place.
+        // selectionId is what crosses the boundary in their place. Attendees
+        // are names, never addresses.
         meetings: meetings.map((m) => ({
           selectionId: selectionIdFor(m.eventId),
-          title: m.title,
+          title: maskMailboxTextForModel(m.title),
           start: m.start,
           end: m.end,
-          attendees: m.attendees,
+          attendees: attendeesForModel(m.attendees, names, ctx.userEmail),
           past: !isUpcomingMeeting(m),
         })),
       };
@@ -439,7 +465,6 @@ export class ScheduleThreadMeetingExecutor
     console.log("[executor:scheduleThreadMeeting] START", {
       userId: ctx.userId,
       threadId: args.threadId,
-      title: args.title,
     });
     try {
       assertNotPast(args.start, ctx.userTimeZone);
@@ -634,7 +659,8 @@ function describeMeetings(
 ): string {
   return meetings
     .map((m, i) => {
-      const title = m.title.replace(/\s+/g, " ").trim().slice(0, 80) || "(untitled)";
+      // Read by the model (precheck refusals), so masked like any invite text.
+      const title = maskMailboxTextForModel(m.title.replace(/\s+/g, " ").trim().slice(0, 80)) || "(untitled)";
       return `  ${i + 1}. "${title}" — ${formatWhen(m.start, timeZone)} (selectionId: ${selectionIdFor(m.eventId)})`;
     })
     .join("\n");

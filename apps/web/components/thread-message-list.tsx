@@ -1,10 +1,13 @@
 "use client";
 
-import { useState, useEffect, useMemo, useRef } from "react";
-import DOMPurify from "dompurify";
-import { ChevronRightIcon, ChevronDownIcon } from "lucide-react";
+import { useState, useEffect, useMemo, useRef, type RefObject } from "react";
+import { ChevronRightIcon, ChevronDownIcon, ImageOffIcon } from "lucide-react";
 import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
 import { parseAddressList } from "@web/lib/email-addresses";
+import { AttachmentList, type MessageAttachment } from "@web/components/attachment-list";
+import { useMarkAttachmentStored } from "@web/hooks/api/gmail";
+import { linkifyText } from "@web/lib/linkify";
+import { renderMailHtml, type InlineImage } from "@web/lib/mail-html";
 
 export interface ThreadMessage {
   id: string;
@@ -23,9 +26,28 @@ export interface ThreadMessage {
   snippet: string;
   isDraft?: boolean;
   draftId?: string;
+  /**
+   * Attachments, where the absence of a value is itself information.
+   *
+   *   an array (even empty) → we know. `[]` means there are none.
+   *   null / undefined      → UNKNOWN. This message was synced metadata-only,
+   *                           so nothing has ever read its payload.
+   *
+   * Rendered as two different things on purpose — see AttachmentList.
+   */
+  attachments?: MessageAttachment[] | null;
+  /**
+   * Images the HTML body can reference by `cid:`.
+   *
+   * Separate from `attachments` because inline parts are filtered out of that
+   * list at every producing site — a signature logo is body furniture, not a
+   * document, and must not earn a chip. Absence here means nothing beyond "no
+   * `cid:` can be resolved"; there is no unknown state to distinguish.
+   */
+  inlineImages?: InlineImage[] | null;
 }
 
-function parseSender(from: string) {
+export function parseSender(from: string) {
   if (!from) return { name: "Unknown", email: "" };
   const match = from.match(/^([^<]+)<([^>]+)>/);
   if (match && match[1] && match[2]) {
@@ -57,7 +79,7 @@ function summariseRecipients(header: string | undefined, selfEmail?: string): st
     .join(", ");
 }
 
-function formatMessageDate(dateString: string): string {
+export function formatMessageDate(dateString: string): string {
   if (!dateString) return "";
   try {
     const date = new Date(dateString);
@@ -73,6 +95,77 @@ function formatMessageDate(dateString: string): string {
   } catch (e) {
     return dateString;
   }
+}
+
+/**
+ * One message's body: sanitised HTML when there is any, plain text otherwise.
+ *
+ * Its own component so the sanitise/rewrite pass memoizes per message. Inlined
+ * in the parent's map it would re-run for every message on every expand/collapse
+ * of any one of them, and this is the expensive part of rendering a thread.
+ *
+ * "Show images" is per message and deliberately NOT persisted. Remote images in
+ * mail are overwhelmingly tracking pixels — opening one tells the sender the
+ * message was read, when, and roughly from where. A per-sender or global
+ * "always show" setting is a reasonable thing to want and a poor default to
+ * infer from one click on one message.
+ */
+function MessageBody({ msg }: { msg: ThreadMessage }) {
+  const [showRemoteImages, setShowRemoteImages] = useState(false);
+
+  const rendered = useMemo(
+    () =>
+      msg.htmlBody
+        ? renderMailHtml(msg.htmlBody, {
+            inlineImages: msg.inlineImages,
+            showRemoteImages,
+          })
+        : null,
+    [msg.htmlBody, msg.inlineImages, showRemoteImages],
+  );
+
+  // `rendered.html` is empty when there was no DOM to sanitise against — see
+  // renderMailHtml. Falling through to the text body is the safe branch, not a
+  // missing case.
+  if (!rendered?.html) {
+    return (
+      <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
+        {linkifyText(msg.body || msg.snippet)}
+      </div>
+    );
+  }
+
+  return (
+    <>
+      {/* Only shown when something was actually blocked. A banner offering to
+          unblock nothing trains the reader to ignore the banner. */}
+      {rendered.blockedCount > 0 && (
+        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
+          <ImageOffIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
+          <span className="text-muted-foreground">
+            {rendered.blockedCount === 1
+              ? "1 remote image was blocked to stop the sender tracking that you opened this."
+              : `${rendered.blockedCount} remote images were blocked to stop the sender tracking that you opened this.`}
+          </span>
+          <button
+            type="button"
+            onClick={() => setShowRemoteImages(true)}
+            className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
+          >
+            Show images
+          </button>
+        </div>
+      )}
+      <div
+        // Links in sender HTML carry no styling of their own once sanitised, so
+        // they rendered as plain black text — indistinguishable from prose, and
+        // unclickable-looking even though they worked. These arbitrary variants
+        // style them without touching the sanitiser.
+        className="max-w-full break-words text-foreground text-sm [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_a:hover]:opacity-80 [&_a]:break-all"
+        dangerouslySetInnerHTML={{ __html: rendered.html }}
+      />
+    </>
+  );
 }
 
 /**
@@ -98,15 +191,26 @@ function formatMessageDate(dateString: string): string {
 export function ThreadMessageList({
   messages: allMessages,
   selfEmail,
+  revealRef,
 }: {
   messages: ThreadMessage[];
   /** The signed-in address, so recipient summaries can say "me" like Gmail. */
   selfEmail?: string;
+  /**
+   * Receives a function that expands one message and scrolls it into view —
+   * for entry points outside this list (the thread's file strip) that point at
+   * a message which may currently be collapsed.
+   */
+  revealRef?: RefObject<((messageId: string) => void) | null>;
 }) {
   const [mounted, setMounted] = useState(false);
   useEffect(() => {
     setMounted(true);
   }, []);
+
+  // A preview that loads means the attachment is now in storage; remember it in
+  // the cached thread so reopening shows the thumbnail, not "Load preview".
+  const markAttachmentStored = useMarkAttachmentStored();
 
   // Which message has its from/to/cc/date/subject panel open (one at a time).
   const [detailsFor, setDetailsFor] = useState<string | null>(null);
@@ -154,6 +258,25 @@ export function ThreadMessageList({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [threadKey]);
 
+  // Expanding and scrolling are two steps: the expanded card has to render
+  // before there is anything to scroll to.
+  const [scrollTo, setScrollTo] = useState<string | null>(null);
+  useEffect(() => {
+    if (!revealRef) return;
+    revealRef.current = (id: string) => {
+      setExpanded((prev) => (prev.has(id) ? prev : new Set(prev).add(id)));
+      setScrollTo(id);
+    };
+    return () => {
+      revealRef.current = null;
+    };
+  }, [revealRef]);
+  useEffect(() => {
+    if (!scrollTo) return;
+    document.getElementById(`msg-${scrollTo}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+    setScrollTo(null);
+  }, [scrollTo, expanded]);
+
   const toggle = (id: string) => {
     setExpanded((prev) => {
       const next = new Set(prev);
@@ -174,9 +297,10 @@ export function ThreadMessageList({
           return (
             <button
               key={msg.id}
+              id={`msg-${msg.id}`}
               type="button"
               onClick={() => toggle(msg.id)}
-              className="w-full flex items-center gap-3 px-4 py-2.5 rounded-xl border bg-card hover:bg-muted/40 transition-colors text-left"
+              className="scroll-mt-4 w-full flex items-center gap-3 px-4 py-2.5 rounded-xl border bg-card hover:bg-muted/40 transition-colors text-left"
             >
               <ChevronRightIcon className="size-3.5 shrink-0 text-muted-foreground" />
               <Avatar className="size-7 border border-border shrink-0">
@@ -200,7 +324,7 @@ export function ThreadMessageList({
           // of the header. The header carries its own rounded-t-xl instead,
           // which is all the clipping was doing (its tinted background is the
           // only thing that reaches the card's corners).
-          <div key={msg.id} className="bg-card border rounded-xl shadow-sm">
+          <div key={msg.id} id={`msg-${msg.id}`} className="scroll-mt-4 bg-card border rounded-xl shadow-sm">
             {/*
               Message Header — clicking it collapses the message back, as in
               Gmail. A div rather than a button now that it contains its own
@@ -295,19 +419,13 @@ export function ThreadMessageList({
             {/* Message Body */}
             <div className="p-6">
               <div className="overflow-x-auto max-w-full">
-                {msg.htmlBody ? (
-                  <div
-                    className="max-w-full break-words text-foreground text-sm"
-                    dangerouslySetInnerHTML={{
-                      __html: DOMPurify.sanitize(msg.htmlBody),
-                    }}
-                  />
-                ) : (
-                  <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
-                    {msg.body || msg.snippet}
-                  </div>
-                )}
+                <MessageBody msg={msg} />
               </div>
+              {/* Inside the body block, so attachments read as part of the
+                  message rather than as chrome attached to the thread. One edit
+                  covers two surfaces: this list is shared with the assistant's
+                  EmailReferenceCard sheet, so those get chips too. */}
+              <AttachmentList attachments={msg.attachments} onStored={markAttachmentStored} />
             </div>
           </div>
         );

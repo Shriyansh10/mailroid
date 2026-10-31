@@ -158,9 +158,11 @@ const MS_PER_UNIT = 1_000 / UNITS_PER_SEC;
  * tolerance class; interactive calls are allowed to jump background
  * reservations, which is the entire point.
  */
+// No "thumbnail" (P-7): thumbnails no longer cause Gmail downloads at all. A
+// thumbnail renders only when its bytes are already in object storage; anything
+// else waits for an explicit "Load preview", which is an attachment-download.
 const INTERACTIVE_TRIGGERS: ReadonlySet<string> = new Set([
   "ui",
-  "thumbnail",
   "attachment-download",
   "send",
   "oauth-callback",
@@ -179,7 +181,6 @@ const BACKGROUND_TOLERANCE_UNITS = Math.floor(BURST_UNITS / 2);
  */
 const CAP_MS: Readonly<Record<string, number>> = {
   ui: 2_000,
-  thumbnail: 2_000,
   "attachment-download": 2_000,
   "oauth-callback": 5_000,
   // A person pressed Send. Failing that outright is worse than a short wait,

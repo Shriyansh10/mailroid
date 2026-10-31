@@ -19,9 +19,23 @@ export const HYDRATION_CONCURRENCY = 5;
 // would be re-selected by every batch forever.
 export const MAX_HYDRATION_ATTEMPTS = 3;
 
-// Spam/Bin/Draft/Sent are never worth a body fetch either — mirrors
-// UNCLASSIFIABLE_CATEGORIES in classification.ts exactly.
-const UNHYDRATABLE_CATEGORIES = ["SPAM", "TRASH", "DRAFT", "SENT"] as any[];
+// Spam and Bin are not worth a body fetch: nobody searches them, and embedding
+// junk costs money and pollutes semantic search. Drafts have no settled body to
+// fetch.
+//
+// SENT IS DELIBERATELY NOT HERE, and this no longer mirrors
+// UNCLASSIFIABLE_CATEGORIES in classification.ts — the two lists have different
+// jobs. Classification asks "is this worth ranking for the user's attention",
+// and mail you sent yourself plainly is not. Hydration asks "should we hold the
+// body", and for sent mail the answer is yes: attachments are something people
+// most often go looking for in mail they sent, and excluding SENT meant those
+// threads never got an attachment manifest and never showed a chip at any age.
+//
+// The cost is real and worth stating: hydrated ids are handed to
+// email/index.requested, so sent mail now gets embedded too. That is an
+// OpenAI cost per message and puts sent mail into semantic search results.
+// Both are intended.
+const UNHYDRATABLE_CATEGORIES = ["SPAM", "TRASH", "DRAFT"] as any[];
 
 function hydratablePredicate(userId: string, since: Date) {
   return and(

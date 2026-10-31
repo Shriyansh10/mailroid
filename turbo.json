@@ -2,6 +2,14 @@
   "$schema": "https://turborepo.com/schema.json",
   "ui": "tui",
   "envMode": "loose",
+  // Both set by Next itself, not by us, and read in apps/web/instrumentation.ts:
+  // NEXT_RUNTIME tells the nodejs runtime from the edge one; NEXT_PHASE tells
+  // `next build` from a running server, so the boot-time storage checks run only
+  // where runtime secrets exist. Declared so they do not add
+  // turbo/no-undeclared-env-vars warnings to the lint baseline. Other vars in
+  // this repo are undeclared and warn; that is pre-existing, and widening this
+  // list is a separate piece of work.
+  "globalEnv": ["NEXT_RUNTIME", "NEXT_PHASE"],
   "tasks": {
     "build": {
       "dependsOn": ["^build"],

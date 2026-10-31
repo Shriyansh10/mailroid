@@ -26,6 +26,17 @@ mailroid.in {
 	handle /api/generate-email {
 		reverse_proxy mailroid-web:3000
 	}
+	# Prefix block, not exact-match: the path carries an attachment id.
+	handle /api/attachments/* {
+		reverse_proxy mailroid-web:3000
+	}
+	# Sending with attachments. Lives in the web container because it takes
+	# multipart/form-data, which tRPC cannot express, and because the API's
+	# express.json() has no size limit. Exact-match is correct here — the path
+	# carries no id.
+	handle /api/compose/send {
+		reverse_proxy mailroid-web:3000
+	}
 	handle /api/* {
 		reverse_proxy mailroid-api:8000
 	}

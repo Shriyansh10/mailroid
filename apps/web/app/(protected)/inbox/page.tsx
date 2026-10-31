@@ -50,7 +50,8 @@ import {
   TagIcon,
   ShieldAlertIcon,
   ShieldCheckIcon,
-  XIcon
+  XIcon,
+  PaperclipIcon
 } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { trpc } from "@web/trpc/client";
@@ -84,6 +85,7 @@ import {
   AlertDialogTitle,
 } from "@web/components/ui/alert-dialog";
 import { motion, AnimatePresence } from "framer-motion";
+import { InboxAttachmentChips } from "@web/components/attachment-list";
 
 const CATEGORIES = [
   { key: "PRIMARY", label: "Primary" },
@@ -426,6 +428,7 @@ function DossierLayout({
   pagination,
   banner,
   category,
+  emptyNote,
 }: {
   title: string;
   subtitle: string;
@@ -438,12 +441,18 @@ function DossierLayout({
   banner?: React.ReactNode;
   /** Which view this list is showing — decides which row actions apply. */
   category?: string;
+  /** Replaces the default empty state, when a filter explains why the list is empty. */
+  emptyNote?: { title: string; body: string };
 }) {
   const router = useRouter();
   const utils = trpc.useUtils();
   /** Read, not threaded through as a prop: four call sites render this layout
       and only one of them has a page number to pass. */
-  const listPage = useSearchParams().get("page") ?? "1";
+  const searchParams = useSearchParams();
+  const listPage = searchParams.get("page") ?? "1";
+  // The folder total is unfiltered, so the banner has to say so when the
+  // "With attachments" filter is narrowing the list it sits above.
+  const filteredByAttachments = searchParams.get("attachments") === "1";
   const { trashThreadAsync } = useTrashThread();
   const { untrashThreadAsync } = useUntrashThread();
   const { setStarredAsync } = useSetStarred();
@@ -476,8 +485,10 @@ function DossierLayout({
 
   const isBin = category === "TRASH";
   const isDraftView = category === "DRAFT";
-  const isSpamView = category === "SPAM";
+  // Sent and Drafts are the user's own mail, so both label rows by recipient
+  // rather than by a sender that is always the same person.
   const isSentView = category === "SENT";
+  const isSpamView = category === "SPAM";
   const [selectedThreadId, setSelectedThreadId] = useState<string | null>(null);
   const [hiddenIds, setHiddenIds] = useState<string[]>([]);
 
@@ -779,7 +790,9 @@ function DossierLayout({
   const handleEditDraft = async (thread: any) => {
     if (!thread.draftId) return;
     try {
-      const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId });
+      // staleTime 0: always Gmail's current copy. Under the global Infinity a
+      // reopen served the pre-save version, and saving it reverted the edit.
+      const draft = await utils.gmail.getDraft.fetch({ draftId: thread.draftId }, { staleTime: 0 });
       if (draft.isReplyToExisting && draft.threadId) {
         router.push(buildThreadHref(draft.threadId, { draftId: draft.draftId }));
         return;
@@ -889,7 +902,11 @@ function DossierLayout({
           <div className="px-4 py-2 text-center text-xs text-muted-foreground bg-muted/40 border-b border-border">
             All {selectableThreads.length} conversations on this page are selected.
             {category && categoryCounts?.[category] != null && (
-              <> {categoryLabel(category)} holds {categoryCounts[category]} in total.</>
+              filteredByAttachments ? (
+                <> {categoryLabel(category)} holds {categoryCounts[category]} in total, with or without attachments.</>
+              ) : (
+                <> {categoryLabel(category)} holds {categoryCounts[category]} in total.</>
+              )
             )}
           </div>
         )}
@@ -913,10 +930,10 @@ function DossierLayout({
             <div className="flex flex-col items-center justify-center py-20 text-center">
               <ArchiveIllustration />
               <h3 className="font-serif text-lg font-semibold text-[#D9D1C1] mb-2">
-                No correspondence detected.
+                {emptyNote?.title ?? "No correspondence detected."}
               </h3>
               <p className="text-xs text-[#D9D1C1]/40 font-mono max-w-xs uppercase">
-                All records triaged. Standby for new transmissions.
+                {emptyNote?.body ?? "All records triaged. Standby for new transmissions."}
               </p>
             </div>
           )}
@@ -1016,24 +1033,35 @@ function DossierLayout({
                       >
                         {partyLabel}
                       </div>
-                      <div className="flex items-center gap-1.5 min-w-0 flex-1 truncate text-[13px]">
-                        <span
-                          className={cn(
-                            "truncate shrink-0 max-w-[50%]",
-                            isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
-                          )}
-                        >
-                          {thread.subject || "(No Subject)"}
-                        </span>
-                        <span
-                          className={cn(
-                            "truncate font-normal",
-                            isUnread ? "text-muted-foreground" : "text-muted-foreground/70"
-                          )}
-                        >
-                          <span className="mr-1.5 opacity-50">-</span>
-                          {thread.snippet}
-                        </span>
+                      {/* Column, so attachment chips can sit on a second line
+                          under the subject the way Gmail does. Rows without
+                          attachments render exactly as before — the chip
+                          component returns null and the column collapses to a
+                          single line. */}
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-1.5 min-w-0 truncate text-[13px]">
+                          <span
+                            className={cn(
+                              "truncate shrink-0 max-w-[50%]",
+                              isUnread ? "font-semibold text-foreground" : "font-normal text-muted-foreground"
+                            )}
+                          >
+                            {thread.subject || "(No Subject)"}
+                          </span>
+                          <span
+                            className={cn(
+                              "truncate font-normal",
+                              isUnread ? "text-muted-foreground" : "text-muted-foreground/70"
+                            )}
+                          >
+                            <span className="mr-1.5 opacity-50">-</span>
+                            {thread.snippet}
+                          </span>
+                        </div>
+                        <InboxAttachmentChips
+                          attachments={thread.attachments}
+                          hasAttachment={thread.hasAttachment}
+                        />
                       </div>
                     </div>
 
@@ -1181,15 +1209,23 @@ function CategoryInbox({
   category,
   page,
   onNavigate,
+  withAttachments,
+  onToggleAttachments,
 }: {
   category: string;
   page: number;
   onNavigate: (newCategory: string, newPage: number) => void;
+  withAttachments: boolean;
+  onToggleAttachments: () => void;
 }) {
   // Fetch a whole window, then slice out the requested page on the client.
   const windowIndex = Math.floor(((page - 1) * PAGE_SIZE) / WINDOW_SIZE);
   const startInWindow = (page - 1) * PAGE_SIZE - windowIndex * WINDOW_SIZE;
-  const { data, isLoading, isError, error } = useCategoryEmails(category, { maxResults: WINDOW_SIZE, page: windowIndex });
+  const { data, isLoading, isError, error } = useCategoryEmails(category, {
+    maxResults: WINDOW_SIZE,
+    page: windowIndex,
+    withAttachments,
+  });
   const windowThreads = data?.threads ?? [];
   const threads = windowThreads.slice(startInWindow, startInWindow + PAGE_SIZE);
 
@@ -1211,6 +1247,7 @@ function CategoryInbox({
       isError={isError}
       error={error}
       category={category}
+      emptyNote={withAttachments ? ATTACHMENT_FILTER_EMPTY : undefined}
       headerActions={
         isTabbedCategory ? (
           <div className="flex items-center gap-2 px-2">
@@ -1227,10 +1264,12 @@ function CategoryInbox({
                 {label}
               </button>
             ))}
+            <AttachmentFilterToggle active={withAttachments} onToggle={onToggleAttachments} />
           </div>
         ) : (
-          <div className="px-4 py-3 text-[13px] font-medium text-foreground">
+          <div className="flex items-center gap-2 px-4 py-3 text-[13px] font-medium text-foreground">
             {meta?.title ?? category}
+            <AttachmentFilterToggle active={withAttachments} onToggle={onToggleAttachments} />
           </div>
         )
       }
@@ -1683,14 +1722,50 @@ function AiSetupProgress() {
   );
 }
 
+// ── Attachment filter ────────────────────────────────────────────────
+
+const ATTACHMENT_FILTER_EMPTY = {
+  title: "No conversations with attachments here.",
+  body: "Only mail Mailroid has checked for attachments is shown.",
+};
+
+/**
+ * "With attachments" — one click, in the list header, beside the tabs it
+ * narrows. Matches conversations with a CONFIRMED attachment on any message.
+ * Mail nobody has checked yet is left out rather than counted as "none", and
+ * the tooltip and empty state both say so.
+ */
+function AttachmentFilterToggle({ active, onToggle }: { active: boolean; onToggle: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onToggle}
+      aria-pressed={active}
+      title="Show only conversations with an attachment. Mail Mailroid hasn't checked yet isn't included."
+      className={`ml-1 flex shrink-0 items-center gap-1.5 rounded-full border px-3 py-1 text-xs font-medium transition-colors ${
+        active
+          ? "border-primary bg-primary/10 text-primary"
+          : "border-border text-muted-foreground hover:bg-muted/40 hover:text-foreground"
+      }`}
+    >
+      <PaperclipIcon className="size-3.5" aria-hidden />
+      With attachments
+    </button>
+  );
+}
+
 // ── Priority Inbox View ──────────────────────────────────────────────
 
 function PriorityInbox({
   page,
   onNavigate,
+  withAttachments,
+  onToggleAttachments,
 }: {
   page: number;
   onNavigate: (newCategory: string, newPage: number) => void;
+  withAttachments: boolean;
+  onToggleAttachments: () => void;
 }) {
   const [filter, setFilter] = React.useState<"ALL" | "HIGH" | "MEDIUM" | "LOW" | "UNCLASSIFIED">("ALL");
 
@@ -1699,7 +1774,9 @@ function PriorityInbox({
     return [filter];
   }, [filter]);
 
-  const { data: countsData } = usePriorityCounts();
+  // The tabs sit next to the toggle, so they count what the list shows.
+  // Omitted when off, so the unfiltered counts keep their existing cache key.
+  const { data: countsData } = usePriorityCounts(withAttachments ? { withAttachments: true } : undefined);
   const counts = countsData ?? { HIGH: 0, MEDIUM: 0, LOW: 0, UNCLASSIFIED: 0, ALL: 0 };
 
   // Fetch a whole window, then slice out the requested page on the client.
@@ -1709,6 +1786,8 @@ function PriorityInbox({
     priorities,
     maxResults: WINDOW_SIZE,
     page: windowIndex,
+    // Omitted when off, so the unfiltered list keeps its existing cache key.
+    ...(withAttachments ? { withAttachments: true } : {}),
   });
   const windowThreads = data?.threads ?? [];
   const threads = windowThreads.slice(startInWindow, startInWindow + PAGE_SIZE);
@@ -1750,11 +1829,13 @@ function PriorityInbox({
               </button>
             );
           })}
+          <AttachmentFilterToggle active={withAttachments} onToggle={onToggleAttachments} />
           <div className="ml-2 pl-2 border-l border-border/40">
             <ClassifyControls />
           </div>
         </div>
       }
+      emptyNote={withAttachments ? ATTACHMENT_FILTER_EMPTY : undefined}
       banner={<><FirstClassifyBanner /><AiSetupProgress /></>}
       pagination={
         <div className="flex items-center gap-3">
@@ -1795,6 +1876,8 @@ export default function InboxPage() {
   const mode = searchParams.get("mode");
   const q = searchParams.get("q") ?? "";
   const aiq = searchParams.get("aiq") ?? "";
+  // In the URL, so a filtered view survives Back from a thread and can be shared.
+  const withAttachments = searchParams.get("attachments") === "1";
   const isGmailSearch = (!mode || mode === "gmail") && q.length > 0;
   const isAiSearch = mode === "ai" && aiq.length > 0;
 
@@ -1808,12 +1891,16 @@ export default function InboxPage() {
     }
   }, [category, page, router]);
 
-  const navigateTo = (newCategory: string, newPage: number) => {
+  const navigateTo = (newCategory: string, newPage: number, attachments = withAttachments) => {
     const p = new URLSearchParams();
     p.set("category", newCategory);
     if (newPage > 1) p.set("page", String(newPage));
+    if (attachments) p.set("attachments", "1");
     router.replace(`/inbox?${p.toString()}`);
   };
+  // Back to page 1: the filtered list is a different list, and page 4 of the
+  // old one means nothing in it.
+  const toggleAttachments = () => navigateTo(category, 1, !withAttachments);
 
   if (isAiSearch) {
     return <AiSearchResults query={aiq} />;
@@ -1824,8 +1911,23 @@ export default function InboxPage() {
   }
 
   if (category === "PRIORITY") {
-    return <PriorityInbox page={page} onNavigate={navigateTo} />;
+    return (
+      <PriorityInbox
+        page={page}
+        onNavigate={navigateTo}
+        withAttachments={withAttachments}
+        onToggleAttachments={toggleAttachments}
+      />
+    );
   }
 
-  return <CategoryInbox category={category} page={page} onNavigate={navigateTo} />;
+  return (
+    <CategoryInbox
+      category={category}
+      page={page}
+      onNavigate={navigateTo}
+      withAttachments={withAttachments}
+      onToggleAttachments={toggleAttachments}
+    />
+  );
 }

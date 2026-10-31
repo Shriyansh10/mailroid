@@ -452,7 +452,7 @@ test("throttling is per tenant, trigger and operation", async () => {
     }
 
     await acquireQuota(req(h, { trigger: "ui" })).catch(() => undefined);
-    await acquireQuota(req(h, { trigger: "thumbnail" })).catch(() => undefined);
+    await acquireQuota(req(h, { trigger: "attachment-download" })).catch(() => undefined);
     await acquireQuota(req(h, { tenantId: "tenant-b", trigger: "ui" })).catch(() => undefined);
 
     assert.equal(refusalLines.length, 3, "distinct keys must each get their own line");

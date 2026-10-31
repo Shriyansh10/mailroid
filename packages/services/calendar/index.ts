@@ -217,6 +217,21 @@ export async function getEventOrganizerEmail(
  * so falling back to it means a freshly created Meet is returned on the same
  * call rather than looking absent until the next read.
  */
+/**
+ * Google's display name per attendee, keyed by lower-cased address. Only names
+ * Google actually has; an attendee without one is simply absent. Carried so
+ * the assistant can name people without ever being handed their address.
+ */
+export function attendeeNamesFrom(raw: unknown): Record<string, string> | undefined {
+  if (!Array.isArray(raw)) return undefined;
+  const names: Record<string, string> = {};
+  for (const a of raw as RawAttendee[]) {
+    const name = a?.displayName?.trim();
+    if (a?.email && name) names[a.email.toLowerCase()] = name;
+  }
+  return Object.keys(names).length > 0 ? names : undefined;
+}
+
 function extractMeetLink(raw: RawEvent): string | undefined {
   if (raw.hangoutLink) return raw.hangoutLink;
   const video = raw.conferenceData?.entryPoints?.find(
@@ -257,6 +272,7 @@ function normalizeEvent(
     attendees: raw.attendees
       ?.map((a: RawAttendee) => a.email)
       .filter((e): e is string => !!e),
+    attendeeNames: attendeeNamesFrom(raw.attendees),
     // No longer dropped: the thread card names the host, which is the one
     // thing that tells a user which Google account they must be signed in as
     // to be let into their own meeting.

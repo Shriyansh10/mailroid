@@ -9,6 +9,7 @@ import {
   index,
   pgEnum,
 } from "drizzle-orm/pg-core";
+import { sql } from "drizzle-orm";
 
 // ── Enums ─────────────────────────────────────────────────────────────
 
@@ -213,6 +214,64 @@ snippet: text("snippet"),
     hydrationStatus: text("hydration_status").notNull().default("PENDING"),
     hydrationAttempts: integer("hydration_attempts").notNull().default(0),
 
+    /**
+     * Does this message carry a real attachment?
+     *
+     * Deliberately nullable, and the three states must stay distinguishable:
+     *   NULL   — unknown. Nothing has looked yet.
+     *   true   — yes.
+     *   false  — no, and we checked.
+     * The inbox row shows a paperclip ONLY on `true`, so an unexamined message
+     * never claims either way.
+     *
+     * Written from two sources of differing quality, and that is the point:
+     *
+     *   Metadata sync (cheap, heuristic) — `threads.get(format:"metadata")`
+     *   returns headers but no MIME parts, so this is inferred from the
+     *   top-level Content-Type. `multipart/mixed` means a real attachment;
+     *   `multipart/related` is inline images (a signature logo), and
+     *   `multipart/alternative` or `text/*` is body only. Chosen over Gmail's
+     *   own `has:attachment` search precisely because that counts inline
+     *   signature images, which would put a paperclip on a large share of
+     *   ordinary business mail.
+     *
+     *   ingestMessage (exact) — the full payload is in hand, so this is set
+     *   from the parsed manifest and supersedes the heuristic permanently.
+     *
+     * The metadata upsert deliberately OMITS this column from its
+     * onConflictDoUpdate set (see upsertMessageMetadataBatch), so a later
+     * re-sync can never overwrite an exact value with a guess.
+     */
+    hasAttachment: boolean("has_attachment"),
+
+    /**
+     * When this message's attachment MANIFEST (filenames, types, sizes — never
+     * bytes) was last written. NULL means no manifest has been built yet.
+     *
+     * Stamped by every manifest writer (ingest, thread open, drafts, and the
+     * attachment-manifest backfill) in the same transaction as the manifest
+     * rows, including when the message turns out to have no real attachment —
+     * otherwise a `multipart/mixed` message with no attachment part would be
+     * re-fetched forever.
+     *
+     * The backfill's work list is `has_attachment = true AND
+     * attachment_manifest_at IS NULL AND attachment_manifest_attempts < 3`.
+     * A new message arriving in a thread starts NULL, which correctly makes the
+     * thread eligible again.
+     */
+    attachmentManifestAt: timestamp("attachment_manifest_at", { withTimezone: true }),
+    /**
+     * Failed backfill attempts for this message. Capped at 3, after which the
+     * backfill stops picking it (logged once); hydration and thread open can
+     * still write the manifest and stamp it.
+     */
+    attachmentManifestAttempts: integer("attachment_manifest_attempts").notNull().default(0),
+    /**
+     * Why the backfill gave up, when it did: "too_deep" (MIME tree deeper than
+     * the metadata-only request covers — left for a full read) or "failed".
+     */
+    attachmentManifestSkip: text("attachment_manifest_skip"),
+
     lastClassifiedAt: timestamp("last_classified_at", { withTimezone: true }),
     createdAt: timestamp("created_at", { withTimezone: true })
       .notNull()
@@ -266,5 +325,13 @@ snippet: text("snippet"),
     // Supports the cheap per-user inbox change token: max(updated_at) filtered
     // by user_id, polled every ~10s by the client for realtime freshness.
     index("idx_mm_user_updated").on(table.userId, table.updatedAt),
+    // The attachment-manifest backfill's work list: WHERE user_id = ? AND
+    // has_attachment AND attachment_manifest_at IS NULL AND attempts < 3
+    // ORDER BY received_at DESC. Partial, so it only ever holds pending rows.
+    index("idx_mm_attachment_manifest_pending")
+      .on(table.userId, table.receivedAt)
+      .where(
+        sql`${table.hasAttachment} = true AND ${table.attachmentManifestAt} IS NULL AND ${table.attachmentManifestAttempts} < 3`,
+      ),
   ],
 );

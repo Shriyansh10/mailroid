@@ -1,0 +1,6 @@
+{
+  // Test-only: the Node test runner (tsx) needs the automatic JSX runtime that
+  // Next applies itself at build time.
+  "extends": "./tsconfig.json",
+  "compilerOptions": { "jsx": "react-jsx" }
+}

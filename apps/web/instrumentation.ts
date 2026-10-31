@@ -34,4 +34,37 @@ export async function register(): Promise<void> {
       ...errorFields(err),
     });
   }
+
+  // The attachment cache's read path lives in THIS app while its eviction cron
+  // lives in apps/api, so validating only the API would let this container
+  // start cleanly and fail on the first attachment a user clicked.
+  //
+  // Throws, deliberately, unlike telemetry above: a half-configured cache is an
+  // unauthenticated request to a bucket. The build is unaffected because
+  // ATTACHMENT_CACHE_ENABLED is unset during `next build`.
+  const { assertAttachmentCacheConfig, assertAttachmentStoreForProduction } = await import(
+    "@repo/services/attachments/config"
+  );
+  assertAttachmentCacheConfig();
+  // Object storage is the only attachment read source, so production without
+  // it cannot serve a single attachment. Skipped during `next build`, which has
+  // none of the runtime secrets and must not need them.
+  if (process.env.NEXT_PHASE !== "phase-production-build") assertAttachmentStoreForProduction();
+
+  // This process never downloads attachments from Gmail. A confirmed storage
+  // miss is handed to the API (the only Gmail reader) over the private network.
+  // Without the two variables, misses answer 503 rather than ever calling Gmail
+  // from here — loud in the log, never silent.
+  const { setAttachmentMissHandler } = await import("@repo/services/attachments/index");
+  const { createInternalMissHandler, internalClientConfigFromEnv } = await import(
+    "@repo/services/attachments/internal-client"
+  );
+  const internal = internalClientConfigFromEnv();
+  if (internal) {
+    setAttachmentMissHandler(createInternalMissHandler(internal));
+  } else if (process.env.NEXT_PHASE !== "phase-production-build") {
+    logger.error(
+      "[ATTACHMENTS] API_INTERNAL_URL or INTERNAL_API_SECRET is not set — attachments not yet in storage will answer 503",
+    );
+  }
 }

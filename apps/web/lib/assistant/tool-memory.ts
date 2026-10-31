@@ -7,6 +7,24 @@ import { ToolExecutionStatus, type ToolResult } from "@repo/ai";
  * contains emailRef" — no separate table, no migration, and it naturally
  * follows the user switching emails mid-chat (newest write wins).
  */
+/**
+ * Files a findAttachments call returned, for the result card under the reply
+ * that follows it. Exactly what the model saw (names and senders already
+ * PII-masked) plus the ids the card links through the authorized bytes route —
+ * an id here grants nothing; the route re-checks ownership on every request.
+ */
+export interface AttachmentResultsRef {
+  files: Array<{
+    attachmentId: string;
+    filename: string;
+    mimeType: string;
+    sizeBytes: number;
+    threadId: string | null;
+    receivedAt: string | null;
+    sender: string;
+  }>;
+}
+
 export interface EmailRef {
   entityId: string;
   threadId?: string;
@@ -213,6 +231,23 @@ export function deriveToolMessageMetadata(
 
     const meetingSelection: MeetingSelectionRef = { threadId, meetings };
     return { meetingSelection, toolName };
+  }
+
+  if (toolName === "findAttachments") {
+    const data = result.data as { files?: AttachmentResultsRef["files"] } | undefined;
+    if (!data?.files?.length) return undefined;
+    const attachmentResults: AttachmentResultsRef = {
+      files: data.files.map((f) => ({
+        attachmentId: f.attachmentId,
+        filename: f.filename,
+        mimeType: f.mimeType,
+        sizeBytes: f.sizeBytes,
+        threadId: f.threadId,
+        receivedAt: f.receivedAt,
+        sender: f.sender,
+      })),
+    };
+    return { attachmentResults, toolName };
   }
 
   if (toolName !== "summarizeEmail") return undefined;

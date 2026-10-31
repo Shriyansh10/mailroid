@@ -1,5 +1,35 @@
 import { z } from "zod";
 
+/**
+ * MUST stay in sync with messageAttachmentSchema in
+ * packages/services/gmail/model.ts.
+ *
+ * Declared first because both output models below reference it — see the note
+ * on the services copy about module-load ordering.
+ */
+export const messageAttachmentOutputModel = z.object({
+  /** Our own attachment id — null when parsed live but not yet persisted. */
+  id: z.string().nullable(),
+  partId: z.string(),
+  filename: z.string(),
+  mimeType: z.string(),
+  sizeBytes: z.number(),
+  /** Bytes already in object storage — a thumbnail would cost no Gmail call. */
+  cached: z.boolean().optional(),
+});
+
+/**
+ * MUST stay in sync with inlineImageSchema in
+ * packages/services/gmail/model.ts.
+ *
+ * Separate from the attachment model on purpose — see the note there on why
+ * inline parts must not rejoin the chip list.
+ */
+export const inlineImageOutputModel = z.object({
+  contentId: z.string(),
+  id: z.string(),
+});
+
 // ── Thread list output ───────────────────────────────────────────────
 
 export const threadSummaryOutputModel = z.object({
@@ -31,6 +61,14 @@ export const threadSummaryOutputModel = z.object({
   category: z.string().optional(),
   /** Gmail draft resource id; DRAFT rows only. Required to reopen or send the draft. */
   draftId: z.string().optional(),
+  /**
+   * Attachment chips for the row. Absence carries no meaning here — the list
+   * path never parses a payload, so an un-hydrated thread simply has none to
+   * show and the row claims nothing either way.
+   */
+  attachments: z.array(messageAttachmentOutputModel).optional(),
+  /** Paperclip indicator for rows with no manifest yet. Only `true` renders. */
+  hasAttachment: z.boolean().nullable().optional(),
 });
 
 export const threadListOutputModel = z.object({
@@ -61,6 +99,20 @@ export const messageDetailOutputModel = z.object({
   isDraft: z.boolean().optional(),
   /** Gmail draft resource id, present only when isDraft is true — needed to edit/send it. */
   draftId: z.string().optional(),
+  /**
+   * Attachments, where null/absent means UNKNOWN rather than none — see the
+   * long note on messageDetailSchema in packages/services/gmail/model.ts.
+   * Omitting this field here would make `.output()` strip it silently and the
+   * chips would never render, with nothing failing to say why.
+   */
+  attachments: z.array(messageAttachmentOutputModel).nullable().optional(),
+  /**
+   * Inline images addressable by `cid:` from htmlBody. Same reason this is
+   * declared at all: an omitted field is stripped by `.output()` without
+   * error, and the symptom would be every inline image silently staying broken
+   * with nothing anywhere reporting a failure.
+   */
+  inlineImages: z.array(inlineImageOutputModel).optional(),
 });
 
 export const threadDetailOutputModel = z.object({

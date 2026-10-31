@@ -6,6 +6,7 @@ import type { ToolRegistry } from "../tools/registry.ts";
 import type { ToolResult } from "../tools/types.ts";
 import { AuditEventType } from "../tools/types.ts";
 import { toOpenAiToolDefs } from "../tools/convert.ts";
+import { toolErrorForModel } from "../tools/model-masking.ts";
 import { firewall } from "../security/policies.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import type OpenAI from "openai";
@@ -420,7 +421,7 @@ export async function runAgentLoop(
         const framedContent =
           safeResult.status === "success"
             ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
-            : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: safeResult.error ?? `Tool execution failed: ${safeResult.status}` })}\n</tool_error>`;
+            : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: toolErrorForModel(safeResult.error, `Tool execution failed: ${safeResult.status}`) })}\n</tool_error>`;
 
         const metadata = deriveToolMessageMetadata?.(toolName, args, result);
         resultMessages.push({ toolCallId: tc.id, content: framedContent, metadata });

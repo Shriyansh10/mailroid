@@ -17,6 +17,19 @@ import {
   upsertMessageMetadata,
 } from "./sync-metadata.ts";
 import { normalizeMessageId } from "./message-id.ts";
+import {
+  base64Lines,
+  decodeEncodedWords as decodeEncodedWordsImpl,
+  encodeFilenameParams,
+  encodeHeaderValue,
+  generateBoundary,
+  sanitizeFilename,
+  type OutgoingAttachment,
+} from "./mime.ts";
+import { validateOutgoingAttachments } from "./attachment-limits.ts";
+import { sendRawMessage } from "./send-raw.ts";
+import { forwardWithOriginalAttachments, forwardableParts } from "./forward-attachments.ts";
+import { enrichWithAttachments } from "./metadata.ts";
 import { withGmailRetry } from "./retry.ts";
 import { buildThreadFromDb } from "./thread-cache.ts";
 import {
@@ -28,6 +41,12 @@ import {
 } from "./quota-cooldown.ts";
 import { SyncPausedError } from "./pause.ts";
 import { clearThreadMeetingLookups } from "../calendar/guest-links.ts";
+// Imported from the leaf modules rather than ../attachments/index.ts on
+// purpose: the barrel re-exports gmail-fetch.ts, which imports ./retry.ts, and
+// routing that back through this file would create a cycle for no benefit.
+import { extractAttachments } from "../attachments/parse.ts";
+import type { AttachmentMeta } from "../attachments/types.ts";
+import { replaceAttachmentManifest, listThreadAttachments } from "../attachments/store.ts";
 import type {
   ThreadSummary,
   ThreadListResult,
@@ -53,6 +72,14 @@ export interface PayloadHeader {
 }
 
 export interface MessagePart {
+  /**
+   * Gmail's MIME part id. Gmail has always returned it; this type simply
+   * dropped it. It is the stable handle for a part — an attachment's
+   * `body.attachmentId` rotates, a part's position in the tree does not — so it
+   * is what the attachment manifest keys on and what a `cid:` reference
+   * resolves against.
+   */
+  partId?: string;
   mimeType?: string;
   filename?: string;
   body?: { data?: string; size?: number; attachmentId?: string };
@@ -60,23 +87,33 @@ export interface MessagePart {
   parts?: MessagePart[];
 }
 
-/** Counts parts that are attachments (Gmail: a non-empty filename). */
-function countAttachments(payload: MessagePart | undefined): number {
-  if (!payload) return 0;
-  let count = payload.filename ? 1 : 0;
-  if (payload.parts) {
-    for (const part of payload.parts) count += countAttachments(part);
-  }
-  return count;
-}
-
 /**
  * Extract a header value from payload.headers by name (case-insensitive).
+ */
+/**
+ * One header's value, with RFC 2047 encoded-words decoded.
+ *
+ * THE DECODE IS THE POINT, and it lives here rather than at the call sites
+ * because this is the universal header reader — every subject, sender name and
+ * recipient list in the product comes through it. Until it was added, a message
+ * whose subject contained an accent, an emoji, Devanagari or CJK rendered in the
+ * inbox as the literal `=?UTF-8?B?4KSo4KSu4KS44KWN4KSk4KWH?=`, because nothing
+ * anywhere in the codebase decoded encoded-words. That was not an attachment
+ * bug; it affected ordinary mail from ordinary senders.
+ *
+ * It is also the half that makes encoding on the SEND side safe: buildRawEmail
+ * now encodes non-ASCII subjects, and getDraft reads that subject straight back
+ * through this function. Without the decode, writing a draft with an accented
+ * subject and reopening it would show the author an encoded-word in their own
+ * compose box.
+ *
+ * Total by construction — a value with no `=?` is returned untouched, and a
+ * malformed encoded-word is left exactly as it arrived rather than throwing.
  */
 export function getHeader(headers: PayloadHeader[] | undefined, name: string): string {
   if (!headers) return "";
   const h = headers.find((h) => h.name?.toLowerCase() === name.toLowerCase());
-  return h?.value ?? "";
+  return decodeEncodedWordsImpl(h?.value ?? "");
 }
 
 /**
@@ -132,9 +169,50 @@ function extractHtml(payload: MessagePart | undefined): string {
   return "";
 }
 
+/**
+ * Is this part body content, or a document that merely happens to be text?
+ *
+ * Two exclusions, both of which produced a real misrendering:
+ *
+ *   - `message/*` — an attached `.eml` is an ENTIRE other email, with its own
+ *     text/plain and text/html parts. Descending into it is how a forwarded
+ *     message's body silently replaces the body of the mail carrying it. The
+ *     walk must never enter one.
+ *   - anything the sender marked `Content-Disposition: attachment`, and
+ *     anything delivered as a separate fetch (`body.attachmentId`). A body part
+ *     always arrives inline in `body.data`; a part with an attachmentId cannot
+ *     be a body no matter what its MIME type says.
+ *
+ * Deliberately does NOT exclude on `filename` alone. Some senders put a
+ * filename on the body part itself, and skipping those would lose the body of
+ * ordinary mail to guard against a rarer case — trading a common failure for an
+ * uncommon one.
+ */
+function isBodyCandidate(part: MessagePart): boolean {
+  if (part.mimeType?.startsWith("message/")) return false;
+  if ((part.body?.attachmentId ?? "").length > 0) return false;
+  const disposition = getHeader(part.headers, "Content-Disposition").toLowerCase().trim();
+  return !disposition.startsWith("attachment");
+}
+
+/**
+ * Find a usable body part of the given type, within the body subtree only.
+ *
+ * Two differences from the naive depth-first walk this replaces, and both were
+ * bugs rather than refinements:
+ *
+ *   1. It stays inside the body subtree — see isBodyCandidate.
+ *   2. It requires `body.data`, so the search CONTINUES past a part of the
+ *      right type that carries no content. The previous version returned the
+ *      first type match and left the caller to discover it was empty; the
+ *      caller's only move at that point was to give up, so a message whose
+ *      first text/html part was a stub rendered with no body at all rather than
+ *      falling through to the real one further along.
+ */
 function findPart(parts: MessagePart[], mimeType: string): MessagePart | undefined {
   for (const part of parts) {
-    if (part.mimeType === mimeType) return part;
+    if (!isBodyCandidate(part)) continue;
+    if (part.mimeType === mimeType && part.body?.data) return part;
     if (part.parts) {
       const found = findPart(part.parts, mimeType);
       if (found) return found;
@@ -154,6 +232,46 @@ function stripHtml(html: string): string {
 }
 
 /**
+ * Make one value safe to place after `Header-Name: `.
+ *
+ * A header value is a single line by definition, so a CR or LF inside one ends
+ * that header and begins another. That is the entire injection: a subject
+ * carrying "\r\nBcc: attacker@example.com" adds a recipient to a message the
+ * sender believes is going to one person, and it leaves no trace in the compose
+ * UI. Subjects and recipients reach buildRawEmail from AI-composed drafts as
+ * well as from typing, so "the user wouldn't type that" is not a control.
+ *
+ * Strips every C0 control and DEL rather than only CR and LF. A bare CR, a NUL
+ * or a vertical tab are things no legitimate header value contains, and an
+ * allowlist naming just the two characters that happen to be dangerous today is
+ * the kind of guard a later encoding change walks around without noticing.
+ *
+ * Non-ASCII is deliberately left ALONE. Encoding it (RFC 2047) is a correctness
+ * question rather than a security one, and it cannot ship on its own: nothing in
+ * this codebase decodes encoded-words, so encoding on write without a matching
+ * decoder on the read path would hand the user "=?UTF-8?B?...?=" when they
+ * reopened their own draft. It belongs with the multipart rewrite, which needs
+ * the same machinery for filenames.
+ */
+/**
+ * Decode RFC 2047 encoded-words in a header value.
+ *
+ * Applied in getHeader, so all of its readers benefit at once — see the note
+ * there.
+ */
+export { decodeEncodedWords } from "./mime.ts";
+
+export function sanitizeHeaderValue(value: string): string {
+  return Array.from(value)
+    .filter((ch) => {
+      const code = ch.codePointAt(0)!;
+      return code > 0x1f && code !== 0x7f;
+    })
+    .join("")
+    .trim();
+}
+
+/**
  * Build a base64url-encoded RFC 2822 email string for messages.send().
  *
  * `inReplyTo`/`references` are what make a reply thread correctly outside
@@ -168,28 +286,106 @@ function stripHtml(html: string): string {
  *
  * Every optional header is emitted only when non-empty — an empty `Cc:` line
  * is not the same thing as no Cc, and callers legitimately pass "" to mean
- * "no Cc at all" (see replyToEmail's override semantics).
+ * "no Cc at all" (see replyToEmail's override semantics). The emptiness test
+ * runs on the SANITIZED value, so a field holding nothing but control
+ * characters omits its header rather than emitting a blank one.
+ *
+ * The body is not sanitized and must not be: it lives after the blank line,
+ * where CRLF is ordinary text rather than a header boundary.
  */
 export function buildRawEmail(
   to: string,
   subject: string,
   body: string,
-  extra?: { cc?: string; bcc?: string; inReplyTo?: string; references?: string },
+  extra?: {
+    cc?: string;
+    bcc?: string;
+    inReplyTo?: string;
+    references?: string;
+    attachments?: OutgoingAttachment[];
+  },
 ): string {
-  const lines = [
-    `To: ${to}`,
-    extra?.cc ? `Cc: ${extra.cc}` : undefined,
-    extra?.bcc ? `Bcc: ${extra.bcc}` : undefined,
-    `Subject: ${subject}`,
-    extra?.inReplyTo ? `In-Reply-To: ${extra.inReplyTo}` : undefined,
-    extra?.references ? `References: ${extra.references}` : undefined,
-    `Content-Type: text/plain; charset="UTF-8"`,
-    `MIME-Version: 1.0`,
-    "",
-    body,
+  const cc = sanitizeHeaderValue(extra?.cc ?? "");
+  const bcc = sanitizeHeaderValue(extra?.bcc ?? "");
+  const inReplyTo = sanitizeHeaderValue(extra?.inReplyTo ?? "");
+  const references = sanitizeHeaderValue(extra?.references ?? "");
+  const attachments = extra?.attachments ?? [];
+
+  const headers = [
+    `To: ${sanitizeHeaderValue(to)}`,
+    cc ? `Cc: ${cc}` : undefined,
+    bcc ? `Bcc: ${bcc}` : undefined,
+    // RFC 2047 only on Subject. Encoding a structured header like To: would
+    // turn routable addresses into an opaque blob no MTA can parse — an
+    // encoded-word is legal in a phrase, not in an addr-spec.
+    `Subject: ${encodeHeaderValue(sanitizeHeaderValue(subject))}`,
+    inReplyTo ? `In-Reply-To: ${inReplyTo}` : undefined,
+    references ? `References: ${references}` : undefined,
   ].filter((line): line is string => line !== undefined);
-  const raw = lines.join("\r\n");
-  return Buffer.from(raw).toString("base64url");
+
+  // ── The text-only path is BYTE-IDENTICAL to what it has always been ──
+  //
+  // Not an optimisation. Every outbound message in this app — new mail, reply,
+  // reply-all, forward, both draft paths, and everything the assistant composes
+  // — flows through here, and the overwhelming majority carry no attachment.
+  // Routing those through a multipart builder to exercise one code path would
+  // put the entire product's send behaviour behind a rewrite whose blast radius
+  // nothing could bound. With this branch, a text-only regression is impossible
+  // by construction rather than by test coverage.
+  if (attachments.length === 0) {
+    const raw = [
+      ...headers,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      `MIME-Version: 1.0`,
+      "",
+      body,
+    ].join("\r\n");
+    return Buffer.from(raw).toString("base64url");
+  }
+
+  // ── multipart/mixed ──────────────────────────────────────────────
+  const boundary = generateBoundary();
+
+  const parts: string[] = [
+    [
+      ...headers,
+      `MIME-Version: 1.0`,
+      `Content-Type: multipart/mixed; boundary="${boundary}"`,
+      "",
+      // Shown by clients too old to understand multipart. Never seen otherwise.
+      "This is a message in MIME format.",
+      "",
+      `--${boundary}`,
+      `Content-Type: text/plain; charset="UTF-8"`,
+      // The body is base64-encoded here where the text-only path sends it as-is.
+      // Two reasons: an 8-bit body is not strictly legal in a 7-bit transport,
+      // and — the one that matters — an encoded body cannot contain the boundary
+      // string. A body that happens to contain the boundary truncates the
+      // message at that point, and the result sends successfully and arrives
+      // cut in half.
+      `Content-Transfer-Encoding: base64`,
+      "",
+      base64Lines(Buffer.from(body, "utf-8")),
+    ].join("\r\n"),
+  ];
+
+  for (const attachment of attachments) {
+    const filename = sanitizeFilename(attachment.filename);
+    parts.push(
+      [
+        `--${boundary}`,
+        `Content-Type: ${sanitizeHeaderValue(attachment.mimeType) || "application/octet-stream"}; name="${filename.replace(/[^\x20-\x7E]/g, "_").replace(/["\\]/g, "_")}"`,
+        `Content-Disposition: attachment; ${encodeFilenameParams(attachment.filename)}`,
+        `Content-Transfer-Encoding: base64`,
+        "",
+        base64Lines(attachment.content),
+      ].join("\r\n"),
+    );
+  }
+
+  parts.push(`--${boundary}--`, "");
+
+  return Buffer.from(parts.join("\r\n"), "utf-8").toString("base64url");
 }
 
 /** Pulls the bare address out of a "Display Name <addr@x.com>" header value. */
@@ -272,6 +468,19 @@ function transformThreadDetail(thread: Record<string, unknown>): ThreadDetail {
       htmlBody: extractHtml(payload),
       snippet: (msg.snippet as string) ?? "",
       isDraft: labelIds.includes("DRAFT"),
+      // Parsed from the payload we already hold. A live `format:"full"` read is
+      // authoritative about attachments, so this is the one path that can state
+      // "there are none" rather than "we don't know" — which is why the id is
+      // left null here and filled in by the caller from the persisted manifest.
+      attachments: extractAttachments(payload)
+        .filter((a) => !a.isInline)
+        .map((a) => ({
+          id: null,
+          partId: a.partId,
+          filename: a.filename,
+          mimeType: a.mimeType,
+          sizeBytes: a.sizeBytes,
+        })),
     };
   });
 
@@ -280,6 +489,84 @@ function transformThreadDetail(thread: Record<string, unknown>): ThreadDetail {
     subject: getHeader(firstHeaders, "Subject") || "(no subject)",
     messages: detailedMessages,
   };
+}
+
+/**
+ * Persist the attachment manifest for every message in a freshly-read thread,
+ * then stamp the stored ids onto the result.
+ *
+ * Opportunistic and non-fatal in both directions. The parse is free — we
+ * already hold the payload — but the DB write is not the point of the request,
+ * so a failure here downgrades the chips to id-less (visible, not downloadable)
+ * rather than failing a thread the user can otherwise read perfectly well.
+ */
+async function persistThreadAttachments(
+  tenantId: string,
+  threadId: string,
+  rawThread: Record<string, unknown>,
+  result: ThreadDetail,
+): Promise<void> {
+  try {
+    const rawMessages = (rawThread.messages ?? []) as Array<Record<string, unknown>>;
+
+    for (const msg of rawMessages) {
+      const messageId = (msg.id as string) ?? "";
+      if (!messageId) continue;
+      const parsed = extractAttachments(msg.payload as MessagePart | undefined);
+      // Inline parts are stored too — the chip row filters them, but `cid:`
+      // resolution needs them, and re-deriving later would need another fetch.
+      await replaceAttachmentManifest(tenantId, messageId, threadId, parsed);
+    }
+
+    const stored = await listThreadAttachments(tenantId, threadId);
+    const byKey = new Map(stored.map((row) => [`${row.gmailMessageId}:${row.partId}`, row]));
+
+    // Parsed vs. visible, separately. An attachment classified inline vanishes
+    // from the UI without trace — an empty list and "this mail has none" render
+    // identically — so the count that got filtered has to be visible somewhere
+    // other than the DOM. This line is what turns "the chips didn't appear"
+    // into a one-look diagnosis.
+    logger.info("[ATTACHMENTS] thread manifest persisted", {
+      tenantId,
+      threadId,
+      parsed: stored.length,
+      visible: stored.filter((row) => !row.isInline).length,
+      withIds: stored.length,
+    });
+
+    for (const message of result.messages) {
+      if (!message.attachments) continue;
+      for (const attachment of message.attachments) {
+        const row = byKey.get(`${message.id}:${attachment.partId}`);
+        attachment.id = row?.id ?? null;
+        attachment.cached = row ? row.cacheStorageKey !== null : false;
+      }
+    }
+
+    // Inline images, for `cid:` resolution in the HTML body. Built from the
+    // same `stored` read rather than a second query, and kept out of the chip
+    // array above — see inlineImageSchema for why that separation matters.
+    //
+    // Both fields must be present: a row with no Content-ID cannot be
+    // referenced, and one with no id has no URL to point at. Emitting a partial
+    // entry would push that decision into the renderer for no gain.
+    const inlineByMessage = new Map<string, Array<{ contentId: string; id: string }>>();
+    for (const row of stored) {
+      if (!row.isInline || !row.contentId || !row.id) continue;
+      const list = inlineByMessage.get(row.gmailMessageId) ?? [];
+      list.push({ contentId: row.contentId, id: row.id });
+      inlineByMessage.set(row.gmailMessageId, list);
+    }
+    for (const message of result.messages) {
+      message.inlineImages = inlineByMessage.get(message.id) ?? [];
+    }
+  } catch (err) {
+    logger.warn("[ATTACHMENTS] could not persist thread manifest", {
+      tenantId,
+      threadId,
+      error: String(err),
+    });
+  }
 }
 
 // ── Public API ───────────────────────────────────────────────────────
@@ -354,6 +641,11 @@ export async function getThreads(
     .filter((t): t is Record<string, unknown> => t !== undefined)
     .map((t) => extractThreadSummary(t));
 
+  // Step 3b: Attachment chips. This path fetches `format:"metadata"`, which has
+  // no payload, so they come from the stored manifest — same helper every other
+  // list surface uses, so a view can't quietly end up without them.
+  await enrichWithAttachments(tenantId, threads);
+
   logger.info("[SERVICE] getThreads completed", {
     tenantId, threadCount: threads.length,
     nextPageToken: result.nextPageToken ?? null,
@@ -403,6 +695,11 @@ export async function getThread(
     });
     result = transformThreadDetail(thread as unknown as Record<string, unknown>);
     result.source = "live";
+    // The full payload is in hand and would otherwise be discarded, so this
+    // costs no extra Gmail call. Persisting here is what gives the chips a
+    // usable id, and what lets a later metadata-only read of the same thread
+    // still know its attachments.
+    await persistThreadAttachments(tenantId, threadId, thread as unknown as Record<string, unknown>, result);
   } catch (err) {
     // Only when Gmail is genuinely unreachable — quota, 5xx, transport. A 401,
     // 403 or 404 is a real, actionable answer (revoked token, deleted thread),
@@ -494,7 +791,18 @@ export async function getThread(
  */
 export async function sendEmail(
   tenantId: string,
-  input: SendEmailInput
+  input: SendEmailInput,
+  /**
+   * Optional, and its absence is the common case by a wide margin.
+   *
+   * Passed as a third argument rather than added to SendEmailInput on purpose:
+   * that type is a zod schema on the tRPC boundary, which is JSON-only. Putting
+   * Buffers in it would either not typecheck or invite someone to base64 them
+   * into the JSON body — which is the unbounded-express.json() problem the
+   * multipart route exists to avoid. The tRPC caller keeps passing two
+   * arguments and is untouched.
+   */
+  attachments?: OutgoingAttachment[],
 ): Promise<SendEmailResult> {
   const startMs = Date.now();
   // `toHash`, not `to`, and a subject LENGTH rather than the subject: this line
@@ -504,19 +812,25 @@ export async function sendEmail(
     tenantId, toHash: hashMailboxList(input.to), subjectLength: input.subject?.length ?? 0,
     hasThreadId: !!input.threadId,
     hasCc: !!input.cc?.trim(), hasBcc: !!input.bcc?.trim(),
+    attachmentCount: attachments?.length ?? 0,
   });
   const tenant = corsair.withTenant(tenantId);
 
   const raw = buildRawEmail(input.to, input.subject, input.body, {
     cc: input.cc?.trim() || undefined,
     bcc: input.bcc?.trim() || undefined,
+    attachments,
   });
 
-  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
-    "messages.send",
-    () => tenant.gmail.api.messages.send({ raw, threadId: input.threadId }),
-    { tenantId, trigger: "send" },
-  );
+  // With attachments the MIME can reach 25 MB, and the plugin's send posts to
+  // the non-upload endpoint capped at 5 MB. Without them, nothing changes.
+  const result = attachments?.length
+    ? await sendRawMessage(tenantId, raw, { threadId: input.threadId })
+    : await withGmailRetry<{ id?: string; threadId?: string }>(
+        "messages.send",
+        () => tenant.gmail.api.messages.send({ raw, threadId: input.threadId }),
+        { tenantId, trigger: "send" },
+      );
 
   logger.info("[SERVICE] sendEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId,
@@ -651,9 +965,16 @@ export async function resolveReplyTarget(
 export async function replyToEmail(
   tenantId: string,
   input: ReplyToEmailInput,
+  /** See the note on sendEmail — kept off the zod input type deliberately. */
+  attachments?: OutgoingAttachment[],
 ): Promise<SendEmailResult> {
   const startMs = Date.now();
-  logger.info("[SERVICE] replyToEmail start", { tenantId, entityId: input.entityId, replyAll: input.replyAll });
+  logger.info("[SERVICE] replyToEmail start", {
+    tenantId,
+    entityId: input.entityId,
+    replyAll: input.replyAll,
+    attachmentCount: attachments?.length ?? 0,
+  });
 
   const target = await resolveReplyTarget(tenantId, input.entityId, input.replyAll, "send");
 
@@ -667,14 +988,17 @@ export async function replyToEmail(
     bcc: input.bcc?.trim() || undefined,
     inReplyTo: target.messageId || undefined,
     references: target.references || undefined,
+    attachments,
   });
 
   const tenant = corsair.withTenant(tenantId);
-  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
-    "messages.send",
-    () => tenant.gmail.api.messages.send({ raw, threadId: target.threadId || undefined }),
-    { tenantId, trigger: "send" },
-  );
+  const result = attachments?.length
+    ? await sendRawMessage(tenantId, raw, { threadId: target.threadId || undefined })
+    : await withGmailRetry<{ id?: string; threadId?: string }>(
+        "messages.send",
+        () => tenant.gmail.api.messages.send({ raw, threadId: target.threadId || undefined }),
+        { tenantId, trigger: "send" },
+      );
 
   logger.info("[SERVICE] replyToEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
@@ -699,7 +1023,11 @@ export async function previewReply(
 interface ResolvedForwardTarget {
   subject: string;
   quoted: string;
-  attachmentCount: number;
+  threadId: string | null;
+  /** Every part of the live payload, inline included — the manifest's source. */
+  parsedAttachments: AttachmentMeta[];
+  /** The non-inline ones: what the forward promises to carry. */
+  forwardable: AttachmentMeta[];
 }
 
 async function resolveForwardTarget(
@@ -722,7 +1050,11 @@ async function resolveForwardTarget(
   const date = getHeader(headers, "Date");
   const subject = getHeader(headers, "Subject");
   const bodyText = extractBody(payload) || (original.snippet as string) || "";
-  const attachmentCount = countAttachments(payload);
+  // The same parser and the same inline rule as countVisibleAttachments, so
+  // the approval card and the carry step cannot disagree about what "the
+  // original's attachments" are.
+  const parsedAttachments = extractAttachments(payload);
+  const forwardable = forwardableParts(parsedAttachments);
 
   const forwardSubject = /^fwd:/i.test(subject) ? subject : `Fwd: ${subject}`;
   const quoted = [
@@ -735,7 +1067,13 @@ async function resolveForwardTarget(
     bodyText,
   ].join("\n");
 
-  return { subject: forwardSubject, quoted, attachmentCount };
+  return {
+    subject: forwardSubject,
+    quoted,
+    threadId: (original.threadId as string | undefined) ?? null,
+    parsedAttachments,
+    forwardable,
+  };
 }
 
 /**
@@ -750,6 +1088,9 @@ async function resolveForwardTarget(
 export async function forwardEmail(
   tenantId: string,
   input: ForwardEmailInput,
+  /** Extra files the sender attached to the forward itself, on top of the
+   *  original's own parts, which are carried automatically below. */
+  attachments?: OutgoingAttachment[],
 ): Promise<SendEmailResult> {
   const startMs = Date.now();
   logger.info("[SERVICE] forwardEmail start", {
@@ -757,25 +1098,35 @@ export async function forwardEmail(
   });
 
   const target = await resolveForwardTarget(tenantId, input.entityId, "send");
-  // buildRawEmail is text/plain only — attachments are never carried over.
-  // Say so in the sent message itself, not just the approval preview, since
-  // the forward's recipient has no other way to know something was dropped.
-  const attachmentNote =
-    target.attachmentCount > 0
-      ? `\n\n[${target.attachmentCount} attachment${target.attachmentCount === 1 ? "" : "s"} on the original message could not be forwarded.]`
-      : "";
-  const composedBody = (input.note ? `${input.note}\n\n${target.quoted}` : target.quoted) + attachmentNote;
-  const raw = buildRawEmail(input.to, target.subject, composedBody, {
-    cc: input.cc?.trim() || undefined,
-    bcc: input.bcc?.trim() || undefined,
-  });
+  const composedBody = input.note ? `${input.note}\n\n${target.quoted}` : target.quoted;
 
-  const tenant = corsair.withTenant(tenantId);
-  const result = await withGmailRetry<{ id?: string; threadId?: string }>(
-    "messages.send",
-    () => tenant.gmail.api.messages.send({ raw }),
-    { tenantId, trigger: "send" },
-  );
+  // The original's files are carried, or nothing is sent — see
+  // forward-attachments.ts. Omitting them is the sender's explicit choice,
+  // never a fallback.
+  const result = await forwardWithOriginalAttachments(tenantId, {
+    original: {
+      gmailMessageId: input.entityId,
+      threadId: target.threadId,
+      parsed: target.parsedAttachments,
+    },
+    extra: attachments ?? [],
+    omitOriginalAttachments: input.omitOriginalAttachments === true,
+    send: async (allAttachments) => {
+      const raw = buildRawEmail(input.to, target.subject, composedBody, {
+        cc: input.cc?.trim() || undefined,
+        bcc: input.bcc?.trim() || undefined,
+        attachments: allAttachments,
+      });
+      const tenant = corsair.withTenant(tenantId);
+      return allAttachments.length
+        ? await sendRawMessage(tenantId, raw)
+        : await withGmailRetry<{ id?: string; threadId?: string }>(
+            "messages.send",
+            () => tenant.gmail.api.messages.send({ raw }),
+            { tenantId, trigger: "send" },
+          );
+    },
+  });
 
   logger.info("[SERVICE] forwardEmail completed", {
     tenantId, messageId: result.id, threadId: result.threadId, durationMs: Date.now() - startMs,
@@ -791,9 +1142,9 @@ export async function forwardEmail(
 export async function previewForward(
   tenantId: string,
   entityId: string,
-): Promise<{ subject: string; attachmentCount: number }> {
+): Promise<{ subject: string; attachmentNames: string[] }> {
   const target = await resolveForwardTarget(tenantId, entityId);
-  return { subject: target.subject, attachmentCount: target.attachmentCount };
+  return { subject: target.subject, attachmentNames: target.forwardable.map((a) => a.filename) };
 }
 
 // ── Mailbox write actions (Bin / Star) ───────────────────────────────
@@ -915,6 +1266,21 @@ export async function setThreadStarred(
  * metadata sync upserts `is_unread` straight from Gmail's labels (see
  * sync-metadata.ts), so a DB-only write would be silently reverted on the
  * next sync.
+ *
+ * THROUGH withGmailRetry, LIKE EVERY OTHER GMAIL CALL — and all four sibling
+ * setThread* functions below for the same reason. They each used to call
+ * `threads.modify` raw, which meant they were the only Gmail calls in the
+ * codebase that skipped `assertSyncAllowed`. The result was visible in one
+ * second of production log: `threads.get` correctly answering "call skipped,
+ * mailbox cooling down" while the `threads.modify` immediately after it went
+ * to Google and took a 429. Opening a thread during a cooldown therefore spent
+ * quota on a write that could not succeed, and — because the raw call also
+ * bypassed `recordQuotaError` — the cooldown never learned it had happened.
+ *
+ * On refusal this THROWS, and that is the deliberate choice over queueing the
+ * write to reconcile later: a queue would leave the UI showing a read state
+ * Gmail never accepted, which is the silent drift CLAUDE.md rules out. The
+ * caller surfaces it (see notifyWriteFailed in apps/web/hooks/api/gmail).
  */
 export async function setThreadRead(
   tenantId: string,
@@ -1273,7 +1639,7 @@ export async function searchEmails(
 ): Promise<ThreadListResult> {
   const startMs = Date.now();
   logger.info("[SERVICE] searchEmails start", {
-    tenantId, query, maxResults: opts?.maxResults, pageToken: opts?.pageToken,
+    tenantId, queryLength: query.length, maxResults: opts?.maxResults, pageToken: opts?.pageToken,
   });
 
   const tenant = corsair.withTenant(tenantId);
@@ -1298,7 +1664,7 @@ export async function searchEmails(
     { tenantId, trigger: "ui" },
   );
   logger.info("[GMAIL] threads.list (searchEmails)", {
-    tenantId, query: searchQuery,
+    tenantId, queryLength: searchQuery.length,
     threadCount: (result.threads ?? []).length,
     nextPageToken: result.nextPageToken ?? null,
     gmailDurationMs: Date.now() - gmailStart,
@@ -1324,7 +1690,7 @@ export async function searchEmails(
     ),
   );
   logger.info("[GMAIL] threads.get batch (searchEmails)", {
-    tenantId, query, threadCount: detailed.length,
+    tenantId, queryLength: query.length, threadCount: detailed.length,
     durationMs: Date.now() - gmailStart,
   });
 
@@ -1336,8 +1702,13 @@ export async function searchEmails(
     .filter((t): t is Record<string, unknown> => t !== undefined)
     .map((t) => extractThreadSummary(t));
 
+  // The same chips every other list surface shows — one indexed query keyed by
+  // threadId, metadata only. No paperclip here: these rows come from Gmail with
+  // no entityId, so the per-message has_attachment flag is not to hand.
+  await enrichWithAttachments(tenantId, threads);
+
   logger.info("[SERVICE] searchEmails completed", {
-    tenantId, query, threadCount: threads.length,
+    tenantId, queryLength: query.length, threadCount: threads.length,
     nextPageToken: result.nextPageToken ?? null,
     totalDurationMs: Date.now() - startMs,
   });
@@ -1621,6 +1992,29 @@ export async function ingestMessage(
       });
   }
 
+  // 2b. Attachment manifest. The payload is already in hand from the
+  // `format:"full"` fetch above and is otherwise discarded, so this adds no
+  // Gmail call and no quota cost. Metadata only — no bytes are downloaded here
+  // or anywhere in the sync path.
+  //
+  // Awaited rather than fire-and-forget so a hydrated message is never reported
+  // as hydrated while its manifest is still missing; caught, because an
+  // attachment manifest is not worth failing an ingest whose mail body,
+  // metadata and embeddings all landed correctly.
+  try {
+    // Also records, in the same transaction, the exact has_attachment answer
+    // (non-inline parts only, so a signature logo is not an attachment) and
+    // the attachment_manifest_at stamp the manifest backfill reads.
+    const parsed = extractAttachments(payload);
+    await replaceAttachmentManifest(tenantId, messageId, threadId || null, parsed);
+  } catch (err) {
+    logger.warn("[ATTACHMENTS] manifest write failed during ingest", {
+      tenantId,
+      messageId,
+      error: String(err),
+    });
+  }
+
   // 3. Trigger embeddings asynchronously (fire-and-forget)
   if (triggerEmbeddings) {
     void generateMissingEmbeddings(tenantId).catch((err) => {
@@ -1799,15 +2193,15 @@ export async function searchLocalEmails(
       raw = dedupeThreads(await searchByEmbedding(userId, effectiveQuery, 20, withinDays));
       if (raw.length === 0) {
         logger.info(
-          `[search] ⚠️ Vector search returned 0 results — falling back to ILIKE for "${effectiveQuery}"`,
-          { userId, query: effectiveQuery },
+          "[search] ⚠️ Vector search returned 0 results — falling back to ILIKE",
+          { userId, queryLength: effectiveQuery.length },
         );
         raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
       }
     } catch (err) {
       logger.warn(
-        `[search] ❌ Vector search failed — falling back to ILIKE for "${effectiveQuery}"`,
-        { userId, query: effectiveQuery, err },
+        "[search] ❌ Vector search failed — falling back to ILIKE",
+        { userId, queryLength: effectiveQuery.length, err },
       );
       raw = (await searchByText(userId, effectiveQuery, withinDays)).threads;
     }
@@ -1829,6 +2223,10 @@ export async function searchLocalEmails(
 
   if (!applyAssistantRules) {
     // Raw UI search: full results (minus Sent), no blocklist/partition/cap.
+    // Chips as on every other list surface. UI only: the assistant's tool maps
+    // its own fields, and what Dobbie learns about attachments is decided
+    // there, not by whatever this row happens to carry.
+    await enrichWithAttachments(userId, withoutSent);
     return { threads: withoutSent, total: withoutSent.length };
   }
 
@@ -1882,7 +2280,13 @@ async function finalizeSearch(
   };
 }
 
-/** Batch-load each row's Gmail category from message_metadata (keyed by entityId). */
+/**
+ * Batch-load each row's Gmail category and has_attachment flag from
+ * message_metadata (keyed by entityId).
+ *
+ * has_attachment is carried tri-state — null stays null ("nobody has looked"),
+ * never coerced to false — because the row's paperclip renders only on `true`.
+ */
 async function enrichCategories(
   userId: string,
   threads: ThreadSummary[],
@@ -1891,15 +2295,23 @@ async function enrichCategories(
   if (ids.length === 0) return threads;
 
   const rows = await db
-    .select({ entityId: messageMetadata.entityId, category: messageMetadata.category })
+    .select({
+      entityId: messageMetadata.entityId,
+      category: messageMetadata.category,
+      hasAttachment: messageMetadata.hasAttachment,
+    })
     .from(messageMetadata)
     .where(and(eq(messageMetadata.userId, userId), inArray(messageMetadata.entityId, ids)));
 
-  const catById = new Map(rows.map((r) => [r.entityId, r.category]));
-  return threads.map((t) => ({
-    ...t,
-    category: (t.entityId ? catById.get(t.entityId) : undefined) ?? t.category ?? undefined,
-  }));
+  const byId = new Map(rows.map((r) => [r.entityId, r]));
+  return threads.map((t) => {
+    const row = t.entityId ? byId.get(t.entityId) : undefined;
+    return {
+      ...t,
+      category: row?.category ?? t.category ?? undefined,
+      hasAttachment: row ? row.hasAttachment : (t.hasAttachment ?? null),
+    };
+  });
 }
 
 /** Recent mail within the window, newest first — the "summarize my inbox" source. */
@@ -2026,16 +2438,16 @@ async function searchBySender(
       );
 
       logger.info(
-        `[search] ✅ Sender+topic search — ${threads.length} results for sender "${sender}", topic "${meaningfulQuery}"`,
-        { userId, sender, query: meaningfulQuery, count: threads.length, durationMs: Date.now() - startMs },
+        "[search] ✅ Sender+topic search",
+        { userId, queryLength: meaningfulQuery.length, count: threads.length, durationMs: Date.now() - startMs },
       );
       if (threads.length > 0) return { threads, total: threads.length };
       // No topic-ranked matches for this sender — fall through to a plain
       // recency listing of everything from them, rather than returning empty.
     } catch (err) {
       logger.warn(
-        `[search] ❌ Sender+topic vector search failed — falling back to recency for sender "${sender}"`,
-        { userId, sender, query: meaningfulQuery, err },
+        "[search] ❌ Sender+topic vector search failed — falling back to recency",
+        { userId, queryLength: meaningfulQuery.length, err },
       );
       // fall through to recency listing below
     }
@@ -2070,8 +2482,8 @@ async function searchBySender(
   );
 
   logger.info(
-    `[search] ✅ Sender search (recency) — ${threads.length} results for sender "${sender}"`,
-    { userId, sender, count: threads.length },
+    "[search] ✅ Sender search (recency)",
+    { userId, count: threads.length },
   );
   return { threads, total: threads.length };
 }
@@ -2088,7 +2500,7 @@ async function searchByEmbedding(
   withinDays?: number,
 ): Promise<ThreadSummary[]> {
   const startMs = Date.now();
-  logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, query, limit });
+  logger.debug("[SEARCH] searchByEmbedding (pgvector)", { userId, queryLength: query.length, limit });
 
   const queryVector = await embedSearchQuery(query);
   const vectorLiteral = `[${queryVector.join(",")}]`;
@@ -2126,7 +2538,7 @@ async function searchByEmbedding(
     score: Math.max(0, Math.min(1, 1 - Number(r.distance))),
   }));
 
-  logger.debug("[SEARCH] searchByEmbedding result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
+  logger.debug("[SEARCH] searchByEmbedding result", { userId, queryLength: query.length, resultCount: threads.length, durationMs: Date.now() - startMs });
   return threads;
 }
 
@@ -2140,7 +2552,7 @@ async function searchByText(
   withinDays?: number,
 ): Promise<LocalSearchResult> {
   const startMs = Date.now();
-  logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, query });
+  logger.debug("[SEARCH] searchByText (ILIKE fallback)", { userId, queryLength: query.length });
 
   const pattern = `%${query}%`;
   const cutoff = windowCutoff(withinDays);
@@ -2180,7 +2592,7 @@ async function searchByText(
     })),
   );
 
-  logger.info("[SEARCH] searchByText (ILIKE) result", { userId, query, resultCount: threads.length, durationMs: Date.now() - startMs });
+  logger.info("[SEARCH] searchByText (ILIKE) result", { userId, queryLength: query.length, resultCount: threads.length, durationMs: Date.now() - startMs });
   return { threads, total: threads.length };
 }
 
