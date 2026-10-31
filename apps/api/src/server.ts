@@ -36,6 +36,7 @@ import { gmailSyncFailuresRetry, gmailSyncFailuresSweep } from "@repo/services/g
 import { adminJobWorker } from "@repo/services/admin-jobs/job-worker.js";
 import { calendarWatchCron } from "@repo/services/calendar/watch-cron.js";
 import { attachmentCacheEvictionCron } from "@repo/services/attachments/eviction-cron.js";
+import { accountDeletionDetectorCron } from "@repo/services/account-deletion/detector-cron.js";
 import {
   attachmentManifestBackfill,
   attachmentManifestSweep,
@@ -334,6 +335,7 @@ app.use(
     functions: [
       gmailWatchCron,
       calendarWatchCron,
+      accountDeletionDetectorCron,
       emailPriority,
       gmailInitialSync,
       classificationBatch,

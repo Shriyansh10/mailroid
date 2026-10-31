@@ -1,4 +1,4 @@
-import { pgTable, text, jsonb, timestamp, date, uuid } from "drizzle-orm/pg-core";
+import { pgTable, text, jsonb, timestamp, date, uuid, index } from "drizzle-orm/pg-core";
 
 export const dailyBriefs = pgTable("daily_briefs", {
   id: uuid("id").primaryKey().defaultRandom(),
@@ -24,4 +24,7 @@ export const dailyBriefs = pgTable("daily_briefs", {
   
   rawResponse: text("raw_response").notNull(),
   rawPrompt: text("raw_prompt").notNull(),
-});
+}, (t) => [
+  // Account deletion purges and verifies by user.
+  index("idx_daily_briefs_user").on(t.userId),
+]);

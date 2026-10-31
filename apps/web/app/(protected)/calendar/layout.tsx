@@ -8,8 +8,7 @@ import {
   LogOutIcon, PencilIcon, CalendarDaysIcon, 
   BotIcon, SparklesIcon, InboxIcon, SendIcon,
   KeyboardIcon, PaletteIcon, CalendarClockIcon,
-  LayoutTemplateIcon, PlugIcon
-} from "lucide-react";
+  LayoutTemplateIcon, PlugIcon, UserCogIcon } from "lucide-react";
 import { 
   DropdownMenu, DropdownMenuContent, DropdownMenuItem, 
   DropdownMenuLabel, DropdownMenuSeparator, DropdownMenuTrigger 
@@ -194,6 +193,10 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
               <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/connections")}>
                 <PlugIcon className="mr-2 h-4 w-4" />
                 <span>Connected Services</span>
+              </DropdownMenuItem>
+              <DropdownMenuItem className="cursor-pointer" onClick={() => router.push("/settings/account")}>
+                <UserCogIcon className="mr-2 h-4 w-4" />
+                <span>Account</span>
               </DropdownMenuItem>
               <DropdownMenuSeparator />
               <DropdownMenuItem className="cursor-pointer text-red-600 focus:text-red-600" onClick={handleLogout}>

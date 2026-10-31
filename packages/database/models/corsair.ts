@@ -1,4 +1,4 @@
-import { pgTable, text, jsonb, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, jsonb, timestamp, index } from "drizzle-orm/pg-core";
 
 export const corsairIntegrations = pgTable("corsair_integrations", {
   id: text("id").primaryKey(),
@@ -19,7 +19,10 @@ export const corsairAccounts = pgTable("corsair_accounts", {
     .references(() => corsairIntegrations.id),
   config: jsonb("config").notNull().default({}),
   dek: text("dek"),
-});
+}, (t) => [
+  // Purge, verify and the fence trigger resolve tenants through this column.
+  index("idx_corsair_accounts_tenant").on(t.tenantId),
+]);
 
 export const corsairEntities = pgTable("corsair_entities", {
   id: text("id").primaryKey(),
@@ -32,7 +35,7 @@ export const corsairEntities = pgTable("corsair_entities", {
   entityType: text("entity_type").notNull(),
   version: text("version").notNull(),
   data: jsonb("data").notNull().default({}),
-});
+}, (t) => [index("idx_corsair_entities_account").on(t.accountId)]);
 
 export const corsairEvents = pgTable("corsair_events", {
   id: text("id").primaryKey(),
@@ -44,4 +47,4 @@ export const corsairEvents = pgTable("corsair_events", {
   eventType: text("event_type").notNull(),
   payload: jsonb("payload").notNull().default({}),
   status: text("status"),
-});
+}, (t) => [index("idx_corsair_events_account").on(t.accountId)]);

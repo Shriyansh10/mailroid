@@ -1,5 +1,6 @@
 import type { ToolRegistry, ToolExecutionContext } from "@repo/ai";
 import { OrganizationMetricsExecutor } from "./organization";
+import { accountDeletionStatus } from "./account-deletion";
 import type { CommunicationMetricsInput } from "./organization";
 import {
   CorsairSearchEmailsExecutor,
@@ -309,6 +310,17 @@ export function registerProductionExecutors(registry: ToolRegistry): void {
     console.log("[registerProductionExecutors] ✅ getCommunicationMetrics replaced with scope-checked executor");
   } else {
     console.warn("[registerProductionExecutors] ⚠️ getCommunicationMetrics NOT found in registry — mock still active");
+  }
+
+  // Read-only: the caller's own deletion request, never anyone else's.
+  const deletionStatusDef = registry.get("getAccountDeletionStatus");
+  if (deletionStatusDef) {
+    registry.register({
+      ...deletionStatusDef,
+      execute: (_args, ctx) => accountDeletionStatus(ctx as ToolExecutionContext),
+    });
+  } else {
+    console.warn("[registerProductionExecutors] ⚠️ getAccountDeletionStatus NOT found in registry — mock still active");
   }
 
   // Replace findAttachments with the metadata-only, user-scoped executor
