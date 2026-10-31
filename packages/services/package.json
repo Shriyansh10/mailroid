@@ -215,6 +215,6 @@
   },
   "scripts": {
     "test": "node --import tsx --test *.test.ts attachments/*.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts organization/*.test.ts account-deletion/*.test.ts",
-    "test:deletion-pg": "node --import tsx --test --test-concurrency=1 account-deletion/service.postgres.test.ts account-deletion/retention.postgres.test.ts"
+    "test:deletion-pg": "node --import tsx --test --test-concurrency=1 account-deletion/service.postgres.test.ts account-deletion/retention.postgres.test.ts account-deletion/signin.postgres.test.ts"
   }
 }

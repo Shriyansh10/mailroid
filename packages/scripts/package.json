@@ -6,6 +6,7 @@
   "scripts": {
     "start": "dotenv -e ../../.env -- tsx src/cli.ts",
     "check-types": "tsc --noEmit",
+    "test": "node --import tsx --test src/lib/prod-env.test.ts",
     "lint": "eslint src/*"
   },
   "devDependencies": {

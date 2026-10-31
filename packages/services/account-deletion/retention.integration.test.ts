@@ -40,6 +40,7 @@ let svc: typeof import("./service.ts");
 let ret: typeof import("./retention.ts");
 let members: typeof import("../organization/members.ts");
 let suppression: typeof import("@repo/database/deletion-suppression");
+let fence: typeof import("@repo/database/tenant-fence");
 let dbmod: typeof import("@repo/database");
 
 const store: DeletionObjectStore = {
@@ -120,6 +121,7 @@ before(async () => {
   ret = await import("./retention.ts");
   members = await import("../organization/members.ts");
   suppression = await import("@repo/database/deletion-suppression");
+  fence = await import("@repo/database/tenant-fence");
 
   // The organization, built through the real org service so its audit rows are real.
   await q(`INSERT INTO organization (id, name) VALUES ($1, 'Acme')`, [ORG]);
@@ -580,7 +582,7 @@ test("a failure while minimising rolls back to PURGE_FAILED, and retry completes
 
 // ── AWAITING_SEAL: database purged, storage not yet proven empty ──────
 
-test("AWAITING_SEAL: no marker yet; a sign-in creates a fresh, empty, unflagged account; completion writes the marker", async () => {
+test("AWAITING_SEAL: no marker yet, and sign-up is refused; completion writes the marker, then a sign-up is fresh and flagged", async () => {
   const sub = await svc.submitDeletionRequest({ userId: "u-seal", kind: "DEPARTURE", reason: "leaving" });
   await svc.fenceAccount({ id: sub.id, actor: dev(), confirmEmail: "seal@x.test", orgConfirmed: false, lastOwnerChoices: {} }, deps);
   clock = new Date(clock.getTime() + 13 * 60 * 60 * 1000);
@@ -591,16 +593,23 @@ test("AWAITING_SEAL: no marker yet; a sign-in creates a fresh, empty, unflagged 
   assert.equal(res.request.status, "AWAITING_SEAL", res.request.lastError ?? "");
   assert.equal(await n(`SELECT count(*)::int AS n FROM deletion_suppression WHERE request_id = $1`, [sub.id]), 0, "a marker means COMPLETED; this isn't");
 
-  // The person signs in with Google meanwhile. Better Auth finds no user, so it makes a new one.
-  assert.equal(await signUp("u-seal-new", "seal@x.test", "google", "sub-seal"), 0, "nothing to match yet: not flagged");
-  assert.equal(await svc.isTenantFenced("u-seal-new"), false);
-  for (const t of ["emails", "user_settings", "session"]) assert.equal(await n(`SELECT count(*)::int AS n FROM "${t}" WHERE user_id = 'u-seal-new'`), 0, t);
+  // The person signs in with Google meanwhile. Better Auth's user.create.before
+  // hook asks this, and refuses: no user, account or session is created (the
+  // full callback is exercised in signin.postgres.test.ts).
+  assert.equal(await fence.isDeletionUnsealed("seal@x.test"), true, "sign-up refused while not sealed");
+  assert.equal(await fence.isDeletionUnsealed("SEAL@x.test "), true, "matched on the normalised address");
+  assert.equal(await fence.isDeletionUnsealed("other@x.test"), false, "nobody else is affected");
   assert.equal(await svc.isTenantFenced("u-seal"), true, "the old id stays fenced");
 
   // Storage verifies later: the deletion completes and only now writes its marker.
   const done = await svc.verifyStorage({ id: sub.id, actor: dev() }, deps);
   assert.equal(done.request.status, "COMPLETED", done.request.lastError ?? "");
   assert.equal(await n(`SELECT count(*)::int AS n FROM deletion_suppression WHERE request_id = $1`, [sub.id]), 1);
-  // The account created in between is not flagged retroactively.
-  assert.equal(await reviewOf("u-seal-new"), undefined);
+  assert.equal(await fence.isDeletionUnsealed("seal@x.test"), false, "COMPLETED: sign-up allowed again");
+
+  // A sign-up now is a fresh, empty account, flagged for review.
+  assert.equal(await signUp("u-seal-new", "seal@x.test", "google", "sub-seal"), 1, "flagged");
+  assert.equal(await svc.isTenantFenced("u-seal-new"), false);
+  for (const t of ["emails", "user_settings", "session"]) assert.equal(await n(`SELECT count(*)::int AS n FROM "${t}" WHERE user_id = 'u-seal-new'`), 0, t);
+  assert.ok(await reviewOf("u-seal-new"));
 });

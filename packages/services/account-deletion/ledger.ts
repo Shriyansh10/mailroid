@@ -8,11 +8,13 @@
  * fence time and again at completion. `account:ledger-reconcile` reads it back
  * and lists every ledgered user the database has resurrected.
  *
- * LOCATION IS PENDING (Phase 0 step 9). It needs `DELETION_LEDGER_PREFIX`, a
- * key prefix in the object storage bucket that is NOT under any attachments
- * prefix (so a user purge can never delete it) and ideally with versioning on.
- * Until that is set, writes fail — loudly, as a FAILED fence step — and are
- * never reported as written.
+ * DEFERRED BY OWNER DECISION (2026-10-31). No ledger is configured anywhere,
+ * on purpose: see LEDGER_DEFERRAL. While `DELETION_LEDGER_PREFIX` is unset the
+ * fence step records DEFERRED_BY_OWNER — never DONE — and nothing claims the
+ * restore protection exists. Setting the prefix turns the ledger on: it needs
+ * a key prefix that is NOT under any attachments prefix (so a user purge can
+ * never delete it), ideally in a bucket with versioning on. A prefix that is
+ * set but wrong still FAILS, loudly.
  *
  * Contents: ids, hashes and timestamps. No email address, no mail content.
  */
@@ -34,9 +36,47 @@ export interface DeletionLedger {
 }
 
 export class LedgerNotConfiguredError extends Error {
-  constructor(detail: string) {
-    super(`Deletion ledger not configured (Phase 0 step 9 pending): ${detail}`);
+  /**
+   * True when no ledger was asked for at all (no prefix). False when one was
+   * asked for and the configuration is wrong — that is a failure, never a deferral.
+   */
+  readonly unset: boolean;
+  constructor(detail: string, unset = false) {
+    super(`Deletion ledger not configured: ${detail}`);
     this.name = "LedgerNotConfiguredError";
+    this.unset = unset;
+  }
+}
+
+/**
+ * The owner's decision not to run the ledger yet. Read by the fence step, the
+ * completion and the cancel, so that each records the deferral in so many
+ * words instead of a failure (which would push every deletion towards
+ * `--accept-unresolved=writeLedger`) or a success (which would claim a
+ * protection that does not exist).
+ *
+ * Revisit when a backup/restore workflow is introduced: until then a restore
+ * is a manual act, and the runbook says to check it against the completed
+ * requests by hand.
+ */
+export const LEDGER_DEFERRAL = {
+  deferred: true,
+  decidedOn: "2026-10-31",
+  limitation:
+    "No off-database ledger: restoring a database backup taken before this deletion would bring the account back, and nothing would detect it. Check completed requests by hand after any restore.",
+  revisit: "when a backup/restore workflow is introduced",
+} as const;
+
+/**
+ * The ledger, or "DEFERRED" when the owner has deferred it and none is
+ * configured. A ledger that is configured but wrong still throws.
+ */
+export function ledgerOrDeferral(resolve: () => DeletionLedger): DeletionLedger | "DEFERRED" {
+  try {
+    return resolve();
+  } catch (err) {
+    if (LEDGER_DEFERRAL.deferred && err instanceof LedgerNotConfiguredError && err.unset) return "DEFERRED";
+    throw err;
   }
 }
 
@@ -45,7 +85,7 @@ const PREFIX_PATTERN = /^[a-z0-9][a-z0-9-]*(\/[a-z0-9][a-z0-9-]*)*$/;
 /** Throws LedgerNotConfiguredError naming what is missing. */
 export function resolveLedger(env: NodeJS.ProcessEnv = process.env): DeletionLedger {
   const prefix = env.DELETION_LEDGER_PREFIX;
-  if (!prefix) throw new LedgerNotConfiguredError("DELETION_LEDGER_PREFIX is not set");
+  if (!prefix?.trim()) throw new LedgerNotConfiguredError("DELETION_LEDGER_PREFIX is not set", true);
   if (!PREFIX_PATTERN.test(prefix)) throw new LedgerNotConfiguredError(`DELETION_LEDGER_PREFIX "${prefix}" is not a valid prefix`);
   if (prefix.includes("attachments")) {
     throw new LedgerNotConfiguredError("DELETION_LEDGER_PREFIX must not sit under an attachments prefix");

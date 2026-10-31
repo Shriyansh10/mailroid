@@ -11,6 +11,9 @@ node_modules
 .env.development.local
 .env.test.local
 .env.production.local
+# Production secrets for `pnpm admin:prod` (through the SSH tunnel). The
+# wrapper refuses to read this file unless git ignores it.
+.env.production
 # Backups of .env made while switching credentials — these hold real secrets
 # and the bare `.env` rule above does not match them.
 .env.bak*

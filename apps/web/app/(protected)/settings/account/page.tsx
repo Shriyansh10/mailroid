@@ -87,6 +87,12 @@ export default function AccountSettingsPage() {
                   Requested {new Date(mine.data!.requestedAt).toLocaleString()}
                 </p>
                 {mine.data!.status === "SUBMITTED" && (
+                  <p className="text-xs text-muted-foreground">
+                    Nothing has been deleted. Your account works as usual until the team acts on the request, and you can
+                    withdraw it until then.
+                  </p>
+                )}
+                {mine.data!.status === "SUBMITTED" && (
                   <Button
                     variant="outline"
                     className="self-start"
@@ -132,6 +138,11 @@ export default function AccountSettingsPage() {
                   {request.isPending && <Loader2Icon className="size-4 animate-spin" />}
                   Request account deletion
                 </Button>
+                <p className="text-xs text-muted-foreground">
+                  This sends a request; it doesn&apos;t delete anything. Your account keeps working while the team reviews
+                  it, and you can withdraw it until they act on it. Once deletion starts you are signed out and can&apos;t
+                  sign back in.
+                </p>
               </form>
             )}
           </CardContent>

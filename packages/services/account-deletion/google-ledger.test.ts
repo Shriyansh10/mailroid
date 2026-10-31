@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { revokeGoogleToken, stopCalendarChannelStrict } from "./google.ts";
-import { LedgerNotConfiguredError, reconcileLedger, resolveLedger, type LedgerEntry } from "./ledger.ts";
+import { LEDGER_DEFERRAL, LedgerNotConfiguredError, ledgerOrDeferral, reconcileLedger, resolveLedger, type LedgerEntry } from "./ledger.ts";
 
 const respond = (status: number, body = "") => async () => new Response(body || null, { status });
 
@@ -36,6 +36,15 @@ test("an unconfigured ledger refuses loudly, naming what's missing", () => {
   assert.throws(() => resolveLedger({}), LedgerNotConfiguredError);
   assert.throws(() => resolveLedger({ DELETION_LEDGER_PREFIX: "dev/attachments/x" }), /attachments/);
   assert.throws(() => resolveLedger({ DELETION_LEDGER_PREFIX: "deletion-ledger" }), /OBJECT_STORAGE_ENDPOINT/);
+});
+
+test("deferral applies only when no ledger was asked for; a wrong one still throws", () => {
+  assert.equal(LEDGER_DEFERRAL.deferred, true);
+  assert.equal(ledgerOrDeferral(() => resolveLedger({})), "DEFERRED");
+  assert.equal(ledgerOrDeferral(() => resolveLedger({ DELETION_LEDGER_PREFIX: "  " })), "DEFERRED");
+  assert.throws(() => ledgerOrDeferral(() => resolveLedger({ DELETION_LEDGER_PREFIX: "dev/attachments/x" })), /attachments/);
+  assert.throws(() => ledgerOrDeferral(() => resolveLedger({ DELETION_LEDGER_PREFIX: "deletion-ledger" })), /OBJECT_STORAGE_ENDPOINT/);
+  assert.throws(() => ledgerOrDeferral(() => { throw new Error("outage"); }), /outage/);
 });
 
 const e = (requestId: string, userId: string, event: LedgerEntry["event"]): LedgerEntry => ({

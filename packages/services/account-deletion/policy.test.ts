@@ -173,6 +173,13 @@ test("an unconfigured ledger is unresolved, never silently done", () => {
   assert.deepEqual(unresolvedSteps(steps), ["writeLedger"]);
 });
 
+test("a ledger deferred by the owner resolves the step without being DONE", () => {
+  const steps = { ...allDone(), writeLedger: { status: "DEFERRED_BY_OWNER" as const, attempts: 1, at: "2026-10-31T00:00:00Z" } };
+  assert.deepEqual(unresolvedSteps(steps), []);
+  const v = deleteVerdict({ ...base, steps, now: new Date("2027-01-01") });
+  assert.equal(v.ok, true, "no --accept-unresolved needed");
+});
+
 test("PENDING steps count as unresolved", () => {
   const steps = { ...allDone(), releaseConnections: { status: "PENDING" as const, attempts: 1, at: null } };
   assert.deepEqual(unresolvedSteps(steps), ["releaseConnections"]);
