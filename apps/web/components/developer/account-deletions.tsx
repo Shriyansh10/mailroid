@@ -34,6 +34,7 @@ const STEP_TONE: Record<string, string> = {
   DONE: "text-emerald-600",
   SKIPPED: "text-muted-foreground",
   ACCEPTED_UNRESOLVED: "text-amber-600",
+  DEFERRED_BY_OWNER: "text-amber-600",
   PENDING: "text-amber-600",
   FAILED: "text-red-600",
 };
@@ -248,6 +249,12 @@ function RequestDetail({ id }: { id: string }) {
             </div>
           ))}
         </div>
+      )}
+      {r.steps.writeLedger?.status === "DEFERRED_BY_OWNER" && (
+        <p className="text-xs text-amber-600">
+          Ledger deferred by owner decision: no off-database record of this deletion is kept. Restoring a database backup taken
+          before it would bring the account back, and nothing would detect it.
+        </p>
       )}
 
       <div className="flex flex-wrap gap-2">

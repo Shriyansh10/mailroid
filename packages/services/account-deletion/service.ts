@@ -71,7 +71,7 @@ import {
 } from "./purge-db.ts";
 import { purgeUserObjects, resolveDeletionStore, scanUserPrefix, scanVerifies, type DeletionObjectStore } from "./storage.ts";
 import { freshAccessToken, revokeGoogleToken, stopCalendarChannelStrict } from "./google.ts";
-import { resolveLedger, type DeletionLedger } from "./ledger.ts";
+import { LEDGER_DEFERRAL, ledgerOrDeferral, resolveLedger, type DeletionLedger } from "./ledger.ts";
 import { drainWriters } from "./drain.ts";
 
 // ── Types ─────────────────────────────────────────────────────────────
@@ -511,7 +511,12 @@ const FENCE_STEP_IMPL: Record<FenceStep, (row: DeletionRequestRow, deps: Deletio
   },
 
   async writeLedger(row, deps) {
-    const ledger = deps.ledger(); // throws LedgerNotConfiguredError → FAILED with the reason
+    // Unset and deferred by the owner → DEFERRED_BY_OWNER, never DONE. Set but
+    // wrong → throws → FAILED with the reason.
+    const ledger = ledgerOrDeferral(deps.ledger);
+    if (ledger === "DEFERRED") {
+      return { status: "DEFERRED_BY_OWNER", detail: { decidedOn: LEDGER_DEFERRAL.decidedOn, limitation: LEDGER_DEFERRAL.limitation } };
+    }
     await ledger.write({
       requestId: row.id,
       userId: row.userId,
@@ -734,7 +739,8 @@ export async function cancelFence(input: { id: string; actor: DeletionActor; rea
   if (row.steps.stopGmailWatch?.status === "DONE") needs.push("The Gmail watch was stopped: it is re-registered on reconnect or by gmail:renew-watch.");
   if (row.steps.resolveOrgs?.status === "DONE") needs.push("Organization ownership changes made at fence time were NOT reverted; fix them by hand if needed.");
   try {
-    await deps.ledger().write({ requestId: row.id, userId: row.userId, emailHash: requireHash(row), event: "CANCELLED", fencedEpoch: row.fencedEpoch, at: deps.now().toISOString() });
+    const ledger = ledgerOrDeferral(deps.ledger);
+    if (ledger !== "DEFERRED") await ledger.write({ requestId: row.id, userId: row.userId, emailHash: requireHash(row), event: "CANCELLED", fencedEpoch: row.fencedEpoch, at: deps.now().toISOString() });
   } catch (err) {
     needs.push(`Ledger not updated (${errorText(err)}).`);
   }
@@ -872,7 +878,9 @@ export async function deleteAccount(
     retained: [],
     outside: [
       "Mail and calendar data in the user's own Google account is untouched — Mailroid never deletes from Google.",
-      "Database backups taken before completion still contain this user until they age out; the deletion ledger records this deletion so a restore can be reconciled (account:ledger-reconcile).",
+      row.steps.writeLedger?.status === "DEFERRED_BY_OWNER"
+        ? `Database backups taken before completion still contain this user until they age out. ${LEDGER_DEFERRAL.limitation}`
+        : "Database backups taken before completion still contain this user until they age out; the deletion ledger records this deletion so a restore can be reconciled (account:ledger-reconcile).",
       "Data already sent to processors (the AI provider, logging) follows those processors' retention.",
     ],
     verification: { dbRemaining: {}, storage: null, verified: false },
@@ -1059,8 +1067,13 @@ async function complete(id: string, verifiedThrough: Date, report: DeletionRepor
     return transition(db, id, from, "PURGE_FAILED", { type: "SYSTEM" }, { lastError: error, report: report as unknown as Record<string, unknown> }, { error });
   }
   try {
-    await deps.ledger().write({ requestId: id, userId: row.userId, emailHash: requireHash(row), event: "COMPLETED", fencedEpoch: row.fencedEpoch, at: deps.now().toISOString() });
-    await recordEvent(db, id, "LEDGER_COMPLETED", { type: "SYSTEM" });
+    const ledger = ledgerOrDeferral(deps.ledger);
+    if (ledger === "DEFERRED") {
+      await recordEvent(db, id, "LEDGER_DEFERRED", { type: "SYSTEM" }, { decidedOn: LEDGER_DEFERRAL.decidedOn, limitation: LEDGER_DEFERRAL.limitation });
+    } else {
+      await ledger.write({ requestId: id, userId: row.userId, emailHash: requireHash(row), event: "COMPLETED", fencedEpoch: row.fencedEpoch, at: deps.now().toISOString() });
+      await recordEvent(db, id, "LEDGER_COMPLETED", { type: "SYSTEM" });
+    }
   } catch (err) {
     await recordEvent(db, id, "LEDGER_WRITE_FAILED", { type: "SYSTEM" }, { error: errorText(err) });
   }

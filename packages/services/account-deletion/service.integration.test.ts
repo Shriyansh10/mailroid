@@ -24,7 +24,7 @@ import { PGLiteSocketServer } from "@electric-sql/pglite-socket";
 import { deletionDisplayState } from "./policy.ts";
 import type { DeletionObjectStore } from "./storage.ts";
 import { freePort } from "./testing/free-port.ts";
-import type { DeletionLedger, LedgerEntry } from "./ledger.ts";
+import { LEDGER_DEFERRAL, resolveLedger, type DeletionLedger, type LedgerEntry } from "./ledger.ts";
 
 const PORT = await freePort();
 const URL_ = `postgresql://postgres:postgres@127.0.0.1:${PORT}/postgres`;
@@ -53,11 +53,13 @@ const store: DeletionObjectStore = {
   async abortUpload() {},
 };
 
+// A ledger that IS configured but failing — the FAILED path. The owner's
+// deferral (no ledger configured at all) is the last test, via resolveLedger({}).
 const ledgerWrites: LedgerEntry[] = [];
 let ledgerConfigured = false;
 const ledger: DeletionLedger = {
   async write(e) {
-    if (!ledgerConfigured) throw new Error("Deletion ledger not configured (Phase 0 step 9 pending): test");
+    if (!ledgerConfigured) throw new Error("simulated ledger outage");
     ledgerWrites.push(e);
   },
   async list() {
@@ -145,9 +147,17 @@ test("the fence trigger is installed everywhere the inventory requires", async (
 let soloId = "";
 
 test("a user submits; the request is recorded as an individual with an audit row", async () => {
+  assert.equal(process.env.DELETION_ENABLED, "false", "submitting must work with deletion off");
   const r = await svc.submitDeletionRequest({ userId: "u-solo", kind: "DEPARTURE", reason: "leaving the company" });
   soloId = r.id;
   assert.equal(r.status, "SUBMITTED");
+  // Submitting is asking, nothing more: no fence, no step run, sessions and data intact.
+  assert.equal(await svc.isTenantFenced("u-solo"), false);
+  assert.deepEqual(r.steps, {});
+  assert.equal(r.fencedAt, null);
+  assert.equal(await count("session", "user_id", "u-solo"), 1);
+  assert.equal(await count("emails", "user_id", "u-solo"), 2);
+  assert.equal(await count("sync_pauses", "tenant_id", "u-solo"), 0);
   assert.deepEqual(r.orgContext, { type: "INDIVIDUAL" });
   const events = await svc.listDeletionEvents(r.id);
   assert.equal(events.length, 1);
@@ -178,8 +188,8 @@ test("fence: writes blocked, sessions revoked, sync paused, each step recorded h
   const res = await svc.fenceAccount({ id: soloId, actor: dev(), confirmEmail: "SOLO@x.test", orgConfirmed: false, lastOwnerChoices: {} }, deps);
   const r = res.request;
   assert.equal(r.status, "FENCED");
-  assert.equal(r.steps.writeLedger!.status, "FAILED", "unconfigured ledger is FAILED, never DONE");
-  assert.match(r.steps.writeLedger!.error!, /not configured/);
+  assert.equal(r.steps.writeLedger!.status, "FAILED", "a failing ledger is FAILED, never DONE or deferred");
+  assert.match(r.steps.writeLedger!.error!, /simulated ledger outage/);
   assert.equal(r.steps.revokeSessions!.status, "DONE");
   assert.equal(r.steps.stopGmailWatch!.status, "SKIPPED");
   assert.equal(r.steps.pauseSync!.status, "DONE");
@@ -318,4 +328,42 @@ test("withdraw is only possible while SUBMITTED", async () => {
   await assert.rejects(svc.withdrawDeletionRequest("u-race"), (e: Error & { code?: string }) => e.code === "NOT_WITHDRAWABLE");
   const w = await svc.withdrawDeletionRequest("u-org");
   assert.equal(w.status, "WITHDRAWN");
+});
+
+// ═════ Ledger deferred by owner decision ═════════════════════════════
+
+test("ledger deferred: no ledger configured → DEFERRED_BY_OWNER, never DONE; deletion needs no --accept-unresolved", async () => {
+  await q(`INSERT INTO "user" (id, name, email, platform_role) VALUES ('u-deferred', 'Deferred', 'deferred@x.test', 'USER')`);
+  // The production wiring with nothing set: resolveLedger reads an env with no prefix.
+  const deferredDeps = { ...deps, ledger: () => resolveLedger({}) };
+  const sub = await svc.submitDeletionRequest({ userId: "u-deferred", kind: "DEPARTURE", reason: "ledger deferral" });
+  clock = new Date("2026-10-30T00:00:00Z");
+  const f = await svc.fenceAccount({ id: sub.id, actor: dev(), confirmEmail: "deferred@x.test", orgConfirmed: false, lastOwnerChoices: {} }, deferredDeps);
+  const step = f.request.steps.writeLedger!;
+  assert.equal(step.status, "DEFERRED_BY_OWNER");
+  assert.equal(step.error, null);
+  assert.equal(step.detail?.limitation, LEDGER_DEFERRAL.limitation, "the limitation is recorded on the step");
+  const evs = await svc.listDeletionEvents(sub.id);
+  assert.ok(evs.some((e) => e.type === "STEP_DEFERRED_BY_OWNER"));
+  assert.ok(!evs.some((e) => e.type === "STEP_DONE" && (e.detail as { step?: string })?.step === "writeLedger"), "never recorded as written");
+
+  clock = new Date("2026-10-30T12:00:00Z");
+  process.env.DELETION_TEST_ALLOWLIST = "deferred@x.test";
+  const res = await svc.deleteAccount({ id: sub.id, actor: dev(), confirmEmail: "deferred@x.test" }, deferredDeps);
+  assert.equal(res.request.status, "COMPLETED", res.request.lastError ?? "");
+  assert.equal(res.request.acceptedUnresolved, null, "nothing was accepted unresolved");
+  assert.ok(res.report.outside.some((l) => l.includes(LEDGER_DEFERRAL.limitation)), "the report states the restore limitation");
+  assert.ok(!res.report.outside.some((l) => /ledger records this deletion/.test(l)), "and never claims the protection");
+  const after = (await svc.listDeletionEvents(sub.id)).map((e) => e.type);
+  assert.ok(after.includes("LEDGER_DEFERRED"));
+  assert.ok(!after.includes("LEDGER_COMPLETED") && !after.includes("LEDGER_WRITE_FAILED"));
+});
+
+test("ledger deferral covers only an unset ledger: a set-but-wrong prefix still FAILS", async () => {
+  await q(`INSERT INTO "user" (id, name, email, platform_role) VALUES ('u-badledger', 'Bad', 'badledger@x.test', 'USER')`);
+  const badDeps = { ...deps, ledger: () => resolveLedger({ DELETION_LEDGER_PREFIX: "prod/attachments" }) };
+  const sub = await svc.submitDeletionRequest({ userId: "u-badledger", kind: "DEPARTURE", reason: "bad ledger" });
+  const f = await svc.fenceAccount({ id: sub.id, actor: dev(), confirmEmail: "badledger@x.test", orgConfirmed: false, lastOwnerChoices: {} }, badDeps);
+  assert.equal(f.request.steps.writeLedger!.status, "FAILED");
+  assert.match(f.request.steps.writeLedger!.error!, /attachments/);
 });

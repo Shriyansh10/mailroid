@@ -19,7 +19,7 @@
 import { betterAuth } from "better-auth";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { db } from "@repo/database";
-import { isTenantFenced, FENCED_SIGN_IN_MESSAGE } from "@repo/database/tenant-fence";
+import { isTenantFenced, isDeletionUnsealed, isFencedGoogleSignIn, FENCED_SIGN_IN_CODE, FENCED_SIGN_IN_MESSAGE } from "@repo/database/tenant-fence";
 import { onAccountLinked } from "@repo/database/deletion-suppression";
 import { logger } from "@repo/logger";
 import { APIError } from "better-auth/api";
@@ -33,6 +33,9 @@ export const auth = betterAuth({
   }),
 
   secret: process.env.BETTER_AUTH_SECRET!,
+
+  // Mirrors apps/api: OAuth failures land on the sign-in page.
+  onAPIError: { errorURL: `${process.env.FRONTEND_URL || "http://localhost:3000"}/sign-in` },
   baseURL: process.env.BETTER_AUTH_URL!,
 
   // Must mirror apps/api/src/auth/auth.ts's additionalFields exactly — both
@@ -59,18 +62,40 @@ export const auth = betterAuth({
   // trigger would reject the INSERT anyway; this turns that into a readable
   // refusal instead of a failed sign-in with a database error.
   databaseHooks: {
-    session: {
+    // Mirrors apps/api: no new user while a purged account's deletion is not
+    // yet sealed (the re-registration marker is only written at COMPLETED).
+    user: {
       create: {
-        before: async (session) => {
-          if (await isTenantFenced(session.userId)) {
-            throw new APIError("FORBIDDEN", { message: FENCED_SIGN_IN_MESSAGE });
+        before: async (user) => {
+          if (await isDeletionUnsealed(user.email)) {
+            logger.info("[account-deletion] sign-up refused: deletion not yet sealed");
+            // Here Better Auth turns the message itself into ?error=, so it must be the code.
+            throw new APIError("FORBIDDEN", { message: FENCED_SIGN_IN_CODE, code: FENCED_SIGN_IN_CODE });
           }
         },
       },
     },
-    // Mirrors apps/api: a returning deleted Google account is flagged for
-    // developer review, never blocked and never restored.
+    session: {
+      create: {
+        before: async (session) => {
+          if (await isTenantFenced(session.userId)) {
+            throw new APIError("FORBIDDEN", { message: FENCED_SIGN_IN_MESSAGE, code: FENCED_SIGN_IN_CODE });
+          }
+        },
+      },
+    },
     account: {
+      // Mirrors apps/api: a returning fenced user is refused before Better Auth
+      // writes fresh tokens, which the fence trigger would reject as a raw error.
+      update: {
+        before: async (data) => {
+          if (await isFencedGoogleSignIn(data)) {
+            throw new APIError("FORBIDDEN", { message: FENCED_SIGN_IN_MESSAGE, code: FENCED_SIGN_IN_CODE });
+          }
+        },
+      },
+      // Mirrors apps/api: a returning deleted Google account is flagged for
+      // developer review, never blocked and never restored.
       create: {
         after: async (account) => {
           try {

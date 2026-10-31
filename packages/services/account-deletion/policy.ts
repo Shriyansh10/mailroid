@@ -194,9 +194,11 @@ export const VERIFICATION_LIMITS = {
  *
  * RESOLVABLE (retried; deletion needs each DONE, SKIPPED as not applicable, or
  * explicitly accepted by the developer with a reason):
- *   writeLedger      off-database record of the deletion. Its location is a
- *                    pending owner decision (Phase 0 step 9): until configured
- *                    the step FAILS, it is never marked done.
+ *   writeLedger      off-database record of the deletion. Deferred by the
+ *                    owner (ledger.ts LEDGER_DEFERRAL): with no ledger
+ *                    configured it records DEFERRED_BY_OWNER, which resolves
+ *                    the step without claiming a write. A ledger that is
+ *                    configured but broken FAILS; it is never marked done.
  *   stopCalendarChannel, revokeGoogleGrant, releaseConnections, resolveOrgs.
  */
 export const FENCE_STEPS = [
@@ -339,11 +341,14 @@ export function deleteVerdict(input: {
   return { ok: true };
 }
 
-/** Fence steps that are neither DONE nor SKIPPED (not applicable). */
+/**
+ * Fence steps that are not resolved: neither DONE, SKIPPED (not applicable),
+ * accepted with a reason, nor deferred by the owner (the ledger).
+ */
 export function unresolvedSteps(steps: Record<string, DeletionStepRecord>): FenceStep[] {
   return FENCE_STEPS.filter((s) => {
     const st = steps[s]?.status;
-    return st !== "DONE" && st !== "SKIPPED" && st !== "ACCEPTED_UNRESOLVED";
+    return st !== "DONE" && st !== "SKIPPED" && st !== "ACCEPTED_UNRESOLVED" && st !== "DEFERRED_BY_OWNER";
   });
 }
 

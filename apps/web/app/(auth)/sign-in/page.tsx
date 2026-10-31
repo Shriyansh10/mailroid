@@ -1,12 +1,13 @@
 "use client";
 
 import { authClient, useSession } from "@web/lib/auth-client";
+import { signInErrorMessage } from "@web/lib/sign-in-errors";
 import { trpc } from "@web/trpc/client";
 import { useRouter } from "next/navigation";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import Image from "next/image";
 import { Button } from "@web/components/ui/button";
-import { Check, CheckCircle2 } from "lucide-react";
+import { AlertTriangleIcon, Check, CheckCircle2 } from "lucide-react";
 import logoImg from "../../../assets/Logo/mailroid-no-background.png";
 
 const features = [
@@ -39,6 +40,12 @@ const features = [
 export default function SignInPage() {
   const { data: session, isPending: sessionLoading } = useSession();
   const router = useRouter();
+  // Read once on mount, not via useSearchParams: this page is prerendered.
+  const [signInError, setSignInError] = useState<string | null>(null);
+  useEffect(() => {
+    const code = new URLSearchParams(window.location.search).get("error");
+    if (code) setSignInError(signInErrorMessage(code));
+  }, []);
 
   // Only fetch plugins if logged in
   const { data: plugins } = trpc.auth.getConnectedPlugins.useQuery(undefined, {
@@ -101,6 +108,13 @@ export default function SignInPage() {
           <p className="mt-6 max-w-xl text-lg text-muted-foreground leading-relaxed">
             AI-powered Gmail and Google Calendar workspace with Priority Inbox, Executive Briefings, Agent Actions, and lightning-fast search.
           </p>
+
+          {signInError && (
+            <div role="alert" className="mt-8 flex max-w-xl items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-left text-sm text-amber-700 dark:text-amber-400">
+              <AlertTriangleIcon className="mt-0.5 size-4 shrink-0" />
+              <span>{signInError}</span>
+            </div>
+          )}
 
           <div className="mt-10">
             <Button size="lg" className="h-12 px-8 text-base font-medium shadow-sm transition-transform hover:scale-[1.02]" onClick={handleGoogleLogin}>

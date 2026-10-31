@@ -540,7 +540,7 @@ t("ledger: the fence entry was written, read back, and lists", async () => {
   assert.ok(listed.some((e) => e.requestId === id && e.event === "FENCED"));
 });
 
-t("ledger: unconfigured, refused PUT and read-back mismatch each FAIL the step; fence-retry recovers", async () => {
+t("ledger: unset is DEFERRED_BY_OWNER (never DONE); refused PUT and read-back mismatch each FAIL; fence-retry recovers", async () => {
   const { email } = await seedUser("u-ledger");
   const req = await submit("u-ledger");
   clock = T0;
@@ -548,9 +548,10 @@ t("ledger: unconfigured, refused PUT and read-back mismatch each FAIL the step; 
   ledgerConfigured = false;
   let f = await fence(req.id, email);
   ledgerConfigured = true;
-  assert.equal(f.steps.writeLedger!.status, "FAILED");
-  assert.match(f.steps.writeLedger!.error!, /not configured/);
+  // No ledger asked for: the owner's deferral, recorded as such — not a write.
+  assert.equal(f.steps.writeLedger!.status, "DEFERRED_BY_OWNER");
   assert.ok(f.request.fencedConfirmedAt, "the ledger doesn't confirm the fence");
+  // A deferred step is re-evaluated by fence-retry: once a ledger is configured it is written.
 
   s3.fail.put = true;
   f = await svc.runFenceSteps({ id: req.id, actor: dev() }, deps);

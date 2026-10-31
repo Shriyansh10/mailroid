@@ -55,7 +55,7 @@ import {
   verifyStorage,
   type DeletionRequestRow,
 } from "@repo/services/account-deletion/index.js";
-import { reconcileLedger, resolveLedger } from "@repo/services/account-deletion/ledger.js";
+import { LEDGER_DEFERRAL, ledgerOrDeferral, reconcileLedger, resolveLedger } from "@repo/services/account-deletion/ledger.js";
 import { db, inArray } from "@repo/database";
 import { user } from "@repo/database/models/auth";
 import { accountDeletionRequest } from "@repo/database/models/account-deletion";
@@ -188,7 +188,7 @@ function printSteps(r: DeletionRequestRow): void {
   out.line(out.emphasis("Fence steps"));
   for (const name of names) {
     const s = r.steps[name]!;
-    const mark = s.status === "DONE" ? "✓" : s.status === "SKIPPED" ? "–" : s.status === "ACCEPTED_UNRESOLVED" ? "!" : "✗";
+    const mark = s.status === "DONE" ? "✓" : s.status === "SKIPPED" ? "–" : s.status === "ACCEPTED_UNRESOLVED" || s.status === "DEFERRED_BY_OWNER" ? "!" : "✗";
     const extra = s.error ? ` — ${s.error.split("\n")[0]}` : s.detail && Object.keys(s.detail).length ? ` — ${JSON.stringify(s.detail)}` : "";
     out.line(`  ${mark} ${name.padEnd(20)} ${s.status.padEnd(20)} attempts ${s.attempts}${extra}`);
   }
@@ -439,9 +439,17 @@ const ledgerReconcile = defineCommand({
   async run() {
     let ledger;
     try {
-      ledger = resolveLedger();
+      ledger = ledgerOrDeferral(resolveLedger);
     } catch (err) {
       out.error((err as Error).message);
+      process.exitCode = 1;
+      return;
+    }
+    if (ledger === "DEFERRED") {
+      // Not a pass: there is nothing to reconcile against, and saying so is the point.
+      out.error(`No deletion ledger: deferred by owner decision (${LEDGER_DEFERRAL.decidedOn}). Nothing can be reconciled.`);
+      out.warn(LEDGER_DEFERRAL.limitation);
+      out.warn(`Revisit ${LEDGER_DEFERRAL.revisit}.`);
       process.exitCode = 1;
       return;
     }

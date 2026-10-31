@@ -91,9 +91,13 @@ export type DeletionOrgContext =
       }[];
     };
 
-/** Per-step outcome. A step is DONE only when it actually succeeded. */
+/**
+ * Per-step outcome. A step is DONE only when it actually succeeded.
+ * DEFERRED_BY_OWNER is the ledger step while the owner has deferred the
+ * ledger: resolved for the delete gate, but not a write and never shown as one.
+ */
 export type DeletionStepRecord = {
-  status: "PENDING" | "DONE" | "FAILED" | "SKIPPED" | "ACCEPTED_UNRESOLVED";
+  status: "PENDING" | "DONE" | "FAILED" | "SKIPPED" | "ACCEPTED_UNRESOLVED" | "DEFERRED_BY_OWNER";
   attempts: number;
   at: string | null;
   /** Full error text on failure — errors are documents. */
