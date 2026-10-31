@@ -372,6 +372,34 @@
       "when": 1792570686833,
       "tag": "0054_giant_morbius",
       "breakpoints": true
+    },
+    {
+      "idx": 55,
+      "version": "7",
+      "when": 1793187286897,
+      "tag": "0055_account_deletion",
+      "breakpoints": true
+    },
+    {
+      "idx": 56,
+      "version": "7",
+      "when": 1793187466219,
+      "tag": "0056_tenant_fence_trigger",
+      "breakpoints": true
+    },
+    {
+      "idx": 57,
+      "version": "7",
+      "when": 1793431810659,
+      "tag": "0057_deletion_retention",
+      "breakpoints": true
+    },
+    {
+      "idx": 58,
+      "version": "7",
+      "when": 1793435980857,
+      "tag": "0058_deletion_marker_at_completion",
+      "breakpoints": true
     }
   ]
 }

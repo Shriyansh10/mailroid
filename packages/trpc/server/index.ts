@@ -12,6 +12,7 @@ import { schedulingRouter } from "./routes/scheduling/route.js";
 import { billingRouter } from "./routes/billing/route.js";
 import { adminJobsRouter } from "./routes/admin-jobs/route.js";
 import { organizationRouter } from "./routes/organization/route.js";
+import { accountDeletionRouter } from "./routes/account-deletion/route.js";
 
 export const serverRouter = router({
   health: healthRouter,
@@ -25,6 +26,7 @@ export const serverRouter = router({
   billing: billingRouter,
   adminJobs: adminJobsRouter,
   organization: organizationRouter,
+  accountDeletion: accountDeletionRouter,
 });
 
 export { createContext } from "./context.js";

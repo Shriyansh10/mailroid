@@ -172,25 +172,41 @@
     "./admin-jobs/watch-renewal": "./admin-jobs/watch-renewal.ts",
     "./admin-jobs/watch-renewal.js": "./admin-jobs/watch-renewal.ts",
     "./admin-jobs/credential-check": "./admin-jobs/credential-check.ts",
-    "./admin-jobs/credential-check.js": "./admin-jobs/credential-check.ts"
+    "./admin-jobs/credential-check.js": "./admin-jobs/credential-check.ts",
+    "./account-deletion/index": "./account-deletion/index.ts",
+    "./account-deletion/index.js": "./account-deletion/index.ts",
+    "./account-deletion/policy": "./account-deletion/policy.ts",
+    "./account-deletion/policy.js": "./account-deletion/policy.ts",
+    "./account-deletion/service": "./account-deletion/service.ts",
+    "./account-deletion/service.js": "./account-deletion/service.ts",
+    "./account-deletion/storage": "./account-deletion/storage.ts",
+    "./account-deletion/storage.js": "./account-deletion/storage.ts",
+    "./account-deletion/inventory": "./account-deletion/inventory.ts",
+    "./account-deletion/inventory.js": "./account-deletion/inventory.ts",
+    "./account-deletion/ledger": "./account-deletion/ledger.ts",
+    "./account-deletion/ledger.js": "./account-deletion/ledger.ts",
+    "./account-deletion/detector-cron": "./account-deletion/detector-cron.ts",
+    "./account-deletion/detector-cron.js": "./account-deletion/detector-cron.ts"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.3.15",
+    "@electric-sql/pglite-socket": "0.0.20",
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "dotenv-cli": "^11.0.0",
-    "typescript": "^5.9.3",
     "@types/node": "^22.15.3",
     "@types/pg": "^8.16.0",
-    "tsx": "^4.21.0"
+    "dotenv-cli": "^11.0.0",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.717.0",
+    "@repo/ai": "workspace:*",
     "@repo/corsair": "workspace:*",
     "@repo/database": "workspace:*",
-    "@repo/logger": "workspace:*",
-    "@repo/ai": "workspace:*",
-    "@repo/shared": "workspace:*",
     "@repo/inngest": "workspace:*",
+    "@repo/logger": "workspace:*",
+    "@repo/shared": "workspace:*",
     "corsair": "0.1.74",
     "google-auth-library": "^10.5.0",
     "openai": "^6.42.0",
@@ -198,6 +214,7 @@
     "zod": "^4.3.5"
   },
   "scripts": {
-    "test": "node --import tsx --test *.test.ts attachments/*.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts organization/*.test.ts"
+    "test": "node --import tsx --test *.test.ts attachments/*.test.ts calendar/*.test.ts gmail/*.test.ts scheduling/*.test.ts organization/*.test.ts account-deletion/*.test.ts",
+    "test:deletion-pg": "node --import tsx --test --test-concurrency=1 account-deletion/service.postgres.test.ts account-deletion/retention.postgres.test.ts"
   }
 }

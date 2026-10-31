@@ -7,6 +7,7 @@ import { ArrowLeftIcon, TerminalIcon, PlayIcon } from "lucide-react";
 
 import { useListTools, useExecuteTool } from "@web/hooks/api/tools";
 import { MaintenanceJobs } from "@web/components/developer/maintenance-jobs";
+import { AccountDeletions } from "@web/components/developer/account-deletions";
 import { Button } from "@web/components/ui/button";
 import {
   Card,
@@ -184,6 +185,8 @@ export default function DeveloperSettingsPage() {
         )}
 
         <MaintenanceJobs />
+
+        <AccountDeletions />
       </div>
     </div>
   );

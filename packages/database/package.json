@@ -35,7 +35,10 @@
     "./models/mail-templates": "./models/mail-templates.ts",
     "./models/user-usage": "./models/user-usage.ts",
     "./models/ai-usage": "./models/ai-usage.ts",
-    "./models/developer-job-runs": "./models/developer-job-runs.ts"
+    "./models/developer-job-runs": "./models/developer-job-runs.ts",
+    "./models/account-deletion": "./models/account-deletion.ts",
+    "./tenant-fence": "./tenant-fence.ts",
+    "./deletion-suppression": "./deletion-suppression.ts"
   },
   "scripts": {
     "db:migrate": "dotenv -- drizzle-kit migrate",

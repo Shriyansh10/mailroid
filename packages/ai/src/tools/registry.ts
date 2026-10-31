@@ -626,6 +626,33 @@ export class ToolRegistry {
       }),
     });
 
+    // ── getAccountDeletionStatus ────────────────────────────────────
+    this.register({
+      name: "getAccountDeletionStatus",
+      description:
+        "The user's own account-deletion request, if any: whether one exists and where it stands. " +
+        "Use when the user asks how to delete their account, close it, leave Mailroid, erase their data, " +
+        "or what happened to a deletion request. Read-only — you cannot submit, withdraw or speed up a " +
+        "request. Deletion is requested by the user at Settings → Account (/settings/account); the Mailroid " +
+        "team reviews it, confirms with the user's organization first if they belong to one, and carries " +
+        "it out. Tell the user that, with the link, when they ask how to delete their account.",
+      riskLevel: RiskLevel.SAFE,
+      requiresApproval: false,
+      enabled: true,
+      inputSchema: z.object({}),
+      outputSchema: z.object({
+        hasRequest: z.boolean(),
+        status: z.string().optional(),
+        message: z.string(),
+        settingsPath: z.string(),
+      }),
+      execute: async () => ({
+        hasRequest: false,
+        message: "getAccountDeletionStatus executor not registered",
+        settingsPath: "/settings/account",
+      }),
+    });
+
     // ── upsertSchedulingRule ────────────────────────────────────────
     this.register({
       name: "upsertSchedulingRule",

@@ -29,6 +29,7 @@ import calendarBackfillSharedProps from "./commands/calendar-backfill-shared-pro
 import calendarStopChannels from "./commands/calendar-stop-channels.ts";
 import aiUsage from "./commands/ai-usage.ts";
 import gmailQuotaReconcile from "./commands/gmail-quota-reconcile.ts";
+import { accountCommands } from "./commands/account.ts";
 
 // Within a group: cheapest and safest first, so the expensive whole-mailbox
 // walk is never the first thing someone reaches for.
@@ -59,4 +60,7 @@ export const commands: Command[] = [
   // there is nothing to stamp.
   calendarBackfillSharedProps,
   calendarStopChannels,
+  // Account deletion (D-012): listing and inspection first, then the manual
+  // fence → ≥12 h → delete sequence in the order a developer runs it.
+  ...accountCommands,
 ];

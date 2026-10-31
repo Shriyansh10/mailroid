@@ -1,4 +1,4 @@
-import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp, index } from "drizzle-orm/pg-core";
 
 export const calendarTenantMappings = pgTable("calendar_tenant_mappings", {
   emailAddress: text("email_address").primaryKey(),
@@ -11,4 +11,7 @@ export const calendarTenantMappings = pgTable("calendar_tenant_mappings", {
     .notNull()
     .defaultNow()
     .$onUpdate(() => new Date()),
-});
+}, (t) => [
+  // Account deletion purges and verifies by tenant; the PK is the address.
+  index("idx_calendar_tenant_mappings_tenant").on(t.tenantId),
+]);

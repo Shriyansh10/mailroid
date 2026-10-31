@@ -1,4 +1,4 @@
-import { pgTable, text, integer, timestamp, uniqueIndex } from "drizzle-orm/pg-core";
+import { pgTable, text, integer, timestamp, uniqueIndex, index } from "drizzle-orm/pg-core";
 import { sql } from "drizzle-orm";
 
 // A user-initiated bulk classification run ("Classify Last Week" /
@@ -50,5 +50,8 @@ export const classificationJobs = pgTable(
     uniqueIndex("classification_jobs_one_active")
       .on(table.userId)
       .where(sql`${table.status} = 'running'`),
+    // The partial index above only covers running jobs; account deletion
+    // purges and verifies every job for a user.
+    index("idx_classification_jobs_user").on(table.userId),
   ],
 );
