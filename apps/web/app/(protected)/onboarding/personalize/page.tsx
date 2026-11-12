@@ -13,7 +13,7 @@ import {
 import { ProfileWizard } from "@web/components/priority-profile/profile-wizard";
 import { TimezoneCard } from "@web/components/scheduling/timezone-card";
 import { useSchedulingSettings } from "@web/hooks/api/scheduling";
-import logoImg from "../../../../assets/Logo/mailroid-no-background.png";
+import logoImg from "../../../../assets/Logo/mailroid-logo-256.png";
 
 export default function PersonalizePage() {
   const router = useRouter();
@@ -63,7 +63,7 @@ export default function PersonalizePage() {
       <div className="mx-auto flex max-w-2xl flex-col gap-6">
         <div className="flex flex-col items-center text-center">
           <div className="mb-4 flex h-16 w-16 items-center justify-center overflow-hidden rounded-2xl border bg-muted/10 p-3">
-            <Image src={logoImg} alt="Mailroid" className="h-full w-full object-contain" />
+            <Image src={logoImg} unoptimized alt="Mailroid" className="h-full w-full object-contain" />
           </div>
           <h1 className="flex items-center gap-2 text-2xl font-bold tracking-tight">
             <SparklesIcon className="size-5 text-[#b08d57]" />

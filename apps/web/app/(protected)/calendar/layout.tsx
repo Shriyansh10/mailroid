@@ -3,7 +3,7 @@
 import React, { Suspense, useState, useMemo, useCallback, useEffect } from "react";
 import { useRouter } from "next/navigation";
 import Image from "next/image";
-import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+import logoImg from "../../../assets/Logo/mailroid-logo-256.png";
 import { 
   LogOutIcon, PencilIcon, CalendarDaysIcon, 
   BotIcon, SparklesIcon, InboxIcon, SendIcon,
@@ -74,7 +74,7 @@ export default function CalendarLayout({ children }: { children: React.ReactNode
       <div className="w-64 shrink-0 border-r bg-muted/10 flex flex-col px-4 py-6 gap-1 overflow-y-auto">
         {/* Logo */}
         <div className="flex items-center gap-3 px-2 mb-6 select-none">
-          <Image src={logoImg} alt="Mailroid" className="h-8 w-8 object-contain" />
+          <Image src={logoImg} unoptimized alt="Mailroid" className="h-8 w-8 object-contain" />
           <span className="font-semibold tracking-tight text-lg">Mailroid</span>
         </div>
 

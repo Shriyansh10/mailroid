@@ -2,7 +2,7 @@ import Link from "next/link";
 import Image from "next/image";
 import { Micro, Caption } from "./primitives/type";
 import { footer } from "./content";
-import logo from "@web/assets/Logo/mailroid-no-background.png";
+import logo from "@web/assets/Logo/mailroid-logo-256.png";
 
 /**
  * No GitHub link. The repository URL isn't settled and a nav item that goes
@@ -19,7 +19,7 @@ export function Footer() {
               href="/"
               className="inline-flex items-center gap-2.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-mr-indigo"
             >
-              <Image src={logo} alt="" width={24} height={24} className="size-6 object-contain" />
+              <Image src={logo} unoptimized alt="" width={24} height={24} className="size-6 object-contain" />
               <span className="t-lead w600 text-mr-ink">Mailroid</span>
             </Link>
             <Caption className="mt-4 max-w-[22rem] text-mr-faint">
