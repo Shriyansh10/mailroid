@@ -2,6 +2,7 @@ import { inngest } from "@repo/inngest";
 import { syncCategoryPage } from "./sync-metadata.ts";
 import { ALL_CATEGORIES } from "./metadata.ts";
 import { hasPendingSyncFailures } from "./sync-failures.ts";
+import { refreshPlannerStats } from "./planner-stats.ts";
 import {
   markSyncRunning,
   updateSyncProgress,
@@ -123,6 +124,11 @@ export const gmailInitialSync = inngest.createFunction(
         pagesThisRun >= MAX_PAGES_PER_RUN &&
         categoryIndex < ALL_CATEGORIES.length
       ) {
+        // Per chunk, not only at the end: the inbox is browsable while the
+        // import runs, and a large mailbox imports for over an hour.
+        await step.run("refresh-planner-stats", () =>
+          refreshPlannerStats(["message_metadata"], { userId, trigger: "sync" }),
+        );
         await step.sendEvent("continue-gmail-sync", {
           name: "gmail/sync.requested",
           data: { userId, categoryIndex, pageToken, force },
@@ -131,6 +137,9 @@ export const gmailInitialSync = inngest.createFunction(
       }
     }
 
+    await step.run("refresh-planner-stats-final", () =>
+      refreshPlannerStats(["message_metadata"], { userId, trigger: "sync" }),
+    );
     const total = await step.run("sync-status-complete", () => markSyncComplete(userId));
 
     // Threads this sync could not fetch were recorded as they failed. Start

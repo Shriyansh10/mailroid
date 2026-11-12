@@ -36,6 +36,7 @@ import { logger } from "@repo/logger";
 import { stopGmailWatch } from "../gmail/watch.ts";
 import { __resetPauseMemo } from "../gmail/pause.ts";
 import { invalidateMailboxCache } from "../gmail/mailbox-resolver.ts";
+import { refreshPlannerStats } from "../gmail/planner-stats.ts";
 import { addMember, changeRole, getMembership, removeMember } from "../organization/members.ts";
 import { normalizeOrgEmail } from "../organization/scope-policy.ts";
 
@@ -1243,6 +1244,12 @@ async function purge(row: DeletionRequestRow, report: DeletionReport, deps: Dele
   // 5. Database, table by table, batched so no single statement runs long.
   Object.assign(report.rowsDeleted, await purgeTenantRows(poolQuery, userId));
   await recordEvent(db, row.id, "DATABASE_PURGED", { type: "SYSTEM" }, { tables: Object.keys(report.rowsDeleted).length, rows: Object.values(report.rowsDeleted).reduce((a, b) => a + b, 0) });
+  // Only tables the purge actually emptied rows from: a large mailbox leaves
+  // the stats describing rows that no longer exist (see planner-stats.ts).
+  await refreshPlannerStats(
+    PURGE_ORDER.filter((t) => (report.rowsDeleted[t] ?? 0) > 0),
+    { requestId: row.id, tenantId: userId, trigger: "account-deletion" },
+  );
 
   // 6. Caches.
   invalidateMailboxCache(userId);
