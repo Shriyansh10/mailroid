@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useMemo, useRef, type RefObject } from "react";
-import { ChevronRightIcon, ChevronDownIcon, ImageOffIcon } from "lucide-react";
+import { ChevronRightIcon, ChevronDownIcon } from "lucide-react";
 import { Avatar, AvatarFallback } from "@web/components/ui/avatar";
 import { parseAddressList } from "@web/lib/email-addresses";
 import { AttachmentList, type MessageAttachment } from "@web/components/attachment-list";
@@ -103,25 +103,14 @@ export function formatMessageDate(dateString: string): string {
  * Its own component so the sanitise/rewrite pass memoizes per message. Inlined
  * in the parent's map it would re-run for every message on every expand/collapse
  * of any one of them, and this is the expensive part of rendering a thread.
- *
- * "Show images" is per message and deliberately NOT persisted. Remote images in
- * mail are overwhelmingly tracking pixels — opening one tells the sender the
- * message was read, when, and roughly from where. A per-sender or global
- * "always show" setting is a reasonable thing to want and a poor default to
- * infer from one click on one message.
  */
 function MessageBody({ msg }: { msg: ThreadMessage }) {
-  const [showRemoteImages, setShowRemoteImages] = useState(false);
-
   const rendered = useMemo(
     () =>
       msg.htmlBody
-        ? renderMailHtml(msg.htmlBody, {
-            inlineImages: msg.inlineImages,
-            showRemoteImages,
-          })
+        ? renderMailHtml(msg.htmlBody, { inlineImages: msg.inlineImages })
         : null,
-    [msg.htmlBody, msg.inlineImages, showRemoteImages],
+    [msg.htmlBody, msg.inlineImages],
   );
 
   // `rendered.html` is empty when there was no DOM to sanitise against — see
@@ -136,26 +125,6 @@ function MessageBody({ msg }: { msg: ThreadMessage }) {
   }
 
   return (
-    <>
-      {/* Only shown when something was actually blocked. A banner offering to
-          unblock nothing trains the reader to ignore the banner. */}
-      {rendered.blockedCount > 0 && (
-        <div className="mb-3 flex flex-wrap items-center gap-x-3 gap-y-1.5 rounded-md border border-border bg-muted/40 px-3 py-2 text-xs">
-          <ImageOffIcon className="size-3.5 shrink-0 text-muted-foreground" aria-hidden />
-          <span className="text-muted-foreground">
-            {rendered.blockedCount === 1
-              ? "1 remote image was blocked to stop the sender tracking that you opened this."
-              : `${rendered.blockedCount} remote images were blocked to stop the sender tracking that you opened this.`}
-          </span>
-          <button
-            type="button"
-            onClick={() => setShowRemoteImages(true)}
-            className="font-medium text-primary underline underline-offset-2 hover:opacity-80"
-          >
-            Show images
-          </button>
-        </div>
-      )}
       <div
         // Links in sender HTML carry no styling of their own once sanitised, so
         // they rendered as plain black text — indistinguishable from prose, and
@@ -164,7 +133,6 @@ function MessageBody({ msg }: { msg: ThreadMessage }) {
         className="max-w-full break-words text-foreground text-sm [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_a:hover]:opacity-80 [&_a]:break-all"
         dangerouslySetInnerHTML={{ __html: rendered.html }}
       />
-    </>
   );
 }
 

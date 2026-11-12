@@ -8,7 +8,7 @@ import { useEffect, useState } from "react";
 import Image from "next/image";
 import { Button } from "@web/components/ui/button";
 import { AlertTriangleIcon, Check, CheckCircle2 } from "lucide-react";
-import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+import logoImg from "../../../assets/Logo/mailroid-logo-256.png";
 
 const features = [
   {
@@ -83,7 +83,7 @@ export default function SignInPage() {
       <header className="flex items-center justify-between px-6 py-6 md:px-8 border-b border-border/40">
         <div className="flex items-center gap-3">
           <div className="flex h-8 w-8 items-center justify-center overflow-hidden rounded-lg border bg-muted/20">
-            <Image src={logoImg} alt="Mailroid" className="h-5 w-5 object-contain" />
+            <Image src={logoImg} unoptimized alt="Mailroid" className="h-5 w-5 object-contain" />
           </div>
           <span className="font-semibold tracking-tight">Mailroid</span>
         </div>
@@ -96,7 +96,7 @@ export default function SignInPage() {
         {/* Hero Section */}
         <div className="mt-12 md:mt-24 flex flex-col items-center text-center">
           <div className="mb-8 flex h-24 w-24 items-center justify-center overflow-hidden rounded-3xl border bg-muted/10 shadow-sm p-4">
-            <Image src={logoImg} alt="Mailroid" priority className="h-full w-full object-contain" />
+            <Image src={logoImg} unoptimized alt="Mailroid" priority className="h-full w-full object-contain" />
           </div>
 
           <h1 className="text-5xl font-bold tracking-tight md:text-6xl lg:text-7xl">

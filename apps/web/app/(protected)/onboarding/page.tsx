@@ -9,7 +9,7 @@ import Image from "next/image";
 import { Mail, Calendar, LogOut } from "lucide-react";
 import { Progress } from "@web/components/ui/progress";
 import { Button } from "@web/components/ui/button";
-import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+import logoImg from "../../../assets/Logo/mailroid-logo-256.png";
 
 // ── mailbox sync waiting screen ───────────────────────────────────────
 
@@ -222,7 +222,7 @@ export default function OnboardingPage() {
       <header className="fixed top-0 left-0 right-0 border-b bg-background/80 backdrop-blur z-50">
         <div className="mx-auto flex h-16 max-w-7xl items-center justify-between px-6">
           <div className="flex items-center gap-3">
-            <Image src={logoImg} alt="Mailroid" className="h-8 w-8 object-contain" />
+            <Image src={logoImg} unoptimized alt="Mailroid" className="h-8 w-8 object-contain" />
             <span className="font-semibold tracking-tight text-lg">Mailroid</span>
           </div>
 
@@ -240,7 +240,7 @@ export default function OnboardingPage() {
       <main className="flex min-h-screen flex-col items-center justify-center px-4 pt-24 pb-12">
         <div className="flex flex-col items-center text-center">
           <div className="mb-8 flex h-24 w-24 items-center justify-center overflow-hidden rounded-3xl border bg-muted/10 shadow-sm p-4">
-            <Image src={logoImg} alt="Mailroid" priority className="h-full w-full object-contain" />
+            <Image src={logoImg} unoptimized alt="Mailroid" priority className="h-full w-full object-contain" />
           </div>
 
           <h1 className="text-4xl font-bold tracking-tight text-foreground">Connect Your Workspace</h1>

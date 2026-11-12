@@ -7,7 +7,7 @@ import { Menu, X } from "lucide-react";
 import { cn } from "@web/lib/utils";
 import { Button } from "./primitives/button";
 import { NAV_LINKS, NAV_PRICING } from "./content";
-import logo from "@web/assets/Logo/mailroid-no-background.png";
+import logo from "@web/assets/Logo/mailroid-logo-256.png";
 
 /**
  * Sticky nav. Transparent over the indigo hero, then cross-fades to a
@@ -52,7 +52,7 @@ export function Nav() {
           href="/"
           className="flex shrink-0 items-center gap-2.5 rounded-sm focus-visible:outline-2 focus-visible:outline-offset-4 focus-visible:outline-current"
         >
-          <Image src={logo} alt="" width={26} height={26} className="size-[26px] object-contain" priority />
+          <Image src={logo} unoptimized alt="" width={26} height={26} className="size-[26px] object-contain" priority />
           <span className={cn("t-lead w600 transition-colors duration-300", lifted ? "text-mr-ink" : "text-white")}>
             Mailroid
           </span>

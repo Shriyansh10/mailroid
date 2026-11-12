@@ -13,7 +13,7 @@ import {
   DialogTitle, DialogTrigger,
 } from "@web/components/ui/dialog";
 import { SettingsIcon, KeyboardIcon, PaletteIcon, CheckCircle2, RefreshCwIcon, CalendarClockIcon, TerminalIcon, BuildingIcon } from "lucide-react";
-import logoImg from "../../../assets/Logo/mailroid-no-background.png";
+import logoImg from "../../../assets/Logo/mailroid-logo-256.png";
 
 import { Input } from "@web/components/ui/input";
 import { Button } from "@web/components/ui/button";
@@ -260,7 +260,7 @@ export default function InboxLayout({ children }: { children: React.ReactNode })
       <div className="w-64 shrink-0 border-r bg-muted/10 flex flex-col px-4 py-6 gap-1 overflow-y-auto">
         {/* Sidebar Logo Area */}
         <div className="flex items-center gap-3 px-2 mb-6">
-          <Image src={logoImg} alt="Mailroid" className="h-8 w-8 object-contain" />
+          <Image src={logoImg} unoptimized alt="Mailroid" className="h-8 w-8 object-contain" />
           <span className="font-semibold tracking-tight text-lg">Mailroid</span>
         </div>
 
