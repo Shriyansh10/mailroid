@@ -7,6 +7,7 @@ import {CATEGORY_TO_GMAIL_QUERY, CATEGORY_TO_GMAIL_LABEL, ALL_CATEGORIES, extrac
 import { withGmailRetry } from './retry.ts';
 import { normalizeMessageId } from './message-id.ts';
 import { recordSyncFailure } from "./sync-failures-record.ts";
+import { refreshPlannerStats } from "./planner-stats.ts";
 import {
   markSyncQueued,
   markSyncRunning,
@@ -652,6 +653,7 @@ export async function triggerGmailSync(
       (categoryIndex) => updateSyncProgress(userId, { categoryIndex, pageToken: null }),
       force,
     );
+    await refreshPlannerStats(["message_metadata"], { userId, trigger: "sync" });
     await markSyncComplete(userId);
   } catch (err) {
     await markSyncFailed(userId);
