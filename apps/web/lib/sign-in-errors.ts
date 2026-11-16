@@ -41,6 +41,11 @@ const MESSAGES: Record<string, string> = {
 
   signup_disabled: "New sign-ups are closed at the moment.",
 
+  // Gmail/Calendar connect callback reached without a signed-in session
+  // (apps/api/src/auth/oauth-callback.ts). Nothing was connected.
+  connect_requires_sign_in:
+    "Sign in to Mailroid first, then connect your Google account from inside the app. Nothing was connected.",
+
   unable_to_create_user: OUR_SIDE,
   unable_to_create_session: OUR_SIDE,
   unable_to_get_user_info: OUR_SIDE,
