@@ -1,5 +1,5 @@
 import { db, eq, and, asc, sql } from "@repo/database";
-import { maskMailboxTextForModel, senderForModel } from "@repo/ai";
+import { maskMailboxTextForModel, senderForModel, frameToolResult } from "@repo/ai";
 import { assistantMessages } from "@repo/database/schema";
 import { messageMetadata } from "@repo/database/models/message-metadata";
 import type { EmailContext } from "./system-prompt";
@@ -343,7 +343,7 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
       };
       return {
         ...m,
-        content: `<tool_result tool="${meta.toolName ?? "unknown"}">\n${JSON.stringify(stub)}\n</tool_result>`,
+        content: frameToolResult(meta.toolName ?? "unknown", stub),
       };
     }
 
@@ -359,7 +359,7 @@ export function trimHistoryForModel(messages: DbChatMessage[]): DbChatMessage[] 
       };
       return {
         ...m,
-        content: `<tool_result tool="${meta.toolName ?? "summarizeEmail"}">\n${JSON.stringify(stub)}\n</tool_result>`,
+        content: frameToolResult(meta.toolName ?? "summarizeEmail", stub),
       };
     }
 

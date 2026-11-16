@@ -11,9 +11,12 @@ import {
   withAiUsage,
   firewall,
   toolErrorForModel,
+  frameToolResult,
+  frameToolError,
 } from "@repo/ai";
 import type { ChatMessage, ApprovalRequiredResponse } from "@repo/ai";
 import { DrizzleApprovalStore } from "@web/lib/approval-store";
+import { isConversationOwnedBy, CONVERSATION_NOT_FOUND } from "@web/lib/assistant/conversation-access";
 import { knownIntents } from "@repo/services/scheduling/memory";
 import { registerProductionExecutors } from "@web/lib/executors/index";
 import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
@@ -73,6 +76,18 @@ export async function POST(request: Request) {
 
     if (!body.approvalId) {
       return NextResponse.json({ error: "approvalId is required" }, { status: 400 });
+    }
+
+    // ── Ownership of the conversation the result is written into ──
+    // Checked before the approval is claimed or its tool executed: the result
+    // row, the history load and the Dobbie resume below all target this id.
+    // The approval itself is owner-bound separately, below.
+    if (
+      body.conversationId &&
+      (typeof body.conversationId !== "string" || !(await isConversationOwnedBy(userId, body.conversationId)))
+    ) {
+      console.warn(`[SECURITY] [api:approvals:approve] conversation access refused | user=${userId}`);
+      return NextResponse.json(CONVERSATION_NOT_FOUND, { status: 404 });
     }
 
     // ── Load pending approval ──────────────────────────────────────
@@ -148,8 +163,8 @@ export async function POST(request: Request) {
         toolCallId: approval.toolCallId,
         content:
           result.status === "success"
-            ? `<tool_result tool="${approval.toolName}">\n${JSON.stringify(safeData)}\n</tool_result>`
-            : `<tool_error tool="${approval.toolName}">\n${JSON.stringify({ error: toolErrorForModel(result.error, "Tool execution failed") })}\n</tool_error>`,
+            ? frameToolResult(approval.toolName, safeData)
+            : frameToolError(approval.toolName, { error: toolErrorForModel(result.error, "Tool execution failed") }),
         metadata: deriveToolMessageMetadata(approval.toolName, approval.args as Record<string, unknown>, result) ?? null,
       });
     }
