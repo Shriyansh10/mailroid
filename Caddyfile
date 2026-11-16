@@ -1,4 +1,28 @@
 mailroid.in {
+	# Refuse every protocol upgrade (WebSocket, h2c) before it reaches a
+	# container. Nothing in production uses one — no WebSockets, no Server
+	# Actions, no rewrites; Next's HMR socket is dev-only and never behind
+	# Caddy — and Caddy forwards upgrades by default. That default is what made
+	# the Next.js WebSocket-upgrade SSRF (CVE-2026-44578) reachable: a crafted
+	# upgrade could make mailroid-web dial internal addresses (mailroid-api,
+	# mailroid-alloy, the droplet metadata service). Next >= 16.2.5 fixes that
+	# bug; this keeps the next one in the class from having a way in.
+	# Must stay FIRST: handle blocks are first-match-wins. If a feature ever
+	# needs a WebSocket, scope an exception to its exact path above this block.
+	@upgrade header Upgrade *
+	handle @upgrade {
+		respond "Protocol upgrades are not supported" 400
+	}
+	# The HTTP/2 and HTTP/3 forms carry no Upgrade header: a WebSocket there is
+	# an extended CONNECT (RFC 8441), and a tunnel is a plain CONNECT. Caddy
+	# 2.11 forwards neither today (verified 2026-11-14: it answers CONNECT
+	# itself and sends the upstream nothing), but that is Caddy's internals,
+	# not our rule. Nothing legitimate sends CONNECT to this site.
+	@connect method CONNECT
+	handle @connect {
+		respond "Protocol upgrades are not supported" 400
+	}
+
 	# apps/web has its own /api/* route handlers (Next.js route.ts files) that
 	# must stay with the web container — these have to be matched before the
 	# catch-all /api/* below, since Caddy's handle blocks are first-match-wins
