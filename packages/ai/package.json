@@ -11,7 +11,7 @@
     "./chat/types": "./src/chat/types.ts"
   },
   "scripts": {
-    "test": "node --import tsx --test src/usage/*.test.ts src/tools/*.test.ts src/security/*.test.ts"
+    "test": "node --import tsx --test src/usage/*.test.ts src/tools/*.test.ts src/security/*.test.ts src/chat/*.test.ts"
   },
   "dependencies": {
     "@repo/database": "workspace:*",
@@ -20,7 +20,7 @@
     "dotenv": "^17.2.3",
     "openai": "^6.42.0",
     "typescript": "^6.0.3",
-    "zod": "^4.3.5"
+    "zod": "^4.6.7"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",

@@ -18,12 +18,12 @@
   "author": "",
   "license": "ISC",
   "dependencies": {
-    "better-auth": "^1.6.16",
-    "zod": "^4.3.5"
+    "better-auth": "^1.7.23",
+    "zod": "^4.6.7"
   },
   "devDependencies": {
-    "typescript": "^6.0.3",
     "@types/node": "^22.15.3",
-    "tsx": "^4.21.0"
+    "tsx": "^4.21.0",
+    "typescript": "^6.0.3"
   }
 }

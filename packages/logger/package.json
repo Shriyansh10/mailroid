@@ -21,7 +21,7 @@
     "@opentelemetry/semantic-conventions": "1.43.0",
     "@opentelemetry/winston-transport": "0.31.0",
     "winston": "^3.19.0",
-    "zod": "^4.3.5"
+    "zod": "^4.6.7"
   },
   "scripts": {
     "test": "node --import tsx --test *.test.ts",

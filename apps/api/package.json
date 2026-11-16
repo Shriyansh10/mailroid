@@ -7,7 +7,8 @@
     "start": "node dist/index.cjs",
     "dev": "dotenv -- node --import tsx --watch ./src/index.ts",
     "build": "tsup",
-    "lint": "eslint src/*"
+    "lint": "eslint src/*",
+    "test": "node --import tsx --test src/auth/oauth-callback.test.ts"
   },
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
@@ -30,12 +31,12 @@
     "@repo/trpc": "workspace:*",
     "@scalar/express-api-reference": "^0.8.30",
     "@trpc/server": "^11.8.1",
-    "better-auth": "^1.6.16",
+    "better-auth": "^1.7.23",
     "cors": "^2.8.5",
     "corsair": "0.1.74",
-    "express": "^5.2.1",
-    "inngest": "^3.22.12",
+    "express": "^5.3.0",
+    "inngest": "^3.54.2",
     "trpc-to-openapi": "^3.1.0",
-    "zod": "^4.3.5"
+    "zod": "^4.6.7"
   }
 }
