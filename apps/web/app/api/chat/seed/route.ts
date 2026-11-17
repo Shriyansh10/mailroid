@@ -3,6 +3,7 @@ import { auth } from "@web/lib/auth";
 import { db } from "@repo/database";
 import { conversations, assistantMessages } from "@repo/database/schema";
 import { getOrCreateSummary } from "@web/lib/summarize/get-or-create-summary";
+import { frameToolResult } from "@repo/ai";
 import { resolveEffectiveTimeZone } from "@web/lib/timezone";
 
 export const runtime = "nodejs";
@@ -119,7 +120,7 @@ export async function POST(request: Request) {
           conversationId: conv.id,
           role: "tool",
           toolCallId,
-          content: `<tool_result tool="summarizeEmail">\n${JSON.stringify(toolResultPayload)}\n</tool_result>`,
+          content: frameToolResult("summarizeEmail", toolResultPayload),
           metadata: {
             toolName: "summarizeEmail",
             emailRef: {

@@ -7,6 +7,7 @@ import type { ToolResult } from "../tools/types.ts";
 import { AuditEventType } from "../tools/types.ts";
 import { toOpenAiToolDefs } from "../tools/convert.ts";
 import { toolErrorForModel } from "../tools/model-masking.ts";
+import { frameToolError, frameToolResult } from "./framing.ts";
 import { firewall } from "../security/policies.ts";
 import { detectPromptInjection } from "../security/prompt-injection.ts";
 import type OpenAI from "openai";
@@ -417,11 +418,13 @@ export async function runAgentLoop(
         };
 
         // ── XML framing: separate tool data from conversation ──
-        // Prevents email/event content from being interpreted as instructions
+        // Prevents email/event content from being interpreted as instructions.
+        // framing.ts escapes `<` in the payload so mail text cannot close the
+        // frame early with a literal </tool_result>.
         const framedContent =
           safeResult.status === "success"
-            ? `<tool_result tool="${toolName}">\n${JSON.stringify(safeResult.data)}\n</tool_result>`
-            : `<tool_error tool="${toolName}">\n${JSON.stringify({ error: toolErrorForModel(safeResult.error, `Tool execution failed: ${safeResult.status}`) })}\n</tool_error>`;
+            ? frameToolResult(toolName, safeResult.data)
+            : frameToolError(toolName, { error: toolErrorForModel(safeResult.error, `Tool execution failed: ${safeResult.status}`) });
 
         const metadata = deriveToolMessageMetadata?.(toolName, args, result);
         resultMessages.push({ toolCallId: tc.id, content: framedContent, metadata });

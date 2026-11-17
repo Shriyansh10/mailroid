@@ -19,6 +19,7 @@ import {
 import { useRouter, useSearchParams } from "next/navigation";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
+import { markdownComponents } from "@web/lib/assistant/markdown-components";
 import { useConversations, useConversationMessages, useDeleteConversation } from "@web/hooks/api/assistant";
 import { useSession } from "@web/lib/auth-client";
 import { DailyUsageWidget } from "@web/components/DailyUsageWidget";
@@ -103,23 +104,8 @@ interface ChatMessage {
   };
 }
 
-// Backstop for the "never emit a link" prompt rule (system-prompt.ts): the
-// prompt tells Dobbie not to write links at all, but this is what holds if
-// the model slips or untrusted email content smuggles a URL through. Only a
-// relative /inbox/... path is ever rendered as a clickable href; anything
-// else keeps its visible text but loses the link entirely.
-const markdownComponents = {
-  a: ({ href, children, ...props }: React.AnchorHTMLAttributes<HTMLAnchorElement>) => {
-    if (typeof href === "string" && href.startsWith("/inbox/")) {
-      return (
-        <a href={href} {...props}>
-          {children}
-        </a>
-      );
-    }
-    return <>{children}</>;
-  },
-};
+// What Dobbie's Markdown may render live — links only to /inbox/..., images
+// never. See lib/assistant/markdown-components.tsx for why.
 
 // The system prompt is now built server-side only — see
 // apps/web/lib/assistant/system-prompt.ts and the Context section in

@@ -29,6 +29,7 @@ export type {
 
 export { sendChat, streamChat } from "./chat/service.ts";
 export { runAgentLoop, healConversation } from "./chat/agent.ts";
+export { frameToolResult, frameToolError, encodeFramePayload } from "./chat/framing.ts";
 export type { RunAgentLoopOptions, AgentLoopResult, AgentLoopNewMessage } from "./chat/agent.ts";
 
 export type { AgentResponse, ApprovalRequiredResponse } from "./chat/types.ts";

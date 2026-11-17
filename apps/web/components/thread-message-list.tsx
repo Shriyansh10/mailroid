@@ -7,7 +7,8 @@ import { parseAddressList } from "@web/lib/email-addresses";
 import { AttachmentList, type MessageAttachment } from "@web/components/attachment-list";
 import { useMarkAttachmentStored } from "@web/hooks/api/gmail";
 import { linkifyText } from "@web/lib/linkify";
-import { renderMailHtml, type InlineImage } from "@web/lib/mail-html";
+import { type InlineImage } from "@web/lib/mail-html";
+import { MailFrame } from "@web/components/mail-frame";
 
 export interface ThreadMessage {
   id: string;
@@ -98,42 +99,25 @@ export function formatMessageDate(dateString: string): string {
 }
 
 /**
- * One message's body: sanitised HTML when there is any, plain text otherwise.
+ * One message's body: sanitised HTML in a sandboxed frame when there is any,
+ * plain text otherwise.
  *
- * Its own component so the sanitise/rewrite pass memoizes per message. Inlined
- * in the parent's map it would re-run for every message on every expand/collapse
- * of any one of them, and this is the expensive part of rendering a thread.
+ * Its own component so the sanitise/rewrite pass memoizes per message (inside
+ * MailFrame). Inlined in the parent's map it would re-run for every message on
+ * every expand/collapse of any one of them.
  */
 function MessageBody({ msg }: { msg: ThreadMessage }) {
-  const rendered = useMemo(
-    () =>
-      msg.htmlBody
-        ? renderMailHtml(msg.htmlBody, { inlineImages: msg.inlineImages })
-        : null,
-    [msg.htmlBody, msg.inlineImages],
+  // The text body is the fallback for no HTML, and for no DOM to sanitise
+  // against (server render) — the one degradation that cannot leak markup.
+  const textBody = (
+    <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
+      {linkifyText(msg.body || msg.snippet)}
+    </div>
   );
 
-  // `rendered.html` is empty when there was no DOM to sanitise against — see
-  // renderMailHtml. Falling through to the text body is the safe branch, not a
-  // missing case.
-  if (!rendered?.html) {
-    return (
-      <div className="whitespace-pre-wrap font-sans text-sm text-foreground leading-relaxed break-words">
-        {linkifyText(msg.body || msg.snippet)}
-      </div>
-    );
-  }
+  if (!msg.htmlBody) return textBody;
 
-  return (
-      <div
-        // Links in sender HTML carry no styling of their own once sanitised, so
-        // they rendered as plain black text — indistinguishable from prose, and
-        // unclickable-looking even though they worked. These arbitrary variants
-        // style them without touching the sanitiser.
-        className="max-w-full break-words text-foreground text-sm [&_a]:text-primary [&_a]:underline [&_a]:underline-offset-2 [&_a:hover]:opacity-80 [&_a]:break-all"
-        dangerouslySetInnerHTML={{ __html: rendered.html }}
-      />
-  );
+  return <MailFrame html={msg.htmlBody} inlineImages={msg.inlineImages} fallback={textBody} />;
 }
 
 /**
@@ -153,8 +137,8 @@ function MessageBody({ msg }: { msg: ThreadMessage }) {
  * exact "expand last + any unread" rule — last-expanded/rest-collapsed is the
  * agreed simplification.
  *
- * DOMPurify sanitization stays here, non-optional — this renders untrusted
- * HTML email content via dangerouslySetInnerHTML.
+ * Untrusted HTML email content is sanitised (DOMPurify) AND isolated in a
+ * sandboxed iframe — see MailFrame. Neither layer is optional.
  */
 export function ThreadMessageList({
   messages: allMessages,

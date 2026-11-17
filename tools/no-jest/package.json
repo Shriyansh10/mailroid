@@ -1,0 +1,6 @@
+{
+  "name": "jest",
+  "version": "29.7.0",
+  "private": true,
+  "description": "Empty stand-in. @corsair-dev/gmail lists jest as a runtime dependency but never loads it; the root pnpm override points that edge here so the test runner (and its picomatch) stay out of production installs. See .github/dependency-audit.md."
+}

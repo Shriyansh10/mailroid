@@ -23,6 +23,6 @@
     "@repo/database": "workspace:*",
     "corsair": "0.1.74",
     "dotenv": "^17.2.3",
-    "zod": "^4.3.5"
+    "zod": "^4.6.7"
   }
 }

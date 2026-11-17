@@ -24,6 +24,7 @@ import { checkDailyLimit, incrementDailyLimit } from "@web/lib/limits";
 import { buildSystemPrompt } from "@web/lib/assistant/system-prompt";
 import { knownIntents } from "@repo/services/scheduling/memory";
 import { loadConversationHistory, getActiveEmailContext, trimHistoryForModel, getLatestSlotProposal, getLatestMeetingSelection } from "@web/lib/assistant/history";
+import { isConversationOwnedBy, CONVERSATION_NOT_FOUND } from "@web/lib/assistant/conversation-access";
 import { deriveToolMessageMetadata } from "@web/lib/assistant/tool-memory";
 import { getProtectedConfig } from "@repo/services/profile/index";
 import { getAiReadiness } from "@repo/services/gmail/ai-readiness";
@@ -83,6 +84,14 @@ export async function POST(request: Request) {
     }
     const userId = session.user.id;
     console.log("[api:chat] authenticated userId:", userId);
+
+    // ── Ownership of a client-supplied conversation ───────────────
+    // Before anything reads its history, writes into it or runs Dobbie on it.
+    // Same 404 for "someone else's", "deleted" and "never existed".
+    if (parsed.data.conversationId && !(await isConversationOwnedBy(userId, parsed.data.conversationId))) {
+      console.warn(`[SECURITY] [api:chat] conversation access refused | user=${userId}`);
+      return NextResponse.json(CONVERSATION_NOT_FOUND, { status: 404 });
+    }
 
     const userMessageText = parsed.data.message;
 
