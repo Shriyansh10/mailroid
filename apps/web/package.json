@@ -88,7 +88,7 @@
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
     "@types/dompurify": "^3.2.0",
-    "@types/node": "^22.15.3",
+    "@types/node": "^26.6.6",
     "@types/react": "19.2.2",
     "@types/react-dom": "19.2.2",
     "dotenv-cli": "^11.0.0",
