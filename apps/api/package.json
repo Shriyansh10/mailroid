@@ -13,13 +13,13 @@
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "@swc/core": "^1.15.8",
+    "@swc/core": "^1.16.22",
     "@types/cors": "^2.8.19",
     "@types/express": "^5.0.6",
     "@types/node": "^22.15.3",
-    "dotenv-cli": "^11.0.0",
+    "dotenv-cli": "^11.1.0",
     "tsup": "^8.5.1",
-    "tsx": "^4.21.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   },
   "dependencies": {
@@ -29,14 +29,14 @@
     "@repo/logger": "workspace:*",
     "@repo/services": "workspace:*",
     "@repo/trpc": "workspace:*",
-    "@scalar/express-api-reference": "^0.8.30",
-    "@trpc/server": "^11.8.1",
-    "better-auth": "^1.7.23",
-    "cors": "^2.8.5",
-    "corsair": "0.1.74",
+    "@scalar/express-api-reference": "^0.10.37",
+    "@trpc/server": "^11.28.2",
+    "better-auth": "^1.7.25",
+    "cors": "^2.8.6",
+    "corsair": "0.1.189",
     "express": "^5.3.0",
     "inngest": "^3.54.2",
-    "trpc-to-openapi": "^3.1.0",
+    "trpc-to-openapi": "^3.5.0",
     "zod": "^4.6.7"
   }
 }

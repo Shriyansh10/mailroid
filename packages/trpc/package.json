@@ -11,7 +11,7 @@
   "devDependencies": {
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
-    "dotenv-cli": "^11.0.0",
+    "dotenv-cli": "^11.1.0",
     "typescript": "^5.9.3"
   },
   "dependencies": {
@@ -19,9 +19,9 @@
     "@repo/logger": "workspace:*",
     "@repo/services": "workspace:*",
     "@repo/shared": "workspace:*",
-    "@trpc/client": "^11.8.1",
-    "@trpc/server": "^11.8.1",
-    "trpc-to-openapi": "^3.1.0",
+    "@trpc/client": "^11.28.2",
+    "@trpc/server": "^11.28.2",
+    "trpc-to-openapi": "^3.5.0",
     "zod": "^4.6.7"
   }
 }

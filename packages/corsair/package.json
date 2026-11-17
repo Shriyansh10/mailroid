@@ -17,11 +17,11 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@corsair-dev/cli": "^0.1.19",
-    "@corsair-dev/gmail": "^0.1.4",
-    "@corsair-dev/googlecalendar": "^0.1.3",
+    "@corsair-dev/cli": "^0.1.57",
+    "@corsair-dev/gmail": "^0.1.9",
+    "@corsair-dev/googlecalendar": "^0.1.9",
     "@repo/database": "workspace:*",
-    "corsair": "0.1.74",
+    "corsair": "0.1.189",
     "dotenv": "^17.2.3",
     "zod": "^4.6.7"
   }
