@@ -12,7 +12,7 @@
     "check-types": "next typegen && tsc --noEmit"
   },
   "dependencies": {
-    "@fullcalendar/core": "^6.1.20",
+    "@fullcalendar/core": "^7.1.5",
     "@fullcalendar/daygrid": "^6.1.20",
     "@fullcalendar/interaction": "^6.1.20",
     "@fullcalendar/react": "^6.1.20",
