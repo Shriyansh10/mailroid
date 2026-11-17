@@ -27,6 +27,9 @@ FROM base AS installer
 WORKDIR /app
 RUN addgroup --system --gid 1001 nodejs && adduser --system --uid 1001 migrateuser
 COPY --from=pruner /app/out/json/ .
+# Empty stand-in for jest; see the "@corsair-dev/*>jest" override in package.json.
+# turbo prune does not carry tools/, so it is copied explicitly.
+COPY --from=pruner /app/tools/no-jest/ ./tools/no-jest/
 # no --prod here: drizzle-kit is a devDependency and this image runs it directly
 RUN pnpm install --frozen-lockfile
 COPY --from=pruner /app/out/full/ .

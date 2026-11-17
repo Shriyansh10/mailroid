@@ -45,8 +45,24 @@ you already ship.
      90 days away).
    - Remove both entries as soon as a fix ships.
 
+   - Before accepting it, check whether the package belongs in production at
+     all. If it is only there because a dependency lists test or build tooling
+     as a runtime dependency, cutting that edge (see the next section) beats
+     an exception.
+
 Overrides are scaffolding, not permanent fixtures. Once a parent package ships
 the fix, delete its override and confirm `pnpm audit --prod` stays clean.
+
+## Dependencies removed from the production graph
+
+| Edge | Why it is wrong | How it is cut | Remove when |
+|---|---|---|---|
+| `@corsair-dev/gmail` → `jest`, `@corsair-dev/googlecalendar` → `jest` | Both list the jest test runner under `dependencies`, which pulls jest and ~250 test-only packages into every production install. Neither loads jest at runtime (checked 2026-11-17 by grepping their dist for any `jest` import). | Root `pnpm.overrides` point both edges at `tools/no-jest`, an empty package. The Dockerfiles copy that folder explicitly, because `turbo prune` does not include it. | Either plugin moves jest to `devDependencies`. Then delete the override and the folder, and drop the `COPY` line from each Dockerfile. |
+
+This first came up on 2026-11-17 with GHSA-fc5q-39xc-vjpf (picomatch ReDoS,
+high, no patched version), whose only production path was through this edge.
+pnpm 9.0.0 cannot delete a dependency with an override (`"-"` is newer), so it
+is replaced with an empty package instead.
 
 ## Accepted risks
 
@@ -70,6 +86,5 @@ known list:
 - `postcss-selector-parser` 6 (CPU), via `@tailwindcss/typography`. Runs at
   build time only.
 - `baseline-browser-mapping` (DoS on invalid input), via `next`. Build time only.
-- `deepmerge` (low), via `jest-config`, which corsair's dependency tree pulls
-  into the production graph. It is test tooling and never loaded by a served
-  process.
+- ~~`deepmerge` (low), via `jest-config`~~. Gone since 2026-11-17, when jest was
+  removed from the production graph (see above).

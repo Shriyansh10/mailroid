@@ -47,7 +47,9 @@
       "systeminformation@>=5.0.0 <5.33.16": "^5.33.16",
       "qs@>=6.0.0 <6.16.1": "^6.16.1",
       "yaml@>=2.0.0 <2.8.3": "^2.8.3",
-      "protobufjs@>=7.0.0 <7.6.5": "^7.6.5"
+      "protobufjs@>=7.0.0 <7.6.5": "^7.6.5",
+      "@corsair-dev/gmail>jest": "link:./tools/no-jest",
+      "@corsair-dev/googlecalendar>jest": "link:./tools/no-jest"
     }
   }
 }
