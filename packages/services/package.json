@@ -189,28 +189,28 @@
     "./account-deletion/detector-cron.js": "./account-deletion/detector-cron.ts"
   },
   "devDependencies": {
-    "@electric-sql/pglite": "0.3.15",
-    "@electric-sql/pglite-socket": "0.0.20",
+    "@electric-sql/pglite": "0.5.16",
+    "@electric-sql/pglite-socket": "0.2.19",
     "@repo/eslint-config": "workspace:*",
     "@repo/typescript-config": "workspace:*",
     "@types/node": "^22.15.3",
-    "@types/pg": "^8.16.0",
-    "dotenv-cli": "^11.0.0",
-    "tsx": "^4.21.0",
+    "@types/pg": "^8.23.1",
+    "dotenv-cli": "^11.1.0",
+    "tsx": "^4.23.15",
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@aws-sdk/client-s3": "^3.717.0",
+    "@aws-sdk/client-s3": "^3.1169.0",
     "@repo/ai": "workspace:*",
     "@repo/corsair": "workspace:*",
     "@repo/database": "workspace:*",
     "@repo/inngest": "workspace:*",
     "@repo/logger": "workspace:*",
     "@repo/shared": "workspace:*",
-    "corsair": "0.1.74",
+    "corsair": "0.1.189",
     "google-auth-library": "^10.5.0",
     "openai": "^6.42.0",
-    "pg": "^8.16.3",
+    "pg": "^8.23.1",
     "zod": "^4.6.7"
   },
   "scripts": {

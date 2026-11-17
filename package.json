@@ -16,9 +16,9 @@
     "test": "turbo run test"
   },
   "devDependencies": {
-    "prettier": "^3.7.4",
-    "tsx": "^4.21.0",
-    "turbo": "^2.7.2",
+    "prettier": "^3.10.1",
+    "tsx": "^4.23.15",
+    "turbo": "^2.11.11",
     "typescript": "5.9.2"
   },
   "packageManager": "pnpm@9.0.0",
@@ -26,7 +26,7 @@
     "node": ">=18"
   },
   "dependencies": {
-    "dotenv-cli": "^11.0.0"
+    "dotenv-cli": "^11.1.0"
   },
   "pnpm": {
     "overrides": {
